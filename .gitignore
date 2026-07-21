@@ -1,0 +1,8 @@
+deploy.config.ps1
+.deploy/
+*.local.ps1
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
