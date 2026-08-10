@@ -103,6 +103,8 @@ try {
 			else { Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue }
 			Invoke-CheckedCommand $DeployConfig.MysqldumpPath $dbArgs $repoRoot
 			Assert-SqlDumpFile $sqlPath
+			$sqlBytes = (Get-Item -LiteralPath $sqlPath).Length
+			Assert-AvailableDiskSpace $repoRoot ($requiredLocalBytes + [long]$sqlBytes) 'Local deployment workspace after SQL export'
 		} finally {
 			if ($null -eq $previousMysqlPassword) { Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue }
 			else { $env:MYSQL_PWD = $previousMysqlPassword }

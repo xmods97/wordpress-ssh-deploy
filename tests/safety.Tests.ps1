@@ -47,6 +47,11 @@ Describe 'Secrets and cleanup guards' {
 		$serverSource | Should Match 'cleanup_stale_temp_files'
 	}
 
+	It 'includes the SQL dump size in the post-export disk check' {
+		$deploySource | Should Match 'Local deployment workspace after SQL export'
+		$deploySource | Should Match '\$sqlBytes = \(Get-Item -LiteralPath \$sqlPath\)\.Length'
+	}
+
 	It 'removes the PID file before releasing the lock directory' {
 		$serverSource | Should Match 'rm -f "\$SERVER_LOCK_DIR/pid"'
 		$serverSource | Should Match 'rmdir "\$SERVER_LOCK_DIR"'

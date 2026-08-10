@@ -28,6 +28,7 @@ SERVER_CONFIG="$SCRIPT_DIR/server.config.sh"
 : "${SERVER_LOCK_DIR:?SERVER_LOCK_DIR is required in server.config.sh}"
 
 : "${ENVIRONMENT:?ENVIRONMENT is required}"
+: "${LOCAL_URL:?LOCAL_URL is required}"
 : "${REMOTE_URL:?REMOTE_URL is required}"
 : "${WP_DIR:?WP_DIR is required}"
 : "${REPO_DIR:?REPO_DIR is required}"
@@ -66,6 +67,23 @@ url_host() {
 	printf '%s\n' "$value"
 }
 
+assert_http_url() {
+	value="$1"
+	label="$2"
+	case "$value" in
+		http://*|https://*) ;;
+		*) fail "$label must be an absolute HTTP or HTTPS URL" ;;
+	esac
+	case "$value" in
+		*[[:space:]]*) fail "$label must not contain whitespace" ;;
+	esac
+	host="$(url_host "$value")"
+	[ -n "$host" ] || fail "$label must contain a host"
+	case "$host" in
+		*[!A-Za-z0-9.-]*) fail "$label host contains unsafe characters" ;;
+	esac
+}
+
 assert_remote_path() {
 	value="$1"
 	label="$2"
@@ -83,6 +101,7 @@ assert_temp_file() {
 	value="$1"
 	label="$2"
 	[ -z "$value" ] && return
+	assert_remote_path "$value" "$label"
 	case "$value" in
 		"$SERVER_EXPECTED_TMP_DIR"/*) ;;
 		*) fail "$label is outside the server temporary directory" ;;
@@ -119,6 +138,7 @@ assert_server_policy() {
 	case "$MIN_REMOTE_FREE_SPACE_MB" in ''|*[!0-9]*) fail "Minimum free space must be an integer" ;; esac
 	[ "$MIN_REMOTE_FREE_SPACE_MB" -ge 1 ] && [ "$MIN_REMOTE_FREE_SPACE_MB" -le 1048576 ] || fail "Minimum free space is outside the allowed range"
 	[ "$(normalize_url "$REMOTE_URL")" = "$(normalize_url "$SERVER_EXPECTED_URL")" ] || fail "Remote URL does not match server policy"
+	assert_http_url "$LOCAL_URL" LOCAL_URL
 	[ "$EXPECTED_REMOTE_DOMAIN" = "$(url_host "$SERVER_EXPECTED_URL")" ] || fail "Expected domain does not match server policy"
 	assert_remote_path "$WP_DIR" WP_DIR
 	assert_remote_path "$REPO_DIR" REPO_DIR
@@ -155,13 +175,16 @@ cleanup_exit() {
 	status=$?
 	trap - 0 1 2 15
 	if [ -n "$SQL_FILE" ]; then
-		case "$SQL_FILE" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$SQL_FILE" ;; esac
+		assert_temp_file "$SQL_FILE" SQL_FILE
+		rm -f "$SQL_FILE"
 	fi
 	if [ -n "$UPLOADS_ZIP" ]; then
-		case "$UPLOADS_ZIP" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$UPLOADS_ZIP" ;; esac
+		assert_temp_file "$UPLOADS_ZIP" UPLOADS_ZIP
+		rm -f "$UPLOADS_ZIP"
 	fi
 	if [ -n "$ARCHIVE_LISTING" ]; then
-		case "$ARCHIVE_LISTING" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$ARCHIVE_LISTING" ;; esac
+		assert_temp_file "$ARCHIVE_LISTING" ARCHIVE_LISTING
+		rm -f "$ARCHIVE_LISTING"
 	fi
 	if [ -n "$TRANSIENT_NEW" ]; then
 		case "$TRANSIENT_NEW" in "$WP_DIR"/*) rm -rf "$TRANSIENT_NEW" ;; esac
@@ -181,6 +204,9 @@ cleanup_exit() {
 	fi
 	exit "$status"
 }
+
+assert_temp_file "$SQL_FILE" SQL_FILE
+assert_temp_file "$UPLOADS_ZIP" UPLOADS_ZIP
 trap cleanup_exit 0 1 2 15
 
 acquire_lock() {
