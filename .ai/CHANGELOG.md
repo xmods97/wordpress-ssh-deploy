@@ -62,8 +62,14 @@ Files: `deploy.ps1`, `server-deploy.sh`, `tests/server-safety.smoke.sh`, `tests/
 Check: 40 тестов пройдено, 0 ошибок; `git diff --check` пройден.
 Risk: commit, push, merge, staging и production deploy не выполнялись.
 
-2026-08-10 | DEPLOY-REVIEW-FIXES-TRAP | CODEX | COMMITTED | Scoped deployment safety fixes committed locally as `caf59d5` on `codex/stages-1-5-review-fixes`.
+2026-08-10 | DEPLOY-REVIEW-FIXES-TRAP | CODEX | COMMITTED | Scoped deployment safety fixes committed locally as `da13e48` on `codex/stages-1-5-review-fixes`.
 
 Files: six scoped files from the final checkpoint.
 Check: commit created successfully; no push, merge, staging environment, or production deploy.
 Risk: local branch has not been pushed or merged.
+
+2026-08-10 | DEPLOY-REVIEW-FIXES-TRAP | CODEX | DOCUMENTATION_COMMITTED | Project instructions, handoff, and accepted review limitations committed as `69ddc47`.
+
+Files: `.ai/`, `AGENTS.md`, `CLAUDE.md`, `FIRST_RUN_INSTRUCTIONS.md`, `docs/RISKS-RU.md`.
+Check: staged documentation diff passed `git diff --check`.
+Risk: local branch has not been pushed or merged; main remains at the earlier prototype.

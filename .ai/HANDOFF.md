@@ -20,6 +20,7 @@ TARGET_BRANCH: codex/stages-1-5-review-fixes
 
 - Этапы 1–5 реализованы в родительском commit `938e4ce`.
 - Review fixes для cleanup trap, LOCAL_URL и SQL-disk guard проверены 40 тестами и закоммичены локально.
+- Project instructions and accepted risks are tracked in the follow-up documentation commit `69ddc47`.
 
 ## Изменённые файлы
 

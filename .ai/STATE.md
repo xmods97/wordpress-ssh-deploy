@@ -112,7 +112,7 @@ STATUS: CHECKPOINT_COMPLETE
 BRANCH: codex/stages-1-5-review-fixes
 WORKTREE: dedicated Codex worktree (local path intentionally omitted)
 BASE_COMMIT: 938e4ce
-LAST_SYNC_COMMIT: caf59d5
+LAST_SYNC_COMMIT: 69ddc47
 WORK_LOCK: CODEX
 
 IN_SCOPE:
@@ -136,7 +136,7 @@ RESULT:
 - temporary file paths are validated before trap installation and again inside cleanup
 - canary outside the temporary directory survives a failed validation
 - LOCAL_URL rejection cases are covered by the shell smoke test
-- scoped changes committed locally as caf59d5
+- scoped deployment changes committed as da13e48; project controls and risk registry committed as 69ddc47
 
 CHECKS:
 - 40 tests passed, 0 failed; git diff --check passed
