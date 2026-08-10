@@ -110,7 +110,7 @@ REVIEWER: CLAUDE
 STATUS: CHECKPOINT_COMPLETE
 
 BRANCH: codex/stages-1-5-review-fixes
-WORKTREE: C:\Users\xmods\.codex\worktrees\70df\Scripts of deploy
+WORKTREE: dedicated Codex worktree (local path intentionally omitted)
 BASE_COMMIT: 938e4ce
 LAST_SYNC_COMMIT: caf59d5
 WORK_LOCK: CODEX
