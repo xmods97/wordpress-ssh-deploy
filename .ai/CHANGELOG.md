@@ -73,3 +73,9 @@ Risk: local branch has not been pushed or merged.
 Files: `.ai/`, `AGENTS.md`, `CLAUDE.md`, `FIRST_RUN_INSTRUCTIONS.md`, `docs/RISKS-RU.md`.
 Check: staged documentation diff passed `git diff --check`.
 Risk: local branch has not been pushed or merged; main remains at the earlier prototype.
+
+2026-08-10 | DEPLOY-REVIEW-FIXES-TRAP | CODEX | RISK_REGISTER_CLARIFIED | Уточнена запись R-018: структурная проверка дампа и `gzip -t` выполняются, но фактическая восстановимость backup не подтверждается.
+
+Files: `docs/RISKS-RU.md`, `.ai/CHANGELOG.md`.
+Check: `git diff --check`.
+Risk: изменение не закоммичено и не опубликовано.
