@@ -19,6 +19,7 @@ SERVER_CONFIG="$SCRIPT_DIR/server.config.sh"
 : "${SERVER_EXPECTED_TMP_DIR:?SERVER_EXPECTED_TMP_DIR is required in server.config.sh}"
 : "${SERVER_EXPECTED_BACKUP_DIR:?SERVER_EXPECTED_BACKUP_DIR is required in server.config.sh}"
 : "${SERVER_EXPECTED_DB_NAME:?SERVER_EXPECTED_DB_NAME is required in server.config.sh}"
+: "${SERVER_EXPECTED_DB_TABLE_PREFIX:?SERVER_EXPECTED_DB_TABLE_PREFIX is required in server.config.sh}"
 : "${SERVER_GIT_SSH_KEY:?SERVER_GIT_SSH_KEY is required in server.config.sh}"
 : "${SERVER_PHP_BIN:?SERVER_PHP_BIN is required in server.config.sh}"
 : "${SERVER_WP_CLI_BIN:?SERVER_WP_CLI_BIN is required in server.config.sh}"
@@ -35,6 +36,7 @@ SERVER_CONFIG="$SCRIPT_DIR/server.config.sh"
 : "${BACKUP_DIR:?BACKUP_DIR is required}"
 : "${EXPECTED_WP_DIR:?EXPECTED_WP_DIR is required}"
 : "${EXPECTED_DB_NAME:?EXPECTED_DB_NAME is required}"
+: "${EXPECTED_DB_TABLE_PREFIX:?EXPECTED_DB_TABLE_PREFIX is required}"
 : "${EXPECTED_REMOTE_DOMAIN:?EXPECTED_REMOTE_DOMAIN is required}"
 : "${SYNC_PATHS:?SYNC_PATHS is required}"
 : "${GIT_SSH_KEY:?GIT_SSH_KEY is required}"
@@ -110,6 +112,13 @@ assert_temp_file() {
 
 wp_cli() { "$PHP_BIN" "$WP_CLI_BIN" --path="$WP_DIR" "$@"; }
 wp_config_value() { wp_cli config get "$1" --type=constant; }
+wp_config_variable() { wp_cli config get "$1" --type=variable; }
+
+assert_table_prefix() {
+	value="$1"
+	label="$2"
+	case "$value" in ''|*[!A-Za-z0-9_]*) fail "$label contains unsupported characters" ;; esac
+}
 
 assert_mode() {
 	case "$DEPLOY_MODE" in preflight|code|db|full) ;; *) fail "Unknown DEPLOY_MODE" ;; esac
@@ -126,6 +135,7 @@ assert_server_policy() {
 	[ "$REPO_DIR" = "$SERVER_EXPECTED_REPO_DIR" ] || fail "Repository path does not match server policy"
 	[ "$BACKUP_DIR" = "$SERVER_EXPECTED_BACKUP_DIR" ] || fail "Backup path does not match server policy"
 	[ "$EXPECTED_DB_NAME" = "$SERVER_EXPECTED_DB_NAME" ] || fail "Expected DB name does not match server policy"
+	[ "$EXPECTED_DB_TABLE_PREFIX" = "$SERVER_EXPECTED_DB_TABLE_PREFIX" ] || fail "Expected table prefix does not match server policy"
 	[ "$GIT_SSH_KEY" = "$SERVER_GIT_SSH_KEY" ] || fail "Git SSH key path does not match server policy"
 	[ "$PHP_BIN" = "$SERVER_PHP_BIN" ] || fail "PHP path does not match server policy"
 	[ "$WP_CLI_BIN" = "$SERVER_WP_CLI_BIN" ] || fail "WP-CLI path does not match server policy"
@@ -139,6 +149,8 @@ assert_server_policy() {
 	[ "$MIN_REMOTE_FREE_SPACE_MB" -ge 1 ] && [ "$MIN_REMOTE_FREE_SPACE_MB" -le 1048576 ] || fail "Minimum free space is outside the allowed range"
 	[ "$(normalize_url "$REMOTE_URL")" = "$(normalize_url "$SERVER_EXPECTED_URL")" ] || fail "Remote URL does not match server policy"
 	assert_http_url "$LOCAL_URL" LOCAL_URL
+	assert_table_prefix "$SERVER_EXPECTED_DB_TABLE_PREFIX" SERVER_EXPECTED_DB_TABLE_PREFIX
+	assert_table_prefix "$EXPECTED_DB_TABLE_PREFIX" EXPECTED_DB_TABLE_PREFIX
 	[ "$EXPECTED_REMOTE_DOMAIN" = "$(url_host "$SERVER_EXPECTED_URL")" ] || fail "Expected domain does not match server policy"
 	assert_remote_path "$WP_DIR" WP_DIR
 	assert_remote_path "$REPO_DIR" REPO_DIR
@@ -169,6 +181,8 @@ assert_wordpress_target() {
 
 	actual_database="$(wp_config_value DB_NAME)"
 	[ "$actual_database" = "$SERVER_EXPECTED_DB_NAME" ] || fail "WordPress DB name does not match server policy"
+	actual_table_prefix="$(wp_config_variable table_prefix)"
+	[ "$actual_table_prefix" = "$SERVER_EXPECTED_DB_TABLE_PREFIX" ] || fail "WordPress table prefix does not match server policy"
 }
 
 cleanup_exit() {
@@ -241,6 +255,21 @@ assert_sql_dump() {
 	[ -s "$file" ] || fail "SQL dump is empty or missing"
 	grep -Eq '^-- (MySQL|MariaDB) dump' "$file" || fail "SQL dump header is invalid"
 	grep -Eq '^(CREATE TABLE|INSERT INTO|-- Table structure for table)' "$file" || fail "SQL dump contains no table structure"
+}
+
+assert_sql_dump_table_prefix() {
+	file="$1"
+	prefix="$2"
+	awk -v prefix="$prefix" '
+		/^CREATE TABLE( IF NOT EXISTS)? `/ {
+			found=1
+			table=$0
+			sub(/^CREATE TABLE( IF NOT EXISTS)? `/, "", table)
+			sub(/`.*/, "", table)
+			if (index(table, prefix) != 1) invalid=1
+		}
+		END { exit (!found || invalid) }
+	' "$file" || fail "SQL dump table prefix does not match server policy"
 }
 
 update_repository() {
@@ -356,6 +385,7 @@ mysql_import_file() {
 import_database() {
 	require_cmd mysql
 	assert_sql_dump "$SQL_FILE"
+	assert_sql_dump_table_prefix "$SQL_FILE" "$SERVER_EXPECTED_DB_TABLE_PREFIX"
 	name="$(wp_config_value DB_NAME)"
 	user="$(wp_config_value DB_USER)"
 	pass="$(wp_config_value DB_PASSWORD)"
@@ -440,6 +470,7 @@ case "$DEPLOY_MODE" in
 	db|full)
 		require_cmd wc
 		assert_sql_dump "$SQL_FILE"
+		assert_sql_dump_table_prefix "$SQL_FILE" "$SERVER_EXPECTED_DB_TABLE_PREFIX"
 		incoming_kb="$(wc -c < "$SQL_FILE" | awk '{ print int(($1 + 1023) / 1024) }')"
 		case "$incoming_kb" in ''|*[!0-9]*) fail "Incoming SQL size check failed" ;; esac
 		assert_free_space_kb "$BACKUP_DIR" "$incoming_kb" "Backup filesystem"

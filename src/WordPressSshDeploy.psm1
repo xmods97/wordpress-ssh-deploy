@@ -102,6 +102,74 @@ function Assert-SqlDumpFile {
 	}
 }
 
+function Assert-SqlDumpTablePrefix {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory = $true)] [string] $Path,
+		[Parameter(Mandatory = $true)] [string] $ExpectedPrefix
+	)
+
+	if ($ExpectedPrefix -notmatch '^[A-Za-z0-9_]+$') {
+		throw 'Expected SQL table prefix contains unsupported characters.'
+	}
+	$reader = $null
+	$found = $false
+	try {
+		$reader = [IO.File]::OpenText($Path)
+		while (($line = $reader.ReadLine()) -ne $null) {
+			if ($line -notmatch '^CREATE TABLE(?: IF NOT EXISTS)? `([^`]+)`') { continue }
+			$found = $true
+			$tableName = $Matches[1]
+			if (-not $tableName.StartsWith($ExpectedPrefix, [StringComparison]::Ordinal)) {
+				throw "SQL dump table prefix mismatch: expected '$ExpectedPrefix', found '$tableName'."
+			}
+		}
+	} finally {
+		if ($reader) { $reader.Dispose() }
+	}
+	if (-not $found) {
+		throw 'SQL dump contains no CREATE TABLE statements for table-prefix validation.'
+	}
+}
+
+function Normalize-SqlDumpTablePrefix {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory = $true)] [string] $Path,
+		[Parameter(Mandatory = $true)] [string] $ExpectedPrefix,
+		[Parameter(Mandatory = $true)] [int] $ExpectedTableCount
+	)
+
+	if ($ExpectedPrefix -notmatch '^[A-Za-z0-9_]+$') {
+		throw 'Expected SQL table prefix contains unsupported characters.'
+	}
+	if ($ExpectedTableCount -lt 1) {
+		throw 'Expected SQL table count must be positive.'
+	}
+
+	$sourcePrefix = $ExpectedPrefix.ToLowerInvariant()
+	$contents = [IO.File]::ReadAllText($Path)
+	$createMatches = [regex]::Matches($contents, '(?m)^CREATE TABLE(?: IF NOT EXISTS)? `([^`]+)`')
+	if ($createMatches.Count -ne $ExpectedTableCount) {
+		throw "SQL dump table count mismatch: expected $ExpectedTableCount, found $($createMatches.Count)."
+	}
+
+	$tableNames = @($createMatches | ForEach-Object { $_.Groups[1].Value })
+	$targetCount = @($tableNames | Where-Object { $_.StartsWith($ExpectedPrefix, [StringComparison]::Ordinal) }).Count
+	$sourceCount = @($tableNames | Where-Object { $_.StartsWith($sourcePrefix, [StringComparison]::Ordinal) }).Count
+	if ($targetCount -eq $ExpectedTableCount) {
+		Assert-SqlDumpTablePrefix $Path $ExpectedPrefix
+		return
+	}
+	if ([string]::Equals($sourcePrefix, $ExpectedPrefix, [StringComparison]::Ordinal) -or $sourceCount -ne $ExpectedTableCount) {
+		throw "SQL dump contains unexpected table identifiers for expected prefix '$ExpectedPrefix'."
+	}
+
+	$normalized = $contents.Replace('`' + $sourcePrefix, '`' + $ExpectedPrefix)
+	[IO.File]::WriteAllText($Path, $normalized, (New-Object Text.UTF8Encoding($false)))
+	Assert-SqlDumpTablePrefix $Path $ExpectedPrefix
+}
+
 function Assert-ZipArchiveFile {
 	[CmdletBinding()]
 	param([Parameter(Mandatory = $true)] [string] $Path)
@@ -154,6 +222,7 @@ function New-RemoteDeployCommand {
 		@('WP_CLI_BIN', $Configuration.RemoteWpCliPath),
 		@('EXPECTED_WP_DIR', $Configuration.ExpectedRemoteWpPath),
 		@('EXPECTED_DB_NAME', $Configuration.ExpectedRemoteDbName),
+		@('EXPECTED_DB_TABLE_PREFIX', $Configuration.ExpectedDbTablePrefix),
 		@('SYNC_PATHS', ($Configuration.SyncPaths -join ',')),
 		@('DEPLOY_MODE', $DeployMode),
 		@('SQL_FILE', $SqlFile),
@@ -256,7 +325,8 @@ function Get-DeployConfigurationErrors {
 		'RemoteWpCliPath',
 		'ExpectedRemoteDomain',
 		'ExpectedRemoteWpPath',
-		'ExpectedRemoteDbName'
+		'ExpectedRemoteDbName',
+		'ExpectedDbTablePrefix'
 	)
 	$optionalKeys = @('LocalDbPassword', 'SshKeyPath')
 	$otherRequiredKeys = @('SshPort', 'KeepBackups', 'MinimumLocalFreeSpaceMB', 'MinimumRemoteFreeSpaceMB', 'SyncPaths')
@@ -324,6 +394,9 @@ function Get-DeployConfigurationErrors {
 	}
 	if ($Configuration.ExpectedRemoteDbName -notmatch '^[A-Za-z0-9_]+$') {
 		Add-ValidationError $errors 'ExpectedRemoteDbName contains unsupported characters.'
+	}
+	if ($Configuration.ExpectedDbTablePrefix -notmatch '^[A-Za-z0-9_]+$') {
+		Add-ValidationError $errors 'ExpectedDbTablePrefix contains unsupported characters.'
 	}
 
 	foreach ($key in @('RemoteWpPath', 'RemoteRepoPath', 'RemoteRunnerPath', 'RemoteTmpPath', 'RemoteBackups', 'RemoteGitSshKey', 'RemotePhpPath', 'RemoteWpCliPath', 'ExpectedRemoteWpPath')) {
@@ -437,4 +510,4 @@ function Assert-DeployModeAllowed {
 	}
 }
 
-Export-ModuleMember -Function Get-DeployConfigurationErrors, Assert-DeployConfiguration, Assert-DeployModeAllowed, ConvertTo-ShSingleQuotedString, New-RemoteDeployCommand, Invoke-CheckedCommand, Invoke-CommandOutput, Get-DirectoryContentSizeBytes, Assert-AvailableDiskSpace, Assert-SqlDumpFile, Assert-ZipArchiveFile
+Export-ModuleMember -Function Get-DeployConfigurationErrors, Assert-DeployConfiguration, Assert-DeployModeAllowed, ConvertTo-ShSingleQuotedString, New-RemoteDeployCommand, Invoke-CheckedCommand, Invoke-CommandOutput, Get-DirectoryContentSizeBytes, Assert-AvailableDiskSpace, Assert-SqlDumpFile, Assert-SqlDumpTablePrefix, Normalize-SqlDumpTablePrefix, Assert-ZipArchiveFile

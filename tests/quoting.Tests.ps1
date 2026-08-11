@@ -21,6 +21,7 @@ Describe 'POSIX shell quoting' {
 		$command = New-RemoteDeployCommand $validConfiguration 'db' '/srv/tmp/example-deploy/a file.sql' '/srv/tmp/example-deploy/u.zip'
 		$command | Should Match "ENVIRONMENT='staging'"
 		$command | Should Match "EXPECTED_REMOTE_DOMAIN='staging\.example\.com'"
+		$command | Should Match "EXPECTED_DB_TABLE_PREFIX='wp_'"
 		$command | Should Match "DEPLOY_MODE='db'"
 		$command | Should Match "SQL_FILE='/srv/tmp/example-deploy/a file\.sql'"
 		$command | Should Match "sh '/usr/local/libexec/wordpress-ssh-deploy/example-site/server-deploy\.sh'$"

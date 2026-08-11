@@ -37,6 +37,7 @@ $DeployConfig = @{
 	ExpectedRemoteDomain = 'staging.example.com'
 	ExpectedRemoteWpPath = '/var/www/staging.example.com'
 	ExpectedRemoteDbName = 'wordpress_staging'
+	ExpectedDbTablePrefix = 'wp_'
 
 	# Paths are relative to the repository and copied into WordPress.
 	SyncPaths = @(

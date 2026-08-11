@@ -10,6 +10,9 @@ case " $* " in
 	*' config get DB_NAME '*)
 		printf '%s\n' "${FIXTURE_DB_NAME:-wordpress_production}"
 		;;
+	*' config get table_prefix '*)
+		printf '%s\n' "${FIXTURE_TABLE_PREFIX:-wp_}"
+		;;
 	*' config get DB_USER '*)
 		printf '%s\n' 'fixture_user'
 		;;

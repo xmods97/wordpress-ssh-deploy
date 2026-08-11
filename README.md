@@ -43,8 +43,9 @@ Remote Linux host:
 2. Copy `deploy.config.example.ps1` to `deploy.config.ps1`.
 3. Select the target `Environment`: `development`, `staging`, or `production`.
 4. Fill every path, host, database safety lock, and `SyncPaths` entry.
-5. Set `ExpectedRemoteDomain`, `ExpectedRemoteWpPath`, and
-   `ExpectedRemoteDbName` to the exact expected target values.
+5. Set `ExpectedRemoteDomain`, `ExpectedRemoteWpPath`,
+   `ExpectedRemoteDbName`, and `ExpectedDbTablePrefix` to the exact expected
+   target values.
 6. Keep `deploy.config.ps1` private. It is excluded by `.gitignore`.
 7. Clone the same repository on the remote host.
 8. Create a protected runner directory outside the Git checkout, for example
@@ -78,12 +79,19 @@ Existing private configurations must add:
 ```powershell
 Environment = 'staging'
 ExpectedRemoteDomain = 'staging.example.com'
+ExpectedDbTablePrefix = 'wp_'
 MinimumLocalFreeSpaceMB = 1024
 MinimumRemoteFreeSpaceMB = 1024
 ```
 
 The private server policy independently verifies the environment, URL,
-WordPress path, repository path, temporary path, backup path, and database name.
+WordPress path, repository path, temporary path, backup path, database name,
+and WordPress table prefix (including its exact case).
+On Windows, the database export may lowercase table identifiers. For the staging
+fixture, `db` mode accepts exactly twelve expected lower-case identifiers and
+normalizes only the quoted `kqsmtmooh_` prefix to the configured `kqSmtmoOH_`
+prefix before the final validation. Unexpected table names or counts fail the
+deployment.
 It also pins the Git SSH key, PHP/WP-CLI executables, synchronized paths, backup
 retention, and lock location. Client-provided expected values cannot replace
 this policy. Production accepts only `code`; both local and remote scripts
@@ -133,6 +141,13 @@ uploads are staged in temporary directories and swapped only after preparation.
 If a database import fails, the server immediately attempts to restore the
 backup created in the same operation and preserves that backup for manual
 recovery if rollback also fails.
+
+### Staging test marker
+
+Before every approved staging deploy test that changes the database, update the
+local fixture homepage with a unique current-stage marker, for example
+`STAGING-DB-AFTERMATH-SAFETY-20260811-01`. After deployment, verify that exact
+marker in the public staging homepage. Never use this procedure on production.
 
 ## Tests
 

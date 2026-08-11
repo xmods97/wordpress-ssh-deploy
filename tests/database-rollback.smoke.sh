@@ -42,6 +42,7 @@ output="$(
 	BACKUP_DIR="$target_root/backups" \
 	EXPECTED_WP_DIR="$target_root/wp" \
 	EXPECTED_DB_NAME='wordpress_staging' \
+	EXPECTED_DB_TABLE_PREFIX='wp_' \
 	EXPECTED_REMOTE_DOMAIN='staging.example.com' \
 	SYNC_PATHS='wp-content/themes/example-theme' \
 	GIT_SSH_KEY="$target_root/id_ed25519" \
@@ -64,5 +65,44 @@ esac
 [ ! -e "$incoming" ] || { echo 'Incoming SQL was not cleaned' >&2; exit 1; }
 [ ! -d "$target_root/lock/deploy.lock" ] || { echo 'Lock was not cleaned' >&2; exit 1; }
 find "$target_root/backups" -type f -name 'db-*.sql' -size +0c | grep -q . || { echo 'Validated rollback backup was not preserved' >&2; exit 1; }
+
+mismatched="$target_root/tmp/local-db-mismatched-prefix.sql"
+cat > "$mismatched" <<'SQL'
+-- MySQL dump 10.13  Distrib fixture
+CREATE TABLE `other_options` (`option_id` bigint NOT NULL);
+SQL
+
+output="$(
+	PATH="$target_root/bin:/usr/bin:/bin" \
+	FIXTURE_ROOT="$target_root" \
+	FIXTURE_ENVIRONMENT='staging' \
+	FIXTURE_URL='https://staging.example.com' \
+	FIXTURE_DB_NAME='wordpress_staging' \
+	ENVIRONMENT='staging' \
+	LOCAL_URL='http://example.test' \
+	REMOTE_URL='https://staging.example.com' \
+	WP_DIR="$target_root/wp" \
+	REPO_DIR="$target_root/repo" \
+	BACKUP_DIR="$target_root/backups" \
+	EXPECTED_WP_DIR="$target_root/wp" \
+	EXPECTED_DB_NAME='wordpress_staging' \
+	EXPECTED_DB_TABLE_PREFIX='wp_' \
+	EXPECTED_REMOTE_DOMAIN='staging.example.com' \
+	SYNC_PATHS='wp-content/themes/example-theme' \
+	GIT_SSH_KEY="$target_root/id_ed25519" \
+	PHP_BIN="$target_root/bin/php" \
+	WP_CLI_BIN="$target_root/bin/wp" \
+	KEEP_BACKUPS='10' \
+	MIN_REMOTE_FREE_SPACE_MB='1' \
+	DEPLOY_MODE='db' \
+	SQL_FILE="$mismatched" \
+	UPLOADS_ZIP='' \
+	sh "$fixture_dir/server-deploy.sh" 2>&1 || true
+)"
+case "$output" in
+	*'SQL dump table prefix does not match server policy'*) ;;
+	*) echo 'Incoming SQL table-prefix mismatch was not rejected correctly' >&2; exit 1 ;;
+esac
+[ "$(wc -l < "$target_root/mysql-calls.log")" -eq 2 ] || { echo 'Prefix rejection reached MySQL unexpectedly' >&2; exit 1; }
 
 echo 'Database rollback after failed import: OK'

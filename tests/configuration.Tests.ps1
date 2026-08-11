@@ -37,6 +37,12 @@ Describe 'Deploy configuration validation' {
 		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'ExpectedRemoteDomain'
 	}
 
+	It 'rejects an unsafe expected database table prefix' {
+		$config = $validConfiguration.Clone()
+		$config.ExpectedDbTablePrefix = 'wp-unsafe'
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'ExpectedDbTablePrefix'
+	}
+
 	It 'rejects unsafe SyncPaths values' {
 		foreach ($path in @('.', '..', '../theme', '/absolute', 'folder/../theme', '.git', 'wp-config.php', 'folder\theme')) {
 			$config = $validConfiguration.Clone()
@@ -73,5 +79,57 @@ Describe 'Deploy configuration validation' {
 		$errors = (Get-DeployConfigurationErrors $config) -join "`n"
 		$errors | Should Match 'MinimumLocalFreeSpaceMB must be an integer'
 		$errors | Should Match 'MinimumRemoteFreeSpaceMB must be an integer'
+	}
+}
+
+Describe 'SQL table-prefix validation' {
+	It 'accepts SQL that creates only the expected prefix' {
+		$file = [IO.Path]::GetTempFileName()
+		try {
+			[IO.File]::WriteAllText($file, "CREATE TABLE ``wp_options`` (id int);`nCREATE TABLE ``wp_posts`` (id int);", (New-Object Text.UTF8Encoding($false)))
+			{ Assert-SqlDumpTablePrefix $file 'wp_' } | Should Not Throw
+		} finally {
+			Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+		}
+	}
+
+	It 'rejects a SQL table prefix with a different case or name' {
+		$file = [IO.Path]::GetTempFileName()
+		try {
+			[IO.File]::WriteAllText($file, 'CREATE TABLE `kqsmtmooh_options` (id int);', (New-Object Text.UTF8Encoding($false)))
+			$message = ''
+			try { Assert-SqlDumpTablePrefix $file 'kqSmtmoOH_' } catch { $message = $_.Exception.Message }
+			$message | Should Match 'SQL dump table prefix mismatch'
+		} finally {
+			Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+		}
+	}
+
+	It 'normalizes the Windows table prefix only for the expected table set' {
+		$file = [IO.Path]::GetTempFileName()
+		try {
+			$sql = (1..12 | ForEach-Object { "CREATE TABLE ``kqsmtmooh_table$_`` (id int);" }) -join "`n"
+			[IO.File]::WriteAllText($file, $sql, (New-Object Text.UTF8Encoding($false)))
+			Normalize-SqlDumpTablePrefix $file 'kqSmtmoOH_' 12
+			$content = [IO.File]::ReadAllText($file)
+			$content | Should Not Match '``kqsmtmooh_'
+			$content.Contains('`kqSmtmoOH_table12') | Should Be $true
+		} finally {
+			Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+		}
+	}
+
+	It 'rejects a Windows dump with a foreign table identifier' {
+		$file = [IO.Path]::GetTempFileName()
+		try {
+			$sql = (1..11 | ForEach-Object { "CREATE TABLE ``kqsmtmooh_table$_`` (id int);" }) -join "`n"
+			$sql += "`nCREATE TABLE ``other_table`` (id int);"
+			[IO.File]::WriteAllText($file, $sql, (New-Object Text.UTF8Encoding($false)))
+			$message = ''
+			try { Normalize-SqlDumpTablePrefix $file 'kqSmtmoOH_' 12 } catch { $message = $_.Exception.Message }
+			$message | Should Match 'unexpected table identifiers'
+		} finally {
+			Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+		}
 	}
 }

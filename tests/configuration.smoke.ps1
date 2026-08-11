@@ -21,6 +21,10 @@ $badSync = $DeployConfig.Clone()
 $badSync.SyncPaths = @('.')
 $cases += ,@($badSync, 'Unsafe SyncPaths')
 
+$badTablePrefix = $DeployConfig.Clone()
+$badTablePrefix.ExpectedDbTablePrefix = 'wp-unsafe'
+$cases += ,@($badTablePrefix, 'ExpectedDbTablePrefix')
+
 $unknown = $DeployConfig.Clone()
 $unknown.TypoValue = 'x'
 $cases += ,@($unknown, 'Unknown configuration key')
@@ -43,7 +47,7 @@ foreach ($case in $cases) {
 		throw "Expected validation failure not found: $($case[1])"
 	}
 }
-Write-Output 'Invalid cases rejected: 7/7'
+Write-Output 'Invalid cases rejected: 8/8'
 
 $nonDictionary = @(Get-DeployConfigurationErrors -Configuration ([pscustomobject] @{}))
 if (-not ($nonDictionary -match 'IDictionary')) {

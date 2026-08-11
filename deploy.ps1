@@ -103,6 +103,7 @@ try {
 			else { Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue }
 			Invoke-CheckedCommand $DeployConfig.MysqldumpPath $dbArgs $repoRoot
 			Assert-SqlDumpFile $sqlPath
+			Normalize-SqlDumpTablePrefix $sqlPath $DeployConfig.ExpectedDbTablePrefix 12
 			$sqlBytes = (Get-Item -LiteralPath $sqlPath).Length
 			Assert-AvailableDiskSpace $repoRoot ($requiredLocalBytes + [long]$sqlBytes) 'Local deployment workspace after SQL export'
 		} finally {

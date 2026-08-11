@@ -19,6 +19,7 @@ run_server() {
 	BACKUP_DIR='/tmp/wordpress-ssh-deploy-fixture/backups' \
 	EXPECTED_WP_DIR='/tmp/wordpress-ssh-deploy-fixture/wp' \
 	EXPECTED_DB_NAME='wordpress_production' \
+	EXPECTED_DB_TABLE_PREFIX="${5-wp_}" \
 	EXPECTED_REMOTE_DOMAIN='example.com' \
 	SYNC_PATHS='wp-content/themes/example-theme' \
 	GIT_SSH_KEY='/tmp/wordpress-ssh-deploy-fixture/id_ed25519' \
@@ -53,6 +54,12 @@ case "$output" in
 	*) echo "Server environment mismatch was not rejected correctly" >&2; exit 1 ;;
 esac
 
+output="$(run_server production code '' 'http://local.example.test' 'other_' || true)"
+case "$output" in
+	*'Expected table prefix does not match server policy'*) ;;
+	*) echo 'Client table-prefix mismatch was not rejected correctly' >&2; exit 1 ;;
+esac
+
 check_local_url_rejection '' 'LOCAL_URL is required'
 check_local_url_rejection 'ftp://example.test' 'must be an absolute HTTP or HTTPS URL'
 check_local_url_rejection 'http://exa mple.test' 'must not contain whitespace'
@@ -63,6 +70,12 @@ mkdir -p "$target_root/wp/wp-content" "$target_root/repo/.git" "$target_root/tmp
 : > "$target_root/id_ed25519"
 cp "$repo_dir/tests/fixtures/fake-php.sh" "$target_root/bin/php"
 : > "$target_root/bin/wp"
+
+output="$(FIXTURE_TABLE_PREFIX='other_' run_server production code || true)"
+case "$output" in
+	*'WordPress table prefix does not match server policy'*) ;;
+	*) echo 'WordPress table-prefix mismatch was not rejected correctly' >&2; exit 1 ;;
+esac
 
 canary="$target_root/outside-canary"
 printf '%s\n' 'must-survive' > "$canary"
