@@ -605,11 +605,11 @@ RESULT:
 - implemented persistent deploy-time normalization for the exact lower-case Windows prefix and exported regression coverage
 
 CHECKS:
-- full suite passed: 43 tests, 0 failed
+- full suite passed: 45 tests, 0 failed; fixture suite also passed 45 tests, 0 failed
 - local/remote configuration, emitted SQL case mismatch, client prefix mismatch, WordPress prefix mismatch, and incoming SQL mismatch are covered
 - git diff --check passed
 - staging code-only deploy completed; HTTPS 200; public marker verified from imported homepage content
-- DB-only smoke: backup db-20260811-170351.sql.gz, active prefix kqSmtmoOH_, 14 active tables, 12 inactive wp_* tables retained
+- DB-only smoke through persistent deploy normalization: backup db-20260811-173734.sql.gz, active prefix kqSmtmoOH_, 14 active tables, 12 inactive wp_* tables retained; marker STAGING-DB-SMOKE-20260811-02 returned over HTTPS 200
 - negative wrong-prefix preflight rejected with exit code 1 before DB actions
 - main project and fixture test suites pass 45/45 after normalization implementation
 

@@ -232,7 +232,7 @@ Result:
 - Exported local Windows SQL, asserted exactly 12 source tables, normalized only quoted `kqsmtmooh_` identifiers to `kqSmtmoOH_`, and completed DB-only staging smoke.
 
 Checks:
-- Backup `db-20260811-170351.sql.gz`; active prefix `kqSmtmoOH_`; 14 active tables; 12 inactive `wp_*` tables retained; HTTPS 200 and DB marker verified.
+- Backup `db-20260811-173734.sql.gz`; active prefix `kqSmtmoOH_`; 14 active tables; 12 inactive `wp_*` tables retained; marker `STAGING-DB-SMOKE-20260811-02` returned over HTTPS 200.
 - Negative wrong-prefix preflight rejected before DB actions.
 
 Risk:
