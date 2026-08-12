@@ -27,11 +27,70 @@ DEPLOYMENT_LEAD: INHERIT
 
 ## ACTIVE TASK INDEX
 
-ACTIVE_TASK_IDS: STAGING-DB-AFTERMATH-SAFETY
+ACTIVE_TASK_IDS: DEPLOY-BIDIRECTIONAL-SYNC
 
 
 
 Перед работой агент обязан выбрать ровно один `TASK_ID` из списка и работать только в его блоке.
+
+## TASK: DEPLOY-BIDIRECTIONAL-SYNC
+
+TASK_ID: DEPLOY-BIDIRECTIONAL-SYNC
+TASK_NAME: Обратная синхронизация staging → local
+DOMAIN: DEPLOYMENT
+TASK_LEAD: CODEX
+IMPLEMENTER: CLAUDE (по отдельному назначению пользователя)
+REVIEWER: CODEX
+STATUS: READY_FOR_REVIEW
+
+BRANCH: agent/deploy-bidirectional-sync
+WORKTREE: отдельный worktree Claude, вне рабочей копии и вне worktree Codex
+BASE_COMMIT: b907e4a
+WORK_LOCK: CODEX
+
+CRITICAL: YES
+PLAN_SUMMARY: Спроектировать и реализовать направление pull (staging → local) так, чтобы оно не могло изменить рабочую локальную БД и рабочие файлы. Скачанные артефакты складываются side-by-side и активируются только вручную. Реальный pull, импорт в локальную БД и обновление runner на staging в объём не входили.
+PLAN_APPROVED: YES (2026-08-12)
+EXECUTION_APPROVED: YES (2026-08-12, только локальные изменения и mock-тесты)
+
+### SCOPE
+
+IN_SCOPE:
+- контракт режимов `pull-db`, `pull-files`, `pull-full` и флагов `-DryRun`, `-Confirm`, `-Mirror`
+- схема и валидация pull-ключей конфигурации
+- верификаторы скачиваемых артефактов и политика путей
+- режимы `pull-db`/`pull-files` в `server-deploy.sh` (файл репозитория)
+- обвязка в `deploy.ps1`, mock-тесты, документация
+
+OUT_OF_SCOPE:
+- реальный pull, импорт в локальную БД, активация скачанной копии
+- переустановка runner на staging, production, rollback
+- commit, push, merge
+- приватные конфигурации и любые реальные значения инфраструктуры
+
+STATUS_DETAIL: этапы A–E завершены локально; направление push не изменялось.
+
+LIMIT_STATUS: SAVE
+STOP_AFTER_CHECKPOINT: YES
+
+RESULT:
+- pull реализован как side-by-side: `LocalDatabaseTarget` обязан отличаться от `LocalDbName`, рабочие файлы не заменяются, локальный rollback не нужен и не реализован
+- production pull отвергается независимо валидацией конфигурации, локальным гейтом режима и runner
+- `-Mirror` определён контрактом и fail-closed: отказ и без `AllowDestructiveLocalReplace`, и с ним
+- скачанные артефакты проверяются до использования: gzip integrity через ISIZE, структура SQL, точное число таблиц, prefix, отсутствие чужих и смешанных идентификаторов, листинг архива на traversal и symlink
+- runner при pull не импортирует, не ротирует backups и не переписывает WordPress
+
+CHECKS:
+- полный набор: 107 passed, 0 failed (было 52 до задачи)
+- `git diff --check` без замечаний; PowerShell syntax check по 7 файлам без ошибок; `sh -n server-deploy.sh` и оба тестовых `.sh` — код 0
+- поиск приватных значений по рабочему дереву — ноль совпадений
+- приватные `deploy.config.ps1` и `server.config.sh` в worktree отсутствуют и не создавались
+
+RISKS:
+- R-032: runner на staging не обновлён, реальный pull пока невозможен
+- R-033: режимы pull проверены только статически, ни разу не исполнялись
+- R-034: активация скачанной копии остаётся ручной
+- R-035, R-036, R-037: см. реестр рисков
 
 ## TASK: DEPLOY-SAFETY-STAGES-1-5
 

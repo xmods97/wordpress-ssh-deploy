@@ -109,6 +109,53 @@ reject `db` and `full`. The server validates its policy and the actual WordPress
 target before updating the deployment repository. The installed runner and
 policy live outside the writable Git checkout so a pull cannot replace them.
 
+### Direction: push and pull
+
+The tool has two directions and they are not symmetric.
+
+**Push (`code`, `db`, `full`) sends local → staging.** It replaces remote data,
+so the remote runner takes a backup first and can roll the database back.
+
+**Pull (`pull-db`, `pull-files`, `pull-full`) brings staging → local, and never
+replaces anything locally.** A pull downloads verified artifacts into a
+side-by-side workspace under `.pull/<timestamp>/` and stops:
+
+- the database arrives as a verified `database.sql`, which you import into
+  `LocalDatabaseTarget` yourself when you decide to. `LocalDatabaseTarget` must
+  be a different database from `LocalDbName`; the working local database is
+  never written by a pull;
+- files arrive extracted under `files/`, additively. No working file is
+  replaced, moved, or deleted;
+- because nothing local is overwritten, there is no local rollback to perform:
+  a failed pull leaves the working site exactly as it was.
+
+Every pull run ends with `Pull artifacts prepared side-by-side; working local
+site was not replaced.` Activation is a separate, manual step.
+
+Pull is off unless `PullEnabled = $true`, and it is **never** allowed when
+`Environment` is `production` — refused by configuration validation, by the
+local mode gate, and by the remote runner independently.
+
+`-DryRun` prints the full plan (paths, targets, artifacts) and exits without
+downloading, writing, or changing anything. Run it first.
+
+`pull-db` and `pull-full` additionally require `-Confirm`; `pull-files` is
+additive and does not. `-Mirror` — a files pull that would delete local files
+the remote no longer has — is part of the contract but **is not implemented**
+and refuses to run even with `AllowDestructiveLocalReplace = $true`.
+
+On the way in, a pulled database must match `ExpectedDbTableCount` and
+`ExpectedDbTablePrefix` exactly; a file archive is rejected whole if any entry
+escapes the allowed paths, is a symlink, or matches the permanent deny list
+(`wp-config*`, `.git`, `.ssh`, `.env`, key material, caches, backups).
+`ExcludedPullPaths` extends that deny list and can never shorten it. Remote
+backups are created but never rotated or deleted by a pull.
+
+Status of this direction: the client, the module, and the runner code are
+implemented and covered by local mock tests. **The runner installed on staging
+has not been updated yet, and no real pull has ever been run.** See
+`docs/RISKS-RU.md` for the residual risks.
+
 ### Internal structure
 
 - `deploy.ps1` is the command entry point and orchestration layer.
@@ -129,7 +176,22 @@ policy live outside the writable Git checkout so a pull cannot replace them.
 
 # Code and database on development/staging only, without uploads
 .\deploy.ps1 -Mode full -SkipUploads
+
+# Pull staging -> local. Always start with a dry run: it changes nothing.
+.\deploy.ps1 -Mode pull-db -DryRun
+.\deploy.ps1 -Mode pull-files -DryRun
+
+# Additive files pull; working files are never replaced or deleted
+.\deploy.ps1 -Mode pull-files
+
+# Database and full pull require an explicit confirmation
+.\deploy.ps1 -Mode pull-db -Confirm
+.\deploy.ps1 -Mode pull-full -Confirm
 ```
+
+Pull switches (`-DryRun`, `-Confirm`, `-Mirror`) are rejected for push modes,
+and push switches (`-SkipGit`, `-SkipUploads`, `-PreflightOnly`) are rejected
+for pull modes.
 
 Code deployment never creates commits or pushes. Commit and push separately
 before running deploy. For `code` and `full`, the local checkout must be clean

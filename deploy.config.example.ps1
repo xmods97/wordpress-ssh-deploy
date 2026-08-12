@@ -53,5 +53,41 @@ $DeployConfig = @{
 
 	MinimumLocalFreeSpaceMB  = 1024
 	MinimumRemoteFreeSpaceMB = 1024
+
+	# --- Pull: staging -> local. Optional; omit every key below to stay push-only. ---
+
+	# Master switch. While false, every pull mode is refused and the keys below are not
+	# validated. Pull is never allowed when Environment is 'production'.
+	PullEnabled = $false
+
+	# Pull imports here, never into LocalDbName. Must be a different database, so the
+	# working local site keeps running untouched while the pulled copy is verified.
+	LocalDatabaseTarget = 'wordpress_pulled'
+
+	# Local backups taken before any local write. Must be outside LocalWpPath.
+	LocalBackupDirectory = 'C:\Sites\backups\example.test'
+
+	# WordPress-relative paths that pull-files may bring down. Everything else is refused.
+	AllowedPullPaths = @(
+		'wp-content/uploads'
+	)
+
+	# Extra exclusions on top of the permanent deny list (wp-config*, .git, .ssh, .env,
+	# key material, caches, backups). Configuration can extend that list, never shorten it.
+	ExcludedPullPaths = @(
+		'wp-content/uploads/private'
+	)
+
+	# Keep true. When true, pull-db and pull-full refuse to run without -Confirm.
+	RequirePullConfirmation = $true
+
+	# Reserved for mirror pull, which deletes local files the remote no longer has.
+	# Mirror is part of the contract but refuses to run in this version.
+	AllowDestructiveLocalReplace = $false
+
+	# Local tools used to verify and import a pulled database.
+	LocalPhpPath   = 'C:\path\to\php.exe'
+	LocalWpCliPath = 'C:\path\to\wp-cli.phar'
+	MysqlPath      = 'C:\path\to\mysql.exe'
 }
 

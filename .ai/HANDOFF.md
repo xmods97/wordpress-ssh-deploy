@@ -2,57 +2,56 @@
 
 TEMPLATE_VERSION: existing-projects-v2
 
-HANDOFF_STATUS: ACCEPTED
-TASK_ID: STAGING-DB-AFTERMATH-SAFETY
+HANDOFF_STATUS: READY
+TASK_ID: DEPLOY-BIDIRECTIONAL-SYNC
 TASK_BLOCK_SOURCE: `.ai/STATE.md`
-FROM_AGENT: CODEX
+FROM_AGENT: CLAUDE
 TO_AGENT: CODEX
-CREATED_AT: 2026-08-10
-BASE_COMMIT: 502a18b
-SOURCE_BRANCH: codex/stages-1-5-review-fixes
-TARGET_BRANCH: codex/stages-1-5-review-fixes
+CREATED_AT: 2026-08-12
+BASE_COMMIT: b907e4a
+SOURCE_BRANCH: agent/deploy-bidirectional-sync
+TARGET_BRANCH: main
 
 ## Цель
 
-Подготовить безопасный следующий этап после реального staging DB smoke: отдельный план для cleanup случайных `wp_*` таблиц и/или постоянной защиты от table-prefix/case mismatch.
+Передать Codex на независимый review реализованное направление pull (staging → local), не изменившее staging, локальную рабочую БД и направление push.
 
 ## Выполнено
 
-- Этапы 1–5 и review-fixes находятся в ветке `codex/stages-1-5-review-fixes` (HEAD `502a18b`); ранее прошли 40 тестов.
-- Подготовлены isolated fixture repository и cPanel staging `https://staging.example.com/`; code-only smoke прошёл.
-- Initial DB smoke exposed a local/remote table-prefix mismatch and added inactive `wp_*` tables without changing active staging content.
-- Controlled remediation used a one-run private SQL wrapper that asserted exactly 12 quoted table identifiers and changed only `<staging-prefix-lowercased>` to active Linux prefix `<staging-prefix>`; wrapper removed and config restored after use.
-- Remediation DB-only deploy succeeded, created `db-20260810-211841.sql.gz`, skipped Git/uploads, and public staging homepage shows `Staging DB Smoke` marker.
-- Активная staging-БД успешно заменена fixture; 12 случайных неактивных `wp_*` таблиц остаются отдельно.
+- Режимы `pull-db`, `pull-files`, `pull-full` и флаги `-DryRun`, `-Confirm`, `-Mirror`; push-режимы `code`, `db`, `full` не изменены.
+- Принцип side-by-side: pull ничего не импортирует и не заменяет; `LocalDatabaseTarget` обязан отличаться от `LocalDbName`. Локальный rollback не нужен и намеренно не реализован.
+- Проверка артефактов до использования: gzip integrity через ISIZE, структура SQL, точное число таблиц, prefix, отсутствие чужих и смешанных идентификаторов, листинг архива на traversal/symlink/deny-list до распаковки.
+- Режимы pull в `server-deploy.sh`: не импортируют, не ротируют backups, не переписывают WordPress; production pull отвергается.
+- `-Mirror` fail-closed: отказ и без `AllowDestructiveLocalReplace`, и с ним.
 
 ## Изменённые файлы
 
-- Незакоммичены только служебные project-файлы и реестр рисков: `.ai/STATE.md`, `.ai/CHANGELOG.md`, `.ai/HANDOFF.md`, `docs/RISKS-RU.md`.
-- Fixture private config restored; SSH keys, SQL, temporary wrapper and server runtime/backup artefacts are not tracked by Git.
+- `deploy.ps1`, `src/WordPressSshDeploy.psm1`, `server-deploy.sh`, `deploy.config.example.ps1`, `tests/pull.Tests.ps1` (новый), `README.md`, `docs/DEVELOPMENT-PLAN-RU.md`, `docs/RISKS-RU.md`, `.ai/STATE.md`, `.ai/CHANGELOG.md`, `.ai/HANDOFF.md`.
+- Всё незакоммичено. Приватные конфигурации не создавались и не читались.
 
 ## Проверки
 
-- SQL wrapper preflight asserted 12 active `<staging-prefix>*` targets and no source/legacy quoted identifiers.
-- Remote post-import: active table count 12, homepage `Staging DB Smoke`, plugin inactive, backup non-empty, HTTPS 200 and public marker present.
+- Полный набор: 107 passed, 0 failed. `git diff --check` чист. PowerShell syntax check по 7 файлам без ошибок. `sh -n` чист для `server-deploy.sh` и обоих тестовых `.sh`.
+- Поиск приватных значений по рабочему дереву — ноль совпадений.
 
 ## Нерешённые вопросы
 
-- 12 accidental inactive `wp_*` tables remain; removing them requires a new critical plan and backup.
-- R-031 is in progress: local source now checks table-prefix/case compatibility, but the current staging runner/private policy still need a separate rollout.
-- Откат существует как backup, но deliberate failure/restore не тестировались.
+- R-032: runner на staging не обновлён, реальный pull невозможен до переустановки.
+- R-034: активация скачанной копии остаётся ручной.
+- R-035: нужен ли отдельный ожидаемый счётчик таблиц для направления pull.
 
 ## Риски
 
-- Shared cPanel ownership и PHP 7.4.33 допустимы только для staging.
-- Нельзя трактовать успешный smoke как production readiness.
+- R-033: режимы pull в runner проверены статически и `sh -n`, но ни разу не исполнялись.
+- Успешные mock-тесты нельзя трактовать как готовность к реальному pull.
 
 ## Следующий шаг
 
-- Next task: plan a code-only staging rollout of the new runner/private-policy guard, using a unique fixture homepage marker for public verification. Do not clean `wp_*` or run rollback without its own backup and double approval.
+- Независимый review Codex, затем интеграция. Первый реальный pull требует отдельного плана: переустановка runner, ручное создание пустой `LocalDatabaseTarget`, запуск строго с `-DryRun` до `-Confirm`.
 
 ## Требуемое разрешение
 
-- This checkpoint is complete. A new plan and double approval are required for the staging rollout, `wp_*` cleanup, or rollback test. CODEX remains PROJECT_LEAD/TASK_LEAD and WORK_LOCK owner; Claude is REVIEWER only.
+- Управление не передавалось: CODEX остаётся PROJECT_LEAD, TASK_LEAD и владельцем WORK_LOCK. Claude выполнял только отдельно назначенную задачу в собственной ветке и worktree. Commit, push, merge, staging deploy, rollback и реальный pull не выполнялись.
 
 Ограничение: не более 250 слов. Файл перезаписывается для текущей передачи и после принятия получает `HANDOFF_STATUS: ACCEPTED`.
 
