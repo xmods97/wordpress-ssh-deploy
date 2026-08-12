@@ -19,9 +19,9 @@ TARGET_BRANCH: codex/stages-1-5-review-fixes
 ## Выполнено
 
 - Этапы 1–5 и review-fixes находятся в ветке `codex/stages-1-5-review-fixes` (HEAD `502a18b`); ранее прошли 40 тестов.
-- Подготовлены isolated fixture repository и cPanel staging `https://staging.panchuk.website/`; code-only smoke прошёл.
+- Подготовлены isolated fixture repository и cPanel staging `https://staging.example.com/`; code-only smoke прошёл.
 - Initial DB smoke exposed a local/remote table-prefix mismatch and added inactive `wp_*` tables without changing active staging content.
-- Controlled remediation used a one-run private SQL wrapper that asserted exactly 12 quoted table identifiers and changed only `kqsmtmooh_` to active Linux prefix `kqSmtmoOH_`; wrapper removed and config restored after use.
+- Controlled remediation used a one-run private SQL wrapper that asserted exactly 12 quoted table identifiers and changed only `<staging-prefix-lowercased>` to active Linux prefix `<staging-prefix>`; wrapper removed and config restored after use.
 - Remediation DB-only deploy succeeded, created `db-20260810-211841.sql.gz`, skipped Git/uploads, and public staging homepage shows `Staging DB Smoke` marker.
 - Активная staging-БД успешно заменена fixture; 12 случайных неактивных `wp_*` таблиц остаются отдельно.
 
@@ -32,7 +32,7 @@ TARGET_BRANCH: codex/stages-1-5-review-fixes
 
 ## Проверки
 
-- SQL wrapper preflight asserted 12 active `kqSmtmoOH_*` targets and no source/legacy quoted identifiers.
+- SQL wrapper preflight asserted 12 active `<staging-prefix>*` targets and no source/legacy quoted identifiers.
 - Remote post-import: active table count 12, homepage `Staging DB Smoke`, plugin inactive, backup non-empty, HTTPS 200 and public marker present.
 
 ## Нерешённые вопросы

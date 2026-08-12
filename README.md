@@ -80,18 +80,28 @@ Existing private configurations must add:
 Environment = 'staging'
 ExpectedRemoteDomain = 'staging.example.com'
 ExpectedDbTablePrefix = 'wp_'
+ExpectedDbTableCount = 12
 MinimumLocalFreeSpaceMB = 1024
 MinimumRemoteFreeSpaceMB = 1024
 ```
 
+`ExpectedDbTableCount` is the exact number of tables the local export must
+contain. It must be an integer of at least 1 and has no default: set it to the
+table count of the site being deployed.
+
 The private server policy independently verifies the environment, URL,
 WordPress path, repository path, temporary path, backup path, database name,
 and WordPress table prefix (including its exact case).
-On Windows, the database export may lowercase table identifiers. For the staging
-fixture, `db` mode accepts exactly twelve expected lower-case identifiers and
-normalizes only the quoted `kqsmtmooh_` prefix to the configured `kqSmtmoOH_`
-prefix before the final validation. Unexpected table names or counts fail the
-deployment.
+
+On Windows, the database export may lowercase table identifiers. In `db` and
+`full` modes the export is checked against `ExpectedDbTableCount`, and if every
+table carries the all-lower-case form of `ExpectedDbTablePrefix`, that prefix is
+restored to the configured spelling before the final validation. The rewrite is
+byte-safe: it changes only the ASCII bytes of backtick-quoted table identifiers
+in executable statements, leaves string literals and comments untouched, and
+preserves every other byte of the dump exactly. Mixed, foreign, or unexpected
+table names and any other table count fail the deployment instead of being
+rewritten. Exports use `--hex-blob` so binary columns are emitted as ASCII hex.
 It also pins the Git SSH key, PHP/WP-CLI executables, synchronized paths, backup
 retention, and lock location. Client-provided expected values cannot replace
 this policy. Production accepts only `code`; both local and remote scripts

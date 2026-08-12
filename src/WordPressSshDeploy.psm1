@@ -132,6 +132,83 @@ function Assert-SqlDumpTablePrefix {
 	}
 }
 
+function Get-SqlByteSafeEncoding {
+	# ISO-8859-1 maps bytes 0x00-0xFF to the identical code points and back, so a
+	# GetString/GetBytes round-trip is lossless for arbitrary binary content. UTF-8
+	# decoding would silently replace invalid sequences with U+FFFD and corrupt the dump.
+	return [Text.Encoding]::GetEncoding(28591)
+}
+
+function Convert-SqlIdentifierPrefix {
+	# Rewrites `<SourcePrefix> to `<TargetPrefix> in place, in a single forward pass over
+	# the whole dump. Scanning from the start rather than from the enclosing line keeps
+	# string, line-comment, and block-comment state correct across line boundaries, so a
+	# /* ... */ comment opened on an earlier line still suppresses the rewrite.
+	# Both prefixes are the same ASCII length, so no offset ever shifts.
+	# Returns the number of identifiers rewritten.
+	param(
+		[Parameter(Mandatory = $true)] [char[]] $Characters,
+		[Parameter(Mandatory = $true)] [string] $SourcePrefix,
+		[Parameter(Mandatory = $true)] [string] $TargetPrefix
+	)
+
+	$length = $Characters.Length
+	$prefixLength = $SourcePrefix.Length
+	$replacements = 0
+	$index = 0
+	$inString = $false
+	$inBlockComment = $false
+	while ($index -lt $length) {
+		$character = $Characters[$index]
+		if ($inString) {
+			# A backslash escapes the next byte, including a quote or another backslash.
+			if ($character -eq '\') { $index += 2; continue }
+			if ($character -eq "'") { $inString = $false }
+			$index++
+			continue
+		}
+		if ($inBlockComment) {
+			if ($character -eq '*' -and ($index + 1) -lt $length -and $Characters[$index + 1] -eq '/') {
+				$inBlockComment = $false
+				$index += 2
+				continue
+			}
+			$index++
+			continue
+		}
+		if ($character -eq "'") { $inString = $true; $index++; continue }
+		if ($character -eq '#' -or ($character -eq '-' -and ($index + 1) -lt $length -and $Characters[$index + 1] -eq '-')) {
+			# Line comment: skip to the newline, which the next iteration consumes.
+			while ($index -lt $length -and $Characters[$index] -ne "`n") { $index++ }
+			continue
+		}
+		if ($character -eq '/' -and ($index + 1) -lt $length -and $Characters[$index + 1] -eq '*') {
+			# /*! ... */ is an executable MySQL conditional comment, not a comment.
+			if (($index + 2) -lt $length -and $Characters[$index + 2] -eq '!') { $index += 3; continue }
+			$inBlockComment = $true
+			$index += 2
+			continue
+		}
+		if ($character -eq '`' -and ($index + $prefixLength) -lt $length) {
+			$matched = $true
+			for ($position = 0; $position -lt $prefixLength; $position++) {
+				if ($Characters[$index + 1 + $position] -cne $SourcePrefix[$position]) { $matched = $false; break }
+			}
+			if ($matched) {
+				for ($position = 0; $position -lt $prefixLength; $position++) {
+					$Characters[$index + 1 + $position] = $TargetPrefix[$position]
+				}
+				$replacements++
+				$index += $prefixLength + 1
+				continue
+			}
+		}
+		$index++
+	}
+
+	return $replacements
+}
+
 function Normalize-SqlDumpTablePrefix {
 	[CmdletBinding()]
 	param(
@@ -147,8 +224,9 @@ function Normalize-SqlDumpTablePrefix {
 		throw 'Expected SQL table count must be positive.'
 	}
 
+	$encoding = Get-SqlByteSafeEncoding
+	$contents = $encoding.GetString([IO.File]::ReadAllBytes($Path))
 	$sourcePrefix = $ExpectedPrefix.ToLowerInvariant()
-	$contents = [IO.File]::ReadAllText($Path)
 	$createMatches = [regex]::Matches($contents, '(?m)^CREATE TABLE(?: IF NOT EXISTS)? `([^`]+)`')
 	if ($createMatches.Count -ne $ExpectedTableCount) {
 		throw "SQL dump table count mismatch: expected $ExpectedTableCount, found $($createMatches.Count)."
@@ -165,8 +243,12 @@ function Normalize-SqlDumpTablePrefix {
 		throw "SQL dump contains unexpected table identifiers for expected prefix '$ExpectedPrefix'."
 	}
 
-	$normalized = $contents.Replace('`' + $sourcePrefix, '`' + $ExpectedPrefix)
-	[IO.File]::WriteAllText($Path, $normalized, (New-Object Text.UTF8Encoding($false)))
+	# Replace in place: the rewrite is a same-length ASCII case change applied only to
+	# identifier positions, so every other byte of the dump is preserved exactly.
+	[char[]] $characters = $contents.ToCharArray()
+	$null = Convert-SqlIdentifierPrefix $characters $sourcePrefix $ExpectedPrefix
+
+	[IO.File]::WriteAllBytes($Path, $encoding.GetBytes((New-Object string (, $characters))))
 	Assert-SqlDumpTablePrefix $Path $ExpectedPrefix
 }
 
@@ -329,7 +411,7 @@ function Get-DeployConfigurationErrors {
 		'ExpectedDbTablePrefix'
 	)
 	$optionalKeys = @('LocalDbPassword', 'SshKeyPath')
-	$otherRequiredKeys = @('SshPort', 'KeepBackups', 'MinimumLocalFreeSpaceMB', 'MinimumRemoteFreeSpaceMB', 'SyncPaths')
+	$otherRequiredKeys = @('SshPort', 'KeepBackups', 'ExpectedDbTableCount', 'MinimumLocalFreeSpaceMB', 'MinimumRemoteFreeSpaceMB', 'SyncPaths')
 	$allowedKeys = $requiredStringKeys + $optionalKeys + $otherRequiredKeys
 
 	foreach ($key in $Configuration.Keys) {
@@ -448,6 +530,9 @@ function Get-DeployConfigurationErrors {
 	}
 	if ($Configuration.KeepBackups -isnot [int] -or $Configuration.KeepBackups -lt 1 -or $Configuration.KeepBackups -gt 1000) {
 		Add-ValidationError $errors 'KeepBackups must be an integer from 1 to 1000.'
+	}
+	if ($Configuration.ExpectedDbTableCount -isnot [int] -or $Configuration.ExpectedDbTableCount -lt 1) {
+		Add-ValidationError $errors 'ExpectedDbTableCount must be an integer greater than or equal to 1.'
 	}
 	foreach ($key in @('MinimumLocalFreeSpaceMB', 'MinimumRemoteFreeSpaceMB')) {
 		if ($Configuration[$key] -isnot [int] -or $Configuration[$key] -lt 1 -or $Configuration[$key] -gt 1048576) {

@@ -96,14 +96,14 @@ try {
 
 	if ($Mode -ne 'code') {
 		Write-Step 'Export database'
-		$dbArgs = @("--host=$($DeployConfig.LocalDbHost)","--user=$($DeployConfig.LocalDbUser)","--result-file=$sqlPath",'--single-transaction','--quick','--default-character-set=utf8mb4',$DeployConfig.LocalDbName)
+		$dbArgs = @("--host=$($DeployConfig.LocalDbHost)","--user=$($DeployConfig.LocalDbUser)","--result-file=$sqlPath",'--single-transaction','--quick','--hex-blob','--default-character-set=utf8mb4',$DeployConfig.LocalDbName)
 		$previousMysqlPassword = $env:MYSQL_PWD
 		try {
 			if ($DeployConfig.LocalDbPassword) { $env:MYSQL_PWD = $DeployConfig.LocalDbPassword }
 			else { Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue }
 			Invoke-CheckedCommand $DeployConfig.MysqldumpPath $dbArgs $repoRoot
 			Assert-SqlDumpFile $sqlPath
-			Normalize-SqlDumpTablePrefix $sqlPath $DeployConfig.ExpectedDbTablePrefix 12
+			Normalize-SqlDumpTablePrefix $sqlPath $DeployConfig.ExpectedDbTablePrefix $DeployConfig.ExpectedDbTableCount
 			$sqlBytes = (Get-Item -LiteralPath $sqlPath).Length
 			Assert-AvailableDiskSpace $repoRoot ($requiredLocalBytes + [long]$sqlBytes) 'Local deployment workspace after SQL export'
 		} finally {

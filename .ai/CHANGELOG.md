@@ -63,7 +63,7 @@ Result:
 
 Files:
 - Private fixture files: `deploy.config.ps1`, `server.config.sh`, and local `wp-config.php`.
-- Private staging runner/policy and artifact directories under `/home4/panchukw`.
+- Private staging runner/policy and artifact directories under `/home/<cpanel-account>`.
 
 Checks:
 - Fixture config schema and runner POSIX syntax passed; staging preflight passed; code-only deployment passed; local/remote plugin SHA-256 matched; plugin is inactive; HTTPS returned 200.
@@ -78,13 +78,13 @@ Approvals:
 2026-08-10 | STAGING-SSH-PREFLIGHT-SETUP | CODEX | CHECKPOINT_COMPLETE
 
 Result:
-- Created a dedicated local ed25519 key; its public half was imported and authorized in cPanel. Verified external SSH on official HOSTiQ virtual-hosting port 21098 and completed the approved read-only server inventory.
+- Created a dedicated local ed25519 key; its public half was imported and authorized in cPanel. Verified external SSH on the hosting provider's official virtual-hosting port <ssh-port> and completed the approved read-only server inventory.
 
 Files:
 - `.ai/STATE.md`, `.ai/HANDOFF.md`, `.ai/CHANGELOG.md`.
 
 Checks:
-- TCP SSH on port 21098 reachable; authenticated SSH inventory completed. Git, PHP, WP-CLI, MySQL client, mysqldump, unzip, and rsync are available.
+- TCP SSH on port <ssh-port> reachable; authenticated SSH inventory completed. Git, PHP, WP-CLI, MySQL client, mysqldump, unzip, and rsync are available.
 
 Risks:
 - No server files, WordPress, database, Git checkout, or deployment runner were changed. cPanel compatibility with the administrator-owned runner model remains unproven.
@@ -149,7 +149,7 @@ Risks:
 2026-08-10 | STAGING-DB-SMOKE | CODEX | CORRECTION_BLOCKED
 
 Result:
-- Read-only prefix verification found local `wp_` versus active staging `kqSmtmoOH_`. The completed import added `wp_*` tables but did not replace the active staging WordPress tables; old WP credentials correctly remain valid.
+- Read-only prefix verification found local `wp_` versus active staging `<staging-prefix>`. The completed import added `wp_*` tables but did not replace the active staging WordPress tables; old WP credentials correctly remain valid.
 
 Risk:
 - The staging database now has an unused imported table family. No cleanup, deletion, or rerun was performed; remediation requires a revised critical plan and fresh double approval.
@@ -157,7 +157,7 @@ Risk:
 2026-08-10 | STAGING-DB-REMEDIATION-HOMEPAGE | CODEX | BLOCKED
 
 Result:
-- Local fixture received the homepage marker and was structurally inspected, but Windows MySQL emitted table names as `kqsmtmooh_` while active Linux staging requires `kqSmtmoOH_`.
+- Local fixture received the homepage marker and was structurally inspected, but Windows MySQL emitted table names as `<staging-prefix-lowercased>` while active Linux staging requires `<staging-prefix>`.
 
 Risk:
 - Remote deploy was not run. A direct import would create another inactive table family; a revised SQL identifier-transformation plan and new approvals are required.
@@ -210,7 +210,7 @@ Result:
 - Published fixture commit 63b8908 and installed the runner plus private prefix policy on staging; no DB/import/full mode was run.
 
 Checks:
-- Fixture suite: 43 passed, 0 failed; HTTPS 200; remote policy `kqSmtmoOH_` confirmed.
+- Fixture suite: 43 passed, 0 failed; HTTPS 200; remote policy `<staging-prefix>` confirmed.
 
 Risk:
 - Public marker is not visible because `deploy-smoke-plugin` is inactive; activation would require a separate scoped DB/write approval. The 12 inactive `wp_*` tables remain untouched.
@@ -229,10 +229,10 @@ Risk:
 2026-08-11 | STAGING-DB-SQL-CASE-NORMALIZATION | CODEX | CHECKPOINT_COMPLETE
 
 Result:
-- Exported local Windows SQL, asserted exactly 12 source tables, normalized only quoted `kqsmtmooh_` identifiers to `kqSmtmoOH_`, and completed DB-only staging smoke.
+- Exported local Windows SQL, asserted exactly 12 source tables, normalized only quoted `<staging-prefix-lowercased>` identifiers to `<staging-prefix>`, and completed DB-only staging smoke.
 
 Checks:
-- Backup `db-20260811-173734.sql.gz`; active prefix `kqSmtmoOH_`; 14 active tables; 12 inactive `wp_*` tables retained; marker `STAGING-DB-SMOKE-20260811-02` returned over HTTPS 200.
+- Backup `db-20260811-173734.sql.gz`; active prefix `<staging-prefix>`; 14 active tables; 12 inactive `wp_*` tables retained; marker `STAGING-DB-SMOKE-20260811-02` returned over HTTPS 200.
 - Negative wrong-prefix preflight rejected before DB actions.
 
 Risk:
@@ -241,7 +241,7 @@ Risk:
 2026-08-11 | DEPLOY-SQL-CASE-NORMALIZATION-ROLLOUT | CODEX | IMPLEMENTED
 
 Result:
-- Added persistent deploy-time normalization for exactly 12 lower-case Windows table identifiers, limited to `kqsmtmooh_` to configured prefix, followed by final prefix validation.
+- Added persistent deploy-time normalization for exactly 12 lower-case Windows table identifiers, limited to `<staging-prefix-lowercased>` to configured prefix, followed by final prefix validation.
 
 Checks:
 - Main and fixture suites: 45 passed, 0 failed; `git diff --check` passed.

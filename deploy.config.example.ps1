@@ -46,6 +46,11 @@ $DeployConfig = @{
 	)
 
 	KeepBackups = 10
+
+	# Exact number of tables the local database export must contain.
+	# Integer >= 1. A stock WordPress install has 12; add one per extra plugin table.
+	ExpectedDbTableCount = 12
+
 	MinimumLocalFreeSpaceMB  = 1024
 	MinimumRemoteFreeSpaceMB = 1024
 }

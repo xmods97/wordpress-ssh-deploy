@@ -169,15 +169,15 @@ LAST_SYNC_COMMIT: 502a18b
 WORK_LOCK: CODEX
 
 CRITICAL: YES
-PLAN_SUMMARY: Create a dedicated local ed25519 key; import and authorize only its public half in cPanel; then collect read-only SSH inventory for staging.panchuk.website. No server files, directories, WordPress, database, repository, or domains may be changed.
+PLAN_SUMMARY: Create a dedicated local ed25519 key; import and authorize only its public half in cPanel; then collect read-only SSH inventory for staging.example.com. No server files, directories, WordPress, database, repository, or domains may be changed.
 PLAN_APPROVED: YES (2026-08-10)
 EXECUTION_APPROVED: YES (2026-08-10)
 
 ### SCOPE
 
 IN_SCOPE:
-- local dedicated SSH key creation for staging.panchuk.website
-- public-key import and authorization in the cPanel account panchukw
+- local dedicated SSH key creation for staging.example.com
+- public-key import and authorization in the cPanel account <cpanel-account>
 - read-only SSH inventory: current user, OS, free disk space, Git, PHP, WP-CLI, and MySQL client availability
 
 OUT_OF_SCOPE:
@@ -198,13 +198,13 @@ LIMIT_STATUS: SAVE
 STOP_AFTER_CHECKPOINT: YES
 
 RESULT:
-- dedicated local ed25519 key was created and its public half was imported and authorized in cPanel as panchukw
-- official HOSTiQ virtual-hosting SSH port 21098 is reachable; port 22 is not
+- dedicated local ed25519 key was created and its public half was imported and authorized in cPanel as <cpanel-account>
+- the hosting provider's official virtual-hosting SSH port <ssh-port> is reachable; port 22 is not
 - approved SSH inventory completed without remote writes
 
 CHECKS:
-- TCP: uashared33.twinservers.net:21098 reachable
-- SSH: panchukw@uashared33.twinservers.net:21098 connected with the dedicated key
+- TCP: <ssh-host>:<ssh-port> reachable
+- SSH: <ssh-user>@<ssh-host>:<ssh-port> connected with the dedicated key
 - remote tools available: Git, PHP, WP-CLI, MySQL client, mysqldump, unzip, and rsync
 
 RISKS:
@@ -227,22 +227,22 @@ LAST_SYNC_COMMIT: 26a57c8
 WORK_LOCK: CODEX
 
 CRITICAL: YES
-PLAN_SUMMARY: Prepare a clean WordPress only at https://staging.panchuk.website/, use the supplied fixture repository, create only staging-owned runner and artifact directories, then run preflight and a code-only smoke deployment. Existing sites, production, databases, and main remain out of scope.
+PLAN_SUMMARY: Prepare a clean WordPress only at https://staging.example.com/, use the supplied fixture repository, create only staging-owned runner and artifact directories, then run preflight and a code-only smoke deployment. Existing sites, production, databases, and main remain out of scope.
 PLAN_APPROVED: YES (2026-08-10)
 EXECUTION_APPROVED: YES (2026-08-10)
 
 INPUTS:
 - fixture repository: https://github.com/xmods97/wordpress-staging-fixture.git
-- staging target: https://staging.panchuk.website/
+- staging target: https://staging.example.com/
 
 IN_SCOPE:
-- verification and use of the existing fresh WordPress installation and separate database for staging.panchuk.website only
+- verification and use of the existing fresh WordPress installation and separate database for staging.example.com only
 - fixture workspace and a minimal test plugin in the supplied fixture repository
 - private local deploy configuration and cPanel-compatible staging runner setup
 - preflight and code-only smoke deployment to the new staging site
 
 OUT_OF_SCOPE:
-- panchuk.website and portfolio.panchuk.website
+- example.com and portfolio.example.com
 - existing databases, production, public main merge, and deployment of a real site
 - db or full deployment modes
 
@@ -264,7 +264,7 @@ LIMIT_STATUS: SAVE
 STOP_AFTER_CHECKPOINT: YES
 
 RESULT:
-- existing fresh WordPress at staging.panchuk.website was verified and retained; its separate database is panchukw_wp_pghay
+- existing fresh WordPress at staging.example.com was verified and retained; its separate database is <staging-db-name>
 - private fixture repository was bootstrapped at commit 26a57c8 with a single inactive smoke plugin
 - staging runner/policy was installed outside WordPress and the Git checkout; GitHub access uses a read-only deploy key over SSH port 443
 - WP_ENVIRONMENT_TYPE=staging was added after a timestamped backup of wp-config.php
@@ -278,7 +278,7 @@ CHECKS:
 - HTTPS staging endpoint returned 200 OK
 
 RISKS:
-- cPanel shared hosting runner/policy is owned by panchukw rather than an administrator; this lower isolation is accepted for this staging fixture only
+- cPanel shared hosting runner/policy is owned by <cpanel-account> rather than an administrator; this lower isolation is accepted for this staging fixture only
 - PHP 7.4.33 is end-of-life; do not treat this staging host as production-ready
 - db and full deployment modes, real-site content, and rollback behavior remain untested
 
@@ -360,25 +360,25 @@ LAST_SYNC_COMMIT: 26a57c8
 WORK_LOCK: CODEX
 
 CRITICAL: YES
-PLAN_SUMMARY: Export only the isolated local wordpress_staging_fixture database, run the private fixture deployment in db mode with Git and uploads skipped, retain the runner-created backup of the staging database, then verify the staging URL, WordPress tables, backup artifact, and HTTPS. This plan is blocked after discovering that the local wp_ table prefix does not match the active staging kqSmtmoOH_ prefix.
+PLAN_SUMMARY: Export only the isolated local wordpress_staging_fixture database, run the private fixture deployment in db mode with Git and uploads skipped, retain the runner-created backup of the staging database, then verify the staging URL, WordPress tables, backup artifact, and HTTPS. This plan is blocked after discovering that the local wp_ table prefix does not match the active staging <staging-prefix> prefix.
 PLAN_APPROVED: YES (2026-08-10)
 EXECUTION_APPROVED: YES (2026-08-10)
 
 IN_SCOPE:
 - export only the local wordpress_staging_fixture database
-- database-only deployment to staging.panchuk.website using the existing private fixture configuration
+- database-only deployment to staging.example.com using the existing private fixture configuration
 - runner-created backup and post-deploy verification of staging database, URL, and HTTPS
 
 OUT_OF_SCOPE:
 - Git pull or fixture code changes
-- uploads, production, panchuk.website, portfolio.panchuk.website, merge, push, and rollback fault injection
+- uploads, production, example.com, portfolio.example.com, merge, push, and rollback fault injection
 
 ALLOWED_FILES:
 - .ai/STATE.md
 - .ai/CHANGELOG.md
 - .ai/HANDOFF.md
 - dedicated fixture workspace private config and generated temporary SQL artifact only
-- staging database panchukw_wp_pghay and runner-managed backup artifact only
+- staging database <staging-db-name> and runner-managed backup artifact only
 
 RISKS:
 - this will replace the current staging WordPress database and its users; the existing staging WP-admin credentials will cease to work
@@ -394,13 +394,13 @@ STOP_AFTER_CHECKPOINT: YES
 
 RESULT:
 - the DB-only command completed and created the non-empty staging backup db-20260810-200530.sql.gz; Git and uploads were skipped
-- it did not replace the active staging WordPress data because the local dump used wp_ while staging wp-config.php uses kqSmtmoOH_
-- the staging database now contains an additional inactive wp_ table family beside the active kqSmtmoOH_ family
+- it did not replace the active staging WordPress data because the local dump used wp_ while staging wp-config.php uses <staging-prefix>
+- the staging database now contains an additional inactive wp_ table family beside the active <staging-prefix> family
 
 CHECKS:
 - local source configuration validated; local fixture database had 12 tables and the fixture Git clone was clean
-- read-only prefix verification: local wp-config.php uses wp_; remote wp-config.php uses kqSmtmoOH_
-- remote database contains both table families; prior WP-CLI URL/plugin checks therefore assessed the old active kqSmtmoOH_ tables
+- read-only prefix verification: local wp-config.php uses wp_; remote wp-config.php uses <staging-prefix>
+- remote database contains both table families; prior WP-CLI URL/plugin checks therefore assessed the old active <staging-prefix> tables
 - public HTTPS returned 200; this proves the existing staging site, not the intended fixture import
 
 RISKS:
@@ -424,7 +424,7 @@ LAST_SYNC_COMMIT: 26a57c8
 WORK_LOCK: CODEX
 
 CRITICAL: YES
-PLAN_SUMMARY: This approved plan is blocked before remote deployment: Windows MySQL lowercased the aligned local table family to kqsmtmooh_, while Linux staging requires case-sensitive kqSmtmoOH_. A generated SQL identifier transformation requires a revised plan and fresh approvals.
+PLAN_SUMMARY: This approved plan is blocked before remote deployment: Windows MySQL lowercased the aligned local table family to <staging-prefix-lowercased>, while Linux staging requires case-sensitive <staging-prefix>. A generated SQL identifier transformation requires a revised plan and fresh approvals.
 PLAN_APPROVED: YES (2026-08-10)
 EXECUTION_APPROVED: YES (2026-08-10)
 
@@ -435,7 +435,7 @@ IN_SCOPE:
 - read-only verification of public homepage, active table prefix, backup, and HTTPS
 
 OUT_OF_SCOPE:
-- production, panchuk.website, portfolio.panchuk.website, Git changes, uploads, full mode, merge, push, and rollback fault injection
+- production, example.com, portfolio.example.com, Git changes, uploads, full mode, merge, push, and rollback fault injection
 - direct edits to the current staging WordPress outside the runner-mediated database replacement
 
 ALLOWED_FILES:
@@ -443,7 +443,7 @@ ALLOWED_FILES:
 - .ai/CHANGELOG.md
 - .ai/HANDOFF.md
 - dedicated local fixture database, WordPress directory, private config, and generated temporary SQL artifact only
-- staging database panchukw_wp_pghay and runner-managed backup artifact only
+- staging database <staging-db-name> and runner-managed backup artifact only
 
 RISKS:
 - this replaces the active staging table family and changes the staging WordPress content/users
@@ -458,12 +458,12 @@ LIMIT_STATUS: SAVE
 STOP_AFTER_CHECKPOINT: YES
 
 RESULT:
-- local fixture tables were renamed from wp_ to the Windows-normalized kqsmtmooh_ family and received the homepage marker Staging DB Smoke
-- structural dump inspection stopped the task before remote deployment because its DROP TABLE statements target kqsmtmooh_, not staging kqSmtmoOH_
+- local fixture tables were renamed from wp_ to the Windows-normalized <staging-prefix-lowercased> family and received the homepage marker Staging DB Smoke
+- structural dump inspection stopped the task before remote deployment because its DROP TABLE statements target <staging-prefix-lowercased>, not staging <staging-prefix>
 
 CHECKS:
-- local fixture contains 12 kqsmtmooh_ tables; its structural dump has DROP TABLE IF EXISTS only for that lowercased family
-- active staging prefix remains kqSmtmoOH_ from read-only wp-config.php inspection
+- local fixture contains 12 <staging-prefix-lowercased> tables; its structural dump has DROP TABLE IF EXISTS only for that lowercased family
+- active staging prefix remains <staging-prefix> from read-only wp-config.php inspection
 - no remote DB import, deletion, cleanup, or homepage change was performed in this task
 
 RISKS:
@@ -486,14 +486,14 @@ LAST_SYNC_COMMIT: 26a57c8
 WORK_LOCK: CODEX
 
 CRITICAL: YES
-PLAN_SUMMARY: Create a new current staging backup, generate SQL only from the isolated local fixture database, transform only quoted SQL table identifiers from kqsmtmooh_ to kqSmtmoOH_, assert that exactly the active staging family is targeted and no source/old family identifiers remain, then import only the asserted SQL through the existing runner with Git and uploads skipped. Verify the public homepage marker, active prefix, backup, and HTTPS. Do not clean accidental wp_ tables in this task.
+PLAN_SUMMARY: Create a new current staging backup, generate SQL only from the isolated local fixture database, transform only quoted SQL table identifiers from <staging-prefix-lowercased> to <staging-prefix>, assert that exactly the active staging family is targeted and no source/old family identifiers remain, then import only the asserted SQL through the existing runner with Git and uploads skipped. Verify the public homepage marker, active prefix, backup, and HTTPS. Do not clean accidental wp_ tables in this task.
 PLAN_APPROVED: YES (2026-08-10)
 EXECUTION_APPROVED: YES (2026-08-10)
 
 IN_SCOPE:
 - generated temporary local SQL artifact from wordpress_staging_fixture only
 - exact quoted-identifier prefix transformation and assertions
-- runner-created staging backup and DB-only import to panchukw_wp_pghay
+- runner-created staging backup and DB-only import to <staging-db-name>
 - public homepage smoke marker, active prefix, backup, and HTTPS verification
 
 OUT_OF_SCOPE:
@@ -505,7 +505,7 @@ ALLOWED_FILES:
 - .ai/CHANGELOG.md
 - .ai/HANDOFF.md
 - dedicated local fixture database, private config, and generated temporary SQL artifact only
-- staging database panchukw_wp_pghay and runner-managed backup artifact only
+- staging database <staging-db-name> and runner-managed backup artifact only
 
 RISKS:
 - this replaces the active staging table family and staging users/content
@@ -520,14 +520,14 @@ LIMIT_STATUS: SAVE
 STOP_AFTER_CHECKPOINT: YES
 
 RESULT:
-- a private one-run SQL wrapper transformed only asserted quoted table identifiers from kqsmtmooh_ to kqSmtmoOH_; it was removed after use and the private config was restored to the real mysqldump executable
-- DB-only runner deployment replaced the active kqSmtmoOH_ staging table family, created backup db-20260810-211841.sql.gz, and did not run Git or uploads
+- a private one-run SQL wrapper transformed only asserted quoted table identifiers from <staging-prefix-lowercased> to <staging-prefix>; it was removed after use and the private config was restored to the real mysqldump executable
+- DB-only runner deployment replaced the active <staging-prefix> staging table family, created backup db-20260810-211841.sql.gz, and did not run Git or uploads
 - staging public homepage now renders the fixture marker Staging DB Smoke
 
 CHECKS:
-- wrapper preflight: exactly 12 active-prefix DROP TABLE statements; no quoted source kqsmtmooh_ or legacy wp_ identifiers remained
+- wrapper preflight: exactly 12 active-prefix DROP TABLE statements; no quoted source <staging-prefix-lowercased> or legacy wp_ identifiers remained
 - existing runner preflight passed before import
-- post-import: active kqSmtmoOH_ table count 12, show_on_front page, front-page title Staging DB Smoke, plugin inactive, backup non-empty, HTTPS 200, marker present in public response
+- post-import: active <staging-prefix> table count 12, show_on_front page, front-page title Staging DB Smoke, plugin inactive, backup non-empty, HTTPS 200, marker present in public response
 - restored private fixture configuration schema validation passed
 
 RISKS:
@@ -599,7 +599,7 @@ RESULT:
 - added ExpectedDbTablePrefix as a required local and server policy lock
 - local deploy validates emitted SQL CREATE TABLE prefixes with ordinal case comparison; server validates client policy, active WordPress prefix, and incoming SQL before backup/import
 - documented the required unique homepage marker/version before every staging database deploy test
-- published fixture commit 63b8908 and completed code-only staging rollout; remote policy is kqSmtmoOH_
+- published fixture commit 63b8908 and completed code-only staging rollout; remote policy is <staging-prefix>
 - activated deploy-smoke-plugin before the DB smoke; the later DB import restored local active_plugins and plugin is now inactive
 - normalized transient Windows SQL after exact 12-table assertions and completed DB-only staging smoke
 - implemented persistent deploy-time normalization for the exact lower-case Windows prefix and exported regression coverage
@@ -609,7 +609,7 @@ CHECKS:
 - local/remote configuration, emitted SQL case mismatch, client prefix mismatch, WordPress prefix mismatch, and incoming SQL mismatch are covered
 - git diff --check passed
 - staging code-only deploy completed; HTTPS 200; public marker verified from imported homepage content
-- DB-only smoke through persistent deploy normalization: backup db-20260811-173734.sql.gz, active prefix kqSmtmoOH_, 14 active tables, 12 inactive wp_* tables retained; marker STAGING-DB-SMOKE-20260811-02 returned over HTTPS 200
+- DB-only smoke through persistent deploy normalization: backup db-20260811-173734.sql.gz, active prefix <staging-prefix>, 14 active tables, 12 inactive wp_* tables retained; marker STAGING-DB-SMOKE-20260811-02 returned over HTTPS 200
 - negative wrong-prefix preflight rejected with exit code 1 before DB actions
 - main project and fixture test suites pass 45/45 after normalization implementation
 
