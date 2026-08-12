@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
 	[Parameter(Position = 0)] [string] $Message = '',
-	[ValidateSet('full', 'code', 'db')] [string] $Mode = 'full',
+	[ValidateSet('full', 'code', 'db')] [string] $Mode = 'code',
 	[switch] $SkipGit,
 	[switch] $SkipUploads,
 	[switch] $PreflightOnly
@@ -14,21 +14,6 @@ function Write-Ok([string] $Text) { Write-Host "OK  $Text" -ForegroundColor Gree
 function Assert-Path([string] $Path, [string] $Label) {
 	if (-not (Test-Path -LiteralPath $Path)) { throw "$Label not found: $Path" }
 }
-function Invoke-Checked([string] $FilePath, [string[]] $Arguments, [string] $WorkingDirectory) {
-	Push-Location $WorkingDirectory
-	try {
-		& $FilePath @Arguments
-		if ($LASTEXITCODE -ne 0) { throw "Command failed ($LASTEXITCODE): $FilePath" }
-	} finally { Pop-Location }
-}
-function Invoke-Output([string] $FilePath, [string[]] $Arguments, [string] $WorkingDirectory) {
-	Push-Location $WorkingDirectory
-	try {
-		$output = & $FilePath @Arguments 2>&1
-		if ($LASTEXITCODE -ne 0) { throw "Command failed ($LASTEXITCODE): $FilePath" }
-		return $output
-	} finally { Pop-Location }
-}
 function New-Zip([string] $SourceDirectory, [string] $DestinationZip) {
 	Add-Type -AssemblyName System.IO.Compression.FileSystem
 	if (Test-Path -LiteralPath $DestinationZip) { Remove-Item -LiteralPath $DestinationZip -Force }
@@ -36,31 +21,26 @@ function New-Zip([string] $SourceDirectory, [string] $DestinationZip) {
 		$SourceDirectory, $DestinationZip, [System.IO.Compression.CompressionLevel]::Optimal, $false
 	)
 }
-function Quote-Sh([string] $Value) {
-	$singleQuote = [string][char]39
-	$escaped = $Value.Replace($singleQuote, $singleQuote + '"' + $singleQuote + '"' + $singleQuote)
-	return $singleQuote + $escaped + $singleQuote
-}
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$modulePath = Join-Path $repoRoot 'src\WordPressSshDeploy.psm1'
 $configPath = Join-Path $repoRoot 'deploy.config.ps1'
+if (-not (Test-Path -LiteralPath $modulePath)) {
+	throw 'Missing src\WordPressSshDeploy.psm1.'
+}
 if (-not (Test-Path -LiteralPath $configPath)) {
 	throw 'Missing deploy.config.ps1. Copy deploy.config.example.ps1 and fill in your values.'
 }
+Import-Module $modulePath -Force
 . $configPath
 if (-not $DeployConfig) { throw 'deploy.config.ps1 must define $DeployConfig.' }
-
-$required = @('LocalWpPath','LocalUrl','LocalDbName','LocalDbUser','LocalDbHost','MysqldumpPath','GitPath','SshUser','SshHost','SshPort','RemoteUrl','RemoteWpPath','RemoteRepoPath','RemoteTmpPath','RemoteBackups','ExpectedRemoteWpPath','ExpectedRemoteDbName','SyncPaths')
-foreach ($key in $required) {
-	if (-not $DeployConfig[$key]) { throw "Missing configuration value: $key" }
+Assert-DeployConfiguration -Configuration $DeployConfig
+Assert-DeployModeAllowed -Environment $DeployConfig.Environment -Mode $Mode
+if ($Message) {
+	throw 'Automatic Git commit/push was removed. Commit and push separately, then run deploy without Message.'
 }
-if ($DeployConfig.RemoteWpPath -ne $DeployConfig.ExpectedRemoteWpPath) {
-	throw 'RemoteWpPath does not match ExpectedRemoteWpPath.'
-}
-foreach ($path in $DeployConfig.SyncPaths) {
-	if ([IO.Path]::IsPathRooted($path) -or $path -match '(^|[\\/])\.\.([\\/]|$)') {
-		throw "SyncPaths must contain safe repository-relative paths: $path"
-	}
+if ($SkipGit -and $Mode -ne 'db') {
+	throw '-SkipGit is supported only for db mode. Code deployment requires a clean, pushed Git checkout.'
 }
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -69,8 +49,8 @@ $sqlPath = Join-Path $buildDir 'local-db.sql'
 $uploadsZip = Join-Path $buildDir 'uploads.zip'
 $remoteSql = "$($DeployConfig.RemoteTmpPath)/local-db-$stamp.sql"
 $remoteUploads = "$($DeployConfig.RemoteTmpPath)/uploads-$stamp.zip"
-$remoteScript = "$($DeployConfig.RemoteRepoPath)/server-deploy.sh"
 $target = "$($DeployConfig.SshUser)@$($DeployConfig.SshHost)"
+$remoteCleanupNeeded = $false
 $sshArgs = @('-p', [string]$DeployConfig.SshPort)
 $scpArgs = @('-P', [string]$DeployConfig.SshPort)
 if ($DeployConfig.SshKeyPath) {
@@ -78,68 +58,86 @@ if ($DeployConfig.SshKeyPath) {
 	$scpArgs += @('-i', $DeployConfig.SshKeyPath, '-o', 'IdentitiesOnly=yes')
 }
 
-Write-Step 'Local preflight'
-Assert-Path $DeployConfig.LocalWpPath 'Local WordPress'
-Assert-Path $DeployConfig.MysqldumpPath 'mysqldump'
-Assert-Path $DeployConfig.GitPath 'Git'
-Assert-Path (Join-Path $DeployConfig.LocalWpPath 'wp-config.php') 'wp-config.php'
-if ($Mode -ne 'code' -and -not $SkipUploads) { Assert-Path $DeployConfig.LocalUploadsPath 'Uploads' }
-New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
+try {
+	Write-Step 'Local preflight'
+	Assert-Path $DeployConfig.LocalWpPath 'Local WordPress'
+	Assert-Path (Join-Path $DeployConfig.LocalWpPath 'wp-config.php') 'wp-config.php'
+	if ($Mode -ne 'db') { Assert-Path $DeployConfig.GitPath 'Git' }
+	if ($Mode -ne 'code') {
+		Assert-Path $DeployConfig.MysqldumpPath 'mysqldump'
+		if (-not $SkipUploads) { Assert-Path $DeployConfig.LocalUploadsPath 'Uploads' }
+	}
+	$requiredLocalBytes = [long] $DeployConfig.MinimumLocalFreeSpaceMB * 1MB
+	if ($Mode -ne 'code' -and -not $SkipUploads) {
+		$requiredLocalBytes += Get-DirectoryContentSizeBytes $DeployConfig.LocalUploadsPath
+	}
+	Assert-AvailableDiskSpace $repoRoot $requiredLocalBytes 'Local deployment workspace'
+	New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
 
-$envPairs = @{
-	LOCAL_URL=$DeployConfig.LocalUrl; REMOTE_URL=$DeployConfig.RemoteUrl
-	WP_DIR=$DeployConfig.RemoteWpPath; REPO_DIR=$DeployConfig.RemoteRepoPath
-	BACKUP_DIR=$DeployConfig.RemoteBackups; KEEP_BACKUPS=$DeployConfig.KeepBackups
-	GIT_SSH_KEY=$DeployConfig.RemoteGitSshKey; PHP_BIN=$DeployConfig.RemotePhpPath
-	WP_CLI_BIN=$DeployConfig.RemoteWpCliPath; EXPECTED_WP_DIR=$DeployConfig.ExpectedRemoteWpPath
-	EXPECTED_DB_NAME=$DeployConfig.ExpectedRemoteDbName
-	SYNC_PATHS=($DeployConfig.SyncPaths -join ',')
-}
-function New-RemoteCommand([string] $DeployMode, [string] $SqlFile = '', [string] $UploadsFile = '') {
-	$parts = @()
-	foreach ($item in $envPairs.GetEnumerator()) { $parts += "$($item.Key)=$(Quote-Sh ([string]$item.Value))" }
-	$parts += "DEPLOY_MODE=$(Quote-Sh $DeployMode)"
-	$parts += "SQL_FILE=$(Quote-Sh $SqlFile)"
-	$parts += "UPLOADS_ZIP=$(Quote-Sh $UploadsFile)"
-	$parts += "sh $(Quote-Sh $remoteScript)"
-	return $parts -join ' '
-}
+	if ($Mode -ne 'db') {
+		Write-Step 'Verify Git checkout'
+		$status = @(Invoke-CommandOutput $DeployConfig.GitPath @('status','--porcelain','--untracked-files=all') $repoRoot)
+		if ($status.Count -gt 0) {
+			throw 'Git checkout has uncommitted or untracked changes. Commit them separately before deploy.'
+		}
+		$localHead = [string](Invoke-CommandOutput $DeployConfig.GitPath @('rev-parse','HEAD') $repoRoot)
+		$upstreamHead = [string](Invoke-CommandOutput $DeployConfig.GitPath @('rev-parse','@{u}') $repoRoot)
+		if ($localHead.Trim() -ne $upstreamHead.Trim()) {
+			throw 'Local HEAD does not match its upstream. Push or synchronize Git separately before deploy.'
+		}
+	}
 
-if ($PreflightOnly) {
-	Write-Step 'Remote preflight'
-	Invoke-Checked 'ssh' ($sshArgs + @($target, (New-RemoteCommand 'preflight'))) $repoRoot
-	Remove-Item -LiteralPath $buildDir -Recurse -Force
-	Write-Ok 'Preflight completed'
-	return
-}
+	if ($PreflightOnly) {
+		Write-Step 'Remote preflight'
+		Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, (New-RemoteDeployCommand $DeployConfig 'preflight'))) $repoRoot
+		Write-Ok 'Preflight completed'
+		return
+	}
 
-if (-not $SkipGit -and $Mode -ne 'db') {
-	Write-Step 'Commit and push code'
-	$status = Invoke-Output $DeployConfig.GitPath @('status','--short') $repoRoot
-	if ($status) {
-		if (-not $Message) { throw 'Git has changes. Pass a commit message or use -SkipGit.' }
-		Invoke-Checked $DeployConfig.GitPath @('add','.') $repoRoot
-		Invoke-Checked $DeployConfig.GitPath @('commit','-m',$Message) $repoRoot
-		Invoke-Checked $DeployConfig.GitPath @('push') $repoRoot
+	if ($Mode -ne 'code') {
+		Write-Step 'Export database'
+		$dbArgs = @("--host=$($DeployConfig.LocalDbHost)","--user=$($DeployConfig.LocalDbUser)","--result-file=$sqlPath",'--single-transaction','--quick','--hex-blob','--default-character-set=utf8mb4',$DeployConfig.LocalDbName)
+		$previousMysqlPassword = $env:MYSQL_PWD
+		try {
+			if ($DeployConfig.LocalDbPassword) { $env:MYSQL_PWD = $DeployConfig.LocalDbPassword }
+			else { Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue }
+			Invoke-CheckedCommand $DeployConfig.MysqldumpPath $dbArgs $repoRoot
+			Assert-SqlDumpFile $sqlPath
+			Normalize-SqlDumpTablePrefix $sqlPath $DeployConfig.ExpectedDbTablePrefix $DeployConfig.ExpectedDbTableCount
+			$sqlBytes = (Get-Item -LiteralPath $sqlPath).Length
+			Assert-AvailableDiskSpace $repoRoot ($requiredLocalBytes + [long]$sqlBytes) 'Local deployment workspace after SQL export'
+		} finally {
+			if ($null -eq $previousMysqlPassword) { Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue }
+			else { $env:MYSQL_PWD = $previousMysqlPassword }
+		}
+		if (-not $SkipUploads) {
+			Write-Step 'Pack uploads'
+			New-Zip $DeployConfig.LocalUploadsPath $uploadsZip
+			Assert-ZipArchiveFile $uploadsZip
+		}
+		Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, "mkdir -p $(ConvertTo-ShSingleQuotedString $DeployConfig.RemoteTmpPath)")) $repoRoot
+		$remoteCleanupNeeded = $true
+		Invoke-CheckedCommand 'scp' ($scpArgs + @($sqlPath, "$target`:$remoteSql")) $repoRoot
+		if (-not $SkipUploads) { Invoke-CheckedCommand 'scp' ($scpArgs + @($uploadsZip, "$target`:$remoteUploads")) $repoRoot }
+	}
+
+	Write-Step 'Run remote deployment'
+	$sqlArg = if ($Mode -ne 'code') { $remoteSql } else { '' }
+	$uploadsArg = if ($Mode -ne 'code' -and -not $SkipUploads) { $remoteUploads } else { '' }
+	Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, (New-RemoteDeployCommand $DeployConfig $Mode $sqlArg $uploadsArg))) $repoRoot
+	$remoteCleanupNeeded = $false
+
+	Write-Host "`nDeploy completed: $($DeployConfig.LocalUrl) -> $($DeployConfig.RemoteUrl)" -ForegroundColor Green
+} finally {
+	if ($remoteCleanupNeeded) {
+		try {
+			$cleanupCommand = "rm -f $(ConvertTo-ShSingleQuotedString $remoteSql) $(ConvertTo-ShSingleQuotedString $remoteUploads)"
+			Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, $cleanupCommand)) $repoRoot
+		} catch {
+			Write-Warning 'Remote temporary file cleanup could not be confirmed. Run preflight after SSH is restored.'
+		}
+	}
+	if (Test-Path -LiteralPath $buildDir) {
+		Remove-Item -LiteralPath $buildDir -Recurse -Force -ErrorAction SilentlyContinue
 	}
 }
-
-if ($Mode -ne 'code') {
-	Write-Step 'Export database'
-	$dbArgs = @("--host=$($DeployConfig.LocalDbHost)","--user=$($DeployConfig.LocalDbUser)","--result-file=$sqlPath",'--single-transaction','--quick','--default-character-set=utf8mb4',$DeployConfig.LocalDbName)
-	if ($DeployConfig.LocalDbPassword) { $dbArgs = @("--password=$($DeployConfig.LocalDbPassword)") + $dbArgs }
-	Invoke-Checked $DeployConfig.MysqldumpPath $dbArgs $repoRoot
-	if (-not $SkipUploads) { Write-Step 'Pack uploads'; New-Zip $DeployConfig.LocalUploadsPath $uploadsZip }
-	Invoke-Checked 'ssh' ($sshArgs + @($target, "mkdir -p $(Quote-Sh $DeployConfig.RemoteTmpPath) $(Quote-Sh $DeployConfig.RemoteBackups)")) $repoRoot
-	Invoke-Checked 'scp' ($scpArgs + @($sqlPath, "$target`:$remoteSql")) $repoRoot
-	if (-not $SkipUploads) { Invoke-Checked 'scp' ($scpArgs + @($uploadsZip, "$target`:$remoteUploads")) $repoRoot }
-}
-
-Write-Step 'Run remote deployment'
-$sqlArg = if ($Mode -ne 'code') { $remoteSql } else { '' }
-$uploadsArg = if ($Mode -ne 'code' -and -not $SkipUploads) { $remoteUploads } else { '' }
-$pull = "cd $(Quote-Sh $DeployConfig.RemoteRepoPath) && GIT_SSH_COMMAND=$(Quote-Sh "ssh -i $($DeployConfig.RemoteGitSshKey) -o IdentitiesOnly=yes") git pull --ff-only origin main && "
-Invoke-Checked 'ssh' ($sshArgs + @($target, $pull + (New-RemoteCommand $Mode $sqlArg $uploadsArg))) $repoRoot
-
-Remove-Item -LiteralPath $buildDir -Recurse -Force
-Write-Host "`nDeploy completed: $($DeployConfig.LocalUrl) -> $($DeployConfig.RemoteUrl)" -ForegroundColor Green

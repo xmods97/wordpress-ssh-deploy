@@ -7,7 +7,8 @@ the deployment.
 
 > [!WARNING]
 > `db` and `full` replace the remote database. `full` can also replace the
-> configured uploads directory. Test on staging and keep independent backups.
+> configured uploads directory. Both modes are forbidden when the local or
+> server environment is `production`.
 
 ## Features
 
@@ -40,33 +41,101 @@ Remote Linux host:
 
 1. Copy these files into the root of the WordPress code repository.
 2. Copy `deploy.config.example.ps1` to `deploy.config.ps1`.
-3. Fill every path, host, database safety lock, and `SyncPaths` entry.
-4. Keep `deploy.config.ps1` private. It is excluded by `.gitignore`.
-5. Clone the same repository on the remote host.
-6. Run a preflight before the first deployment.
+3. Select the target `Environment`: `development`, `staging`, or `production`.
+4. Fill every path, host, database safety lock, and `SyncPaths` entry.
+5. Set `ExpectedRemoteDomain`, `ExpectedRemoteWpPath`,
+   `ExpectedRemoteDbName`, and `ExpectedDbTablePrefix` to the exact expected
+   target values.
+6. Keep `deploy.config.ps1` private. It is excluded by `.gitignore`.
+7. Clone the same repository on the remote host.
+8. Create a protected runner directory outside the Git checkout, for example
+   `/usr/local/libexec/wordpress-ssh-deploy/example-site/`.
+9. Install `server-deploy.sh` and a filled `server.config.sh` in that directory.
+   Set `RemoteRunnerPath` to the installed `server-deploy.sh`.
+10. Keep the directory and both files administrator-owned. A typical setup is
+    mode `0755` for the directory and runner, and `0640` for
+    `server.config.sh` with read access for the deploy user's group.
+11. Set `WP_ENVIRONMENT_TYPE` in the target WordPress configuration to the same
+    environment value.
+12. Run a preflight before the first deployment.
 
 ```powershell
 .\deploy.ps1 -PreflightOnly
 ```
 
+### Configuration validation
+
+`deploy.ps1` validates the complete configuration before creating temporary
+files or connecting over SSH. Unknown keys, missing values, unsupported
+environment names, mismatched target locks, unsafe `SyncPaths`, invalid ports,
+and malformed URLs stop the operation.
+
+`SyncPaths` accepts non-empty repository-relative paths written with `/`.
+Absolute paths, dot segments, `.`, `.git`, `.deploy`, `wp-config.php`, trailing
+slashes, backslashes, and duplicate entries are rejected.
+
+Existing private configurations must add:
+
+```powershell
+Environment = 'staging'
+ExpectedRemoteDomain = 'staging.example.com'
+ExpectedDbTablePrefix = 'wp_'
+ExpectedDbTableCount = 12
+MinimumLocalFreeSpaceMB = 1024
+MinimumRemoteFreeSpaceMB = 1024
+```
+
+`ExpectedDbTableCount` is the exact number of tables the local export must
+contain. It must be an integer of at least 1 and has no default: set it to the
+table count of the site being deployed.
+
+The private server policy independently verifies the environment, URL,
+WordPress path, repository path, temporary path, backup path, database name,
+and WordPress table prefix (including its exact case).
+
+On Windows, the database export may lowercase table identifiers. In `db` and
+`full` modes the export is checked against `ExpectedDbTableCount`, and if every
+table carries the all-lower-case form of `ExpectedDbTablePrefix`, that prefix is
+restored to the configured spelling before the final validation. The rewrite is
+byte-safe: it changes only the ASCII bytes of backtick-quoted table identifiers
+in executable statements, leaves string literals and comments untouched, and
+preserves every other byte of the dump exactly. Mixed, foreign, or unexpected
+table names and any other table count fail the deployment instead of being
+rewritten. Exports use `--hex-blob` so binary columns are emitted as ASCII hex.
+It also pins the Git SSH key, PHP/WP-CLI executables, synchronized paths, backup
+retention, and lock location. Client-provided expected values cannot replace
+this policy. Production accepts only `code`; both local and remote scripts
+reject `db` and `full`. The server validates its policy and the actual WordPress
+target before updating the deployment repository. The installed runner and
+policy live outside the writable Git checkout so a pull cannot replace them.
+
+### Internal structure
+
+- `deploy.ps1` is the command entry point and orchestration layer.
+- `src/WordPressSshDeploy.psm1` contains reusable configuration validation,
+  shell quoting, remote-command construction, and checked process execution.
+- `deploy.config.ps1` contains private, site-specific values and is never
+  committed.
+
 ## Usage
 
 ```powershell
-# Commit/push code, sync configured paths, replace DB and uploads
-.\deploy.ps1 "Describe the release"
+# Default and safest operation: code only
+.\deploy.ps1
+.\deploy.ps1 -Mode code
 
-# Code only
-.\deploy.ps1 "Update checkout" -Mode code
-
-# Database and uploads only; do not create a Git commit
+# Database and uploads on development/staging only
 .\deploy.ps1 -Mode db -SkipGit
 
-# Full deploy without uploads
-.\deploy.ps1 "Update content" -SkipUploads
+# Code and database on development/staging only, without uploads
+.\deploy.ps1 -Mode full -SkipUploads
 ```
 
-When tracked files have changed, the script requires a commit message unless
-`-SkipGit` is used. The remote checkout follows the `main` branch.
+Code deployment never creates commits or pushes. Commit and push separately
+before running deploy. For `code` and `full`, the local checkout must be clean
+and `HEAD` must match its configured upstream. The remote checkout follows the
+`main` branch. The legacy positional commit message is rejected with a migration
+message; `-SkipGit` is retained only for `db`.
 
 ## What each mode changes
 
@@ -76,13 +145,47 @@ When tracked files have changed, the script requires a commit message unless
 | `db` | no | yes | optional | yes |
 | `full` | yes | yes | optional | yes |
 
+Before creating or accepting artifacts, both sides check their configured free
+space reserve. SQL dumps and ZIP archives are validated before use. Code and
+uploads are staged in temporary directories and swapped only after preparation.
+If a database import fails, the server immediately attempts to restore the
+backup created in the same operation and preserves that backup for manual
+recovery if rollback also fails.
+
+### Staging test marker
+
+Before every approved staging deploy test that changes the database, update the
+local fixture homepage with a unique current-stage marker, for example
+`STAGING-DB-AFTERMATH-SAFETY-20260811-01`. After deployment, verify that exact
+marker in the public staging homepage. Never use this procedure on production.
+
+## Tests
+
+The autonomous safety suite does not connect to a real site. It validates the
+configuration schema, production restrictions, shell quoting, remote command
+construction, exit-code handling, cleanup guards, server policy, lock cleanup,
+artifact integrity, free-space checks, database rollback, atomic replacement,
+POSIX syntax, and LF line endings.
+
+Requirements: Windows PowerShell 5.1 or PowerShell 7, Pester 3.4 or newer, and a
+POSIX `sh` supplied by Git for Windows.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\run.ps1
+```
+
 ## Security notes
 
 - Use SSH keys with the minimum required access.
-- Do not commit `deploy.config.ps1`, SQL dumps, uploads, `wp-config.php`, or keys.
+- Do not commit `deploy.config.ps1`, `server.config.sh`, SQL dumps, uploads,
+  `wp-config.php`, or keys.
 - Use a dedicated staging environment before adapting this workflow to production.
-- The database password is passed to local MySQL tools as a command-line option;
-  on shared machines, prefer a protected MySQL option file and adapt the script.
+- Database passwords are passed to MySQL tools through the process environment,
+  not command-line arguments. Use dedicated least-privilege database users.
+- The remote script uses an atomic lock directory and rejects concurrent runs.
+- Temporary files are removed on normal failures. If SSH is interrupted before
+  cleanup can be confirmed, the next successful invocation removes matching
+  temporary files older than one day.
 - Review both scripts before use. Deployment automation is environment-specific.
 
 ## License

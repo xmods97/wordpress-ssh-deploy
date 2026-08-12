@@ -1,95 +1,489 @@
 #!/usr/bin/env sh
 set -eu
 
+fail() { echo "ERROR: $1" >&2; exit 1; }
+require_cmd() { command -v "$1" >/dev/null 2>&1 || fail "Required command is not available"; }
+
+SCRIPT_DIR="$(CDPATH= cd -P "$(dirname "$0")" && pwd)"
+SERVER_CONFIG="$SCRIPT_DIR/server.config.sh"
+[ -f "$SERVER_CONFIG" ] || fail "Private server.config.sh is missing beside server-deploy.sh"
+
+# This file is private, server-owned policy. Values received from the client
+# must match it; the client cannot redefine the server policy.
+. "$SERVER_CONFIG"
+
+: "${SERVER_ENVIRONMENT:?SERVER_ENVIRONMENT is required in server.config.sh}"
+: "${SERVER_EXPECTED_URL:?SERVER_EXPECTED_URL is required in server.config.sh}"
+: "${SERVER_EXPECTED_WP_DIR:?SERVER_EXPECTED_WP_DIR is required in server.config.sh}"
+: "${SERVER_EXPECTED_REPO_DIR:?SERVER_EXPECTED_REPO_DIR is required in server.config.sh}"
+: "${SERVER_EXPECTED_TMP_DIR:?SERVER_EXPECTED_TMP_DIR is required in server.config.sh}"
+: "${SERVER_EXPECTED_BACKUP_DIR:?SERVER_EXPECTED_BACKUP_DIR is required in server.config.sh}"
+: "${SERVER_EXPECTED_DB_NAME:?SERVER_EXPECTED_DB_NAME is required in server.config.sh}"
+: "${SERVER_EXPECTED_DB_TABLE_PREFIX:?SERVER_EXPECTED_DB_TABLE_PREFIX is required in server.config.sh}"
+: "${SERVER_GIT_SSH_KEY:?SERVER_GIT_SSH_KEY is required in server.config.sh}"
+: "${SERVER_PHP_BIN:?SERVER_PHP_BIN is required in server.config.sh}"
+: "${SERVER_WP_CLI_BIN:?SERVER_WP_CLI_BIN is required in server.config.sh}"
+: "${SERVER_SYNC_PATHS:?SERVER_SYNC_PATHS is required in server.config.sh}"
+: "${SERVER_KEEP_BACKUPS:?SERVER_KEEP_BACKUPS is required in server.config.sh}"
+: "${SERVER_MIN_FREE_SPACE_MB:?SERVER_MIN_FREE_SPACE_MB is required in server.config.sh}"
+: "${SERVER_LOCK_DIR:?SERVER_LOCK_DIR is required in server.config.sh}"
+
+: "${ENVIRONMENT:?ENVIRONMENT is required}"
+: "${LOCAL_URL:?LOCAL_URL is required}"
+: "${REMOTE_URL:?REMOTE_URL is required}"
 : "${WP_DIR:?WP_DIR is required}"
 : "${REPO_DIR:?REPO_DIR is required}"
 : "${BACKUP_DIR:?BACKUP_DIR is required}"
 : "${EXPECTED_WP_DIR:?EXPECTED_WP_DIR is required}"
 : "${EXPECTED_DB_NAME:?EXPECTED_DB_NAME is required}"
+: "${EXPECTED_DB_TABLE_PREFIX:?EXPECTED_DB_TABLE_PREFIX is required}"
+: "${EXPECTED_REMOTE_DOMAIN:?EXPECTED_REMOTE_DOMAIN is required}"
 : "${SYNC_PATHS:?SYNC_PATHS is required}"
+: "${GIT_SSH_KEY:?GIT_SSH_KEY is required}"
+: "${MIN_REMOTE_FREE_SPACE_MB:?MIN_REMOTE_FREE_SPACE_MB is required}"
 
-DEPLOY_MODE="${DEPLOY_MODE:-full}"
+DEPLOY_MODE="${DEPLOY_MODE:-code}"
 KEEP_BACKUPS="${KEEP_BACKUPS:-10}"
 SQL_FILE="${SQL_FILE:-}"
 UPLOADS_ZIP="${UPLOADS_ZIP:-}"
 PHP_BIN="${PHP_BIN:-php}"
 WP_CLI_BIN="${WP_CLI_BIN:-wp}"
 timestamp="$(date +%Y%m%d-%H%M%S)"
+lock_acquired=0
+ARCHIVE_LISTING=''
+BACKUP_FILE=''
+TRANSIENT_NEW=''
+TRANSIENT_OLD=''
+TRANSIENT_TARGET=''
 
-fail() { echo "ERROR: $1" >&2; exit 1; }
-require_cmd() { command -v "$1" >/dev/null 2>&1 || fail "Command not found: $1"; }
-
-[ "$WP_DIR" = "$EXPECTED_WP_DIR" ] || fail "WP_DIR safety lock mismatch"
-[ -f "$WP_DIR/wp-config.php" ] || fail "wp-config.php not found: $WP_DIR"
-[ -d "$WP_DIR/wp-content" ] || fail "wp-content not found: $WP_DIR"
-[ -d "$REPO_DIR/.git" ] || fail "Git repository not found: $REPO_DIR"
-
-wp_config_value() {
-	"$PHP_BIN" -r "\$c=file_get_contents('$WP_DIR/wp-config.php'); if (preg_match(\"/define\\(\\s*['\\\"]$1['\\\"]\\s*,\\s*['\\\"]([^'\\\"]*)['\\\"]\\s*\\)/\", \$c, \$m)) echo \$m[1];"
+normalize_url() {
+	value="$1"
+	while [ "${value%/}" != "$value" ]; do value="${value%/}"; done
+	printf '%s\n' "$value"
 }
+
+url_host() {
+	value="${1#*://}"
+	value="${value%%/*}"
+	value="${value%%:*}"
+	printf '%s\n' "$value"
+}
+
+assert_http_url() {
+	value="$1"
+	label="$2"
+	case "$value" in
+		http://*|https://*) ;;
+		*) fail "$label must be an absolute HTTP or HTTPS URL" ;;
+	esac
+	case "$value" in
+		*[[:space:]]*) fail "$label must not contain whitespace" ;;
+	esac
+	host="$(url_host "$value")"
+	[ -n "$host" ] || fail "$label must contain a host"
+	case "$host" in
+		*[!A-Za-z0-9.-]*) fail "$label host contains unsafe characters" ;;
+	esac
+}
+
+assert_remote_path() {
+	value="$1"
+	label="$2"
+	case "$value" in
+		/|'') fail "$label must not be empty or root" ;;
+		/*) ;;
+		*) fail "$label must be an absolute POSIX path" ;;
+	esac
+	case "$value" in
+		*/../*|*/..|*/./*|*/.) fail "$label contains an unsafe dot segment" ;;
+	esac
+}
+
+assert_temp_file() {
+	value="$1"
+	label="$2"
+	[ -z "$value" ] && return
+	assert_remote_path "$value" "$label"
+	case "$value" in
+		"$SERVER_EXPECTED_TMP_DIR"/*) ;;
+		*) fail "$label is outside the server temporary directory" ;;
+	esac
+}
+
 wp_cli() { "$PHP_BIN" "$WP_CLI_BIN" --path="$WP_DIR" "$@"; }
-mysql_args() {
-	case "$1" in *:*) printf '%s\n' "--host=${1%%:*}" "--port=${1##*:}" ;; *) printf '%s\n' "--host=$1" ;; esac
+wp_config_value() { wp_cli config get "$1" --type=constant; }
+wp_config_variable() { wp_cli config get "$1" --type=variable; }
+
+assert_table_prefix() {
+	value="$1"
+	label="$2"
+	case "$value" in ''|*[!A-Za-z0-9_]*) fail "$label contains unsupported characters" ;; esac
 }
-assert_database() {
-	actual="$(wp_config_value DB_NAME)"
-	[ "$actual" = "$EXPECTED_DB_NAME" ] || fail "DB_NAME safety lock mismatch"
+
+assert_mode() {
+	case "$DEPLOY_MODE" in preflight|code|db|full) ;; *) fail "Unknown DEPLOY_MODE" ;; esac
+	if [ "$SERVER_ENVIRONMENT" = production ] && [ "$DEPLOY_MODE" != code ] && [ "$DEPLOY_MODE" != preflight ]; then
+		fail "Database and uploads deployment is forbidden for production"
+	fi
 }
+
+assert_server_policy() {
+	case "$SERVER_ENVIRONMENT" in development|staging|production) ;; *) fail "Invalid server environment policy" ;; esac
+	[ "$ENVIRONMENT" = "$SERVER_ENVIRONMENT" ] || fail "Environment does not match server policy"
+	[ "$WP_DIR" = "$SERVER_EXPECTED_WP_DIR" ] || fail "WP_DIR does not match server policy"
+	[ "$EXPECTED_WP_DIR" = "$SERVER_EXPECTED_WP_DIR" ] || fail "Expected WP path does not match server policy"
+	[ "$REPO_DIR" = "$SERVER_EXPECTED_REPO_DIR" ] || fail "Repository path does not match server policy"
+	[ "$BACKUP_DIR" = "$SERVER_EXPECTED_BACKUP_DIR" ] || fail "Backup path does not match server policy"
+	[ "$EXPECTED_DB_NAME" = "$SERVER_EXPECTED_DB_NAME" ] || fail "Expected DB name does not match server policy"
+	[ "$EXPECTED_DB_TABLE_PREFIX" = "$SERVER_EXPECTED_DB_TABLE_PREFIX" ] || fail "Expected table prefix does not match server policy"
+	[ "$GIT_SSH_KEY" = "$SERVER_GIT_SSH_KEY" ] || fail "Git SSH key path does not match server policy"
+	[ "$PHP_BIN" = "$SERVER_PHP_BIN" ] || fail "PHP path does not match server policy"
+	[ "$WP_CLI_BIN" = "$SERVER_WP_CLI_BIN" ] || fail "WP-CLI path does not match server policy"
+	[ "$SYNC_PATHS" = "$SERVER_SYNC_PATHS" ] || fail "Sync paths do not match server policy"
+	[ "$KEEP_BACKUPS" = "$SERVER_KEEP_BACKUPS" ] || fail "Backup retention does not match server policy"
+	[ "$MIN_REMOTE_FREE_SPACE_MB" = "$SERVER_MIN_FREE_SPACE_MB" ] || fail "Free-space policy does not match server policy"
+	case "$SERVER_GIT_SSH_KEY" in *[!A-Za-z0-9_./-]*) fail "Server Git SSH key path contains unsafe characters" ;; esac
+	case "$KEEP_BACKUPS" in ''|*[!0-9]*) fail "Backup retention must be an integer" ;; esac
+	[ "$KEEP_BACKUPS" -ge 1 ] && [ "$KEEP_BACKUPS" -le 1000 ] || fail "Backup retention is outside the allowed range"
+	case "$MIN_REMOTE_FREE_SPACE_MB" in ''|*[!0-9]*) fail "Minimum free space must be an integer" ;; esac
+	[ "$MIN_REMOTE_FREE_SPACE_MB" -ge 1 ] && [ "$MIN_REMOTE_FREE_SPACE_MB" -le 1048576 ] || fail "Minimum free space is outside the allowed range"
+	[ "$(normalize_url "$REMOTE_URL")" = "$(normalize_url "$SERVER_EXPECTED_URL")" ] || fail "Remote URL does not match server policy"
+	assert_http_url "$LOCAL_URL" LOCAL_URL
+	assert_table_prefix "$SERVER_EXPECTED_DB_TABLE_PREFIX" SERVER_EXPECTED_DB_TABLE_PREFIX
+	assert_table_prefix "$EXPECTED_DB_TABLE_PREFIX" EXPECTED_DB_TABLE_PREFIX
+	[ "$EXPECTED_REMOTE_DOMAIN" = "$(url_host "$SERVER_EXPECTED_URL")" ] || fail "Expected domain does not match server policy"
+	assert_remote_path "$WP_DIR" WP_DIR
+	assert_remote_path "$REPO_DIR" REPO_DIR
+	assert_remote_path "$SERVER_EXPECTED_TMP_DIR" SERVER_EXPECTED_TMP_DIR
+	assert_remote_path "$BACKUP_DIR" BACKUP_DIR
+	assert_remote_path "$SERVER_LOCK_DIR" SERVER_LOCK_DIR
+	assert_remote_path "$PHP_BIN" PHP_BIN
+	assert_remote_path "$WP_CLI_BIN" WP_CLI_BIN
+	assert_temp_file "$SQL_FILE" SQL_FILE
+	assert_temp_file "$UPLOADS_ZIP" UPLOADS_ZIP
+}
+
+assert_wordpress_target() {
+	[ -f "$WP_DIR/wp-config.php" ] || fail "WordPress configuration was not found"
+	[ -d "$WP_DIR/wp-content" ] || fail "WordPress content directory was not found"
+	[ -d "$REPO_DIR/.git" ] || fail "Deployment Git repository was not found"
+	[ ! -L "$WP_DIR" ] || fail "WordPress directory must not be a symbolic link"
+	[ ! -L "$WP_DIR/wp-content" ] || fail "WordPress content directory must not be a symbolic link"
+
+	actual_environment="$(wp_cli eval 'echo wp_get_environment_type();')"
+	[ "$actual_environment" = "$SERVER_ENVIRONMENT" ] || fail "WordPress environment does not match server policy"
+
+	actual_home="$(normalize_url "$(wp_cli option get home)")"
+	actual_siteurl="$(normalize_url "$(wp_cli option get siteurl)")"
+	expected_url="$(normalize_url "$SERVER_EXPECTED_URL")"
+	[ "$actual_home" = "$expected_url" ] || fail "WordPress home URL does not match server policy"
+	[ "$actual_siteurl" = "$expected_url" ] || fail "WordPress siteurl does not match server policy"
+
+	actual_database="$(wp_config_value DB_NAME)"
+	[ "$actual_database" = "$SERVER_EXPECTED_DB_NAME" ] || fail "WordPress DB name does not match server policy"
+	actual_table_prefix="$(wp_config_variable table_prefix)"
+	[ "$actual_table_prefix" = "$SERVER_EXPECTED_DB_TABLE_PREFIX" ] || fail "WordPress table prefix does not match server policy"
+}
+
+cleanup_exit() {
+	status=$?
+	trap - 0 1 2 15
+	if [ -n "$SQL_FILE" ]; then
+		assert_temp_file "$SQL_FILE" SQL_FILE
+		rm -f "$SQL_FILE"
+	fi
+	if [ -n "$UPLOADS_ZIP" ]; then
+		assert_temp_file "$UPLOADS_ZIP" UPLOADS_ZIP
+		rm -f "$UPLOADS_ZIP"
+	fi
+	if [ -n "$ARCHIVE_LISTING" ]; then
+		assert_temp_file "$ARCHIVE_LISTING" ARCHIVE_LISTING
+		rm -f "$ARCHIVE_LISTING"
+	fi
+	if [ -n "$TRANSIENT_NEW" ]; then
+		case "$TRANSIENT_NEW" in "$WP_DIR"/*) rm -rf "$TRANSIENT_NEW" ;; esac
+	fi
+	if [ -n "$TRANSIENT_OLD" ] && [ -n "$TRANSIENT_TARGET" ]; then
+		case "$TRANSIENT_OLD:$TRANSIENT_TARGET" in
+			"$WP_DIR"/*:"$WP_DIR"/*)
+				if [ ! -e "$TRANSIENT_TARGET" ] && [ -e "$TRANSIENT_OLD" ]; then mv "$TRANSIENT_OLD" "$TRANSIENT_TARGET" 2>/dev/null || true
+				elif [ -e "$TRANSIENT_OLD" ]; then rm -rf "$TRANSIENT_OLD"
+				fi
+				;;
+		esac
+	fi
+	if [ "$lock_acquired" -eq 1 ]; then
+		rm -f "$SERVER_LOCK_DIR/pid"
+		rmdir "$SERVER_LOCK_DIR" 2>/dev/null || true
+	fi
+	exit "$status"
+}
+
+assert_temp_file "$SQL_FILE" SQL_FILE
+assert_temp_file "$UPLOADS_ZIP" UPLOADS_ZIP
+trap cleanup_exit 0 1 2 15
+
+acquire_lock() {
+	mkdir -p "$(dirname "$SERVER_LOCK_DIR")"
+	if ! mkdir "$SERVER_LOCK_DIR" 2>/dev/null; then
+		fail "Another deployment operation is already running"
+	fi
+	lock_acquired=1
+	printf '%s\n' "$$" > "$SERVER_LOCK_DIR/pid"
+}
+
+cleanup_stale_temp_files() {
+	mkdir -p "$SERVER_EXPECTED_TMP_DIR"
+	find "$SERVER_EXPECTED_TMP_DIR" -type f \( -name 'local-db-*.sql' -o -name 'uploads-*.zip' -o -name 'uploads-*.list' \) -mtime +0 -exec rm -f {} \;
+}
+
+assert_free_space_kb() {
+	require_cmd df
+	require_cmd awk
+	path="$1"
+	extra_kb="$2"
+	label="$3"
+	available_kb="$(df -Pk "$path" | awk 'NR==2 { print $4 }')"
+	case "$available_kb" in ''|*[!0-9]*) fail "$label free-space check failed" ;; esac
+	required_kb=$((MIN_REMOTE_FREE_SPACE_MB * 1024 + extra_kb))
+	[ "$available_kb" -ge "$required_kb" ] || fail "$label does not have enough free space"
+}
+
+assert_sql_dump() {
+	require_cmd grep
+	file="$1"
+	[ -s "$file" ] || fail "SQL dump is empty or missing"
+	grep -Eq '^-- (MySQL|MariaDB) dump' "$file" || fail "SQL dump header is invalid"
+	grep -Eq '^(CREATE TABLE|INSERT INTO|-- Table structure for table)' "$file" || fail "SQL dump contains no table structure"
+}
+
+assert_sql_dump_table_prefix() {
+	file="$1"
+	prefix="$2"
+	awk -v prefix="$prefix" '
+		/^CREATE TABLE( IF NOT EXISTS)? `/ {
+			found=1
+			table=$0
+			sub(/^CREATE TABLE( IF NOT EXISTS)? `/, "", table)
+			sub(/`.*/, "", table)
+			if (index(table, prefix) != 1) invalid=1
+		}
+		END { exit (!found || invalid) }
+	' "$file" || fail "SQL dump table prefix does not match server policy"
+}
+
+update_repository() {
+	require_cmd git
+	[ -f "$SERVER_GIT_SSH_KEY" ] || fail "Server Git SSH key was not found"
+	(
+		cd "$REPO_DIR"
+		GIT_SSH_COMMAND="ssh -i $SERVER_GIT_SSH_KEY -o IdentitiesOnly=yes" git pull --ff-only origin main
+	)
+}
+
+database_connection() {
+	database_host="$1"
+	case "$database_host" in
+		*:*)
+			DB_HOST_VALUE="${database_host%%:*}"
+			DB_PORT_VALUE="${database_host##*:}"
+			;;
+		*)
+			DB_HOST_VALUE="$database_host"
+			DB_PORT_VALUE=''
+			;;
+	esac
+}
+
+assert_sync_path() {
+	relative="$1"
+	case "$relative" in
+		''|.|/*|*\\*|*:*) fail "Unsafe sync path" ;;
+		../*|*/../*|*/..|./*|*/./*|*/.|.git|.git/*|.deploy|.deploy/*|wp-config.php) fail "Unsafe sync path" ;;
+	esac
+}
+
+assert_no_symlink_components() {
+	base="$1"
+	relative_path="$2"
+	current="$base"
+	old_ifs="$IFS"
+	IFS='/'
+	for segment in $relative_path; do
+		IFS="$old_ifs"
+		current="$current/$segment"
+		[ ! -L "$current" ] || fail "Sync path must not contain symbolic links"
+		IFS='/'
+	done
+	IFS="$old_ifs"
+}
+
 copy_code() {
-	old_ifs="$IFS"; IFS=','
+	require_cmd du
+	canonical_wp="$(CDPATH= cd -P "$WP_DIR" && pwd)"
+	old_ifs="$IFS"
+	IFS=','
 	for relative in $SYNC_PATHS; do
 		IFS="$old_ifs"
-		case "$relative" in ''|/*|*../*|../*|*/..) fail "Unsafe sync path: $relative" ;; esac
-		source_path="$REPO_DIR/$relative"; target_path="$WP_DIR/$relative"
-		[ -d "$source_path" ] || fail "Sync source not found: $source_path"
+		assert_sync_path "$relative"
+		source_path="$REPO_DIR/$relative"
+		target_path="$canonical_wp/$relative"
+		[ -d "$source_path" ] || fail "Configured sync source was not found"
+		assert_no_symlink_components "$canonical_wp" "$relative"
+		case "$target_path" in "$canonical_wp"/*) ;; *) fail "Sync target escaped WordPress directory" ;; esac
 		mkdir -p "$(dirname "$target_path")"
-		if command -v rsync >/dev/null 2>&1; then rsync -a --delete "$source_path/" "$target_path/"
-		else rm -rf "$target_path"; mkdir -p "$target_path"; cp -R "$source_path/." "$target_path/"; fi
+		source_kb="$(du -sk "$source_path" | awk 'NR==1 { print $1 }')"
+		case "$source_kb" in ''|*[!0-9]*) fail "Code size check failed" ;; esac
+		assert_free_space_kb "$WP_DIR" "$source_kb" "WordPress filesystem"
+		TRANSIENT_TARGET="$target_path"
+		TRANSIENT_NEW="$target_path.__new__.$timestamp"
+		TRANSIENT_OLD="$target_path.__old__.$timestamp"
+		rm -rf "$TRANSIENT_NEW" "$TRANSIENT_OLD"
+		mkdir -p "$TRANSIENT_NEW"
+		if command -v rsync >/dev/null 2>&1; then
+			rsync -a "$source_path/" "$TRANSIENT_NEW/"
+		else
+			cp -R "$source_path/." "$TRANSIENT_NEW/"
+		fi
+		[ ! -e "$target_path" ] || mv "$target_path" "$TRANSIENT_OLD"
+		if ! mv "$TRANSIENT_NEW" "$target_path"; then
+			[ ! -e "$TRANSIENT_OLD" ] || mv "$TRANSIENT_OLD" "$target_path"
+			fail "Atomic code replacement failed"
+		fi
+		rm -rf "$TRANSIENT_OLD"
+		TRANSIENT_NEW=''; TRANSIENT_OLD=''; TRANSIENT_TARGET=''
 		IFS=','
 	done
 	IFS="$old_ifs"
 }
+
 backup_database() {
-	require_cmd mysqldump; assert_database
-	name="$(wp_config_value DB_NAME)"; user="$(wp_config_value DB_USER)"
-	pass="$(wp_config_value DB_PASSWORD)"; host="$(wp_config_value DB_HOST)"
-	mkdir -p "$BACKUP_DIR"; file="$BACKUP_DIR/db-$timestamp.sql"
-	MYSQL_PWD="$pass" mysqldump $(mysql_args "$host") --user="$user" --single-transaction --quick --no-tablespaces --default-character-set=utf8mb4 "$name" > "$file"
-	command -v gzip >/dev/null 2>&1 && gzip -f "$file"
-}
-import_database() {
-	require_cmd mysql; assert_database; [ -f "$SQL_FILE" ] || fail "SQL file not found"
-	name="$(wp_config_value DB_NAME)"; user="$(wp_config_value DB_USER)"
-	pass="$(wp_config_value DB_PASSWORD)"; host="$(wp_config_value DB_HOST)"
-	MYSQL_PWD="$pass" mysql $(mysql_args "$host") --user="$user" "$name" < "$SQL_FILE"
-}
-sync_uploads() {
-	[ -f "$UPLOADS_ZIP" ] || fail "Uploads archive not found"; require_cmd unzip
-	new="$WP_DIR/wp-content/uploads.__new__"; old="$WP_DIR/wp-content/uploads.__old__"; current="$WP_DIR/wp-content/uploads"
-	rm -rf "$new" "$old"; mkdir -p "$new"; unzip -q "$UPLOADS_ZIP" -d "$new"
-	[ ! -d "$current" ] || mv "$current" "$old"; mv "$new" "$current"; rm -rf "$old"
-}
-cleanup_wordpress() {
-	wp_cli search-replace "$LOCAL_URL" "$REMOTE_URL" --all-tables --precise --recurse-objects --skip-columns=guid
-	wp_cli option update home "$REMOTE_URL"; wp_cli option update siteurl "$REMOTE_URL"
-	wp_cli cache flush || true; wp_cli transient delete --all || true; wp_cli rewrite flush --hard || true
-}
-cleanup() {
-	find "$BACKUP_DIR" -type f -name 'db-*.sql*' | sort -r | awk "NR>$KEEP_BACKUPS" | xargs -r rm -f
-	[ -z "$SQL_FILE" ] || rm -f "$SQL_FILE"; [ -z "$UPLOADS_ZIP" ] || rm -f "$UPLOADS_ZIP"
+	require_cmd mysqldump
+	name="$(wp_config_value DB_NAME)"
+	user="$(wp_config_value DB_USER)"
+	pass="$(wp_config_value DB_PASSWORD)"
+	database_connection "$(wp_config_value DB_HOST)"
+	mkdir -p "$BACKUP_DIR"
+	BACKUP_FILE="$BACKUP_DIR/db-$timestamp.sql"
+	if [ -n "$DB_PORT_VALUE" ]; then
+		MYSQL_PWD="$pass" mysqldump --host="$DB_HOST_VALUE" --port="$DB_PORT_VALUE" --user="$user" --single-transaction --quick --no-tablespaces --default-character-set=utf8mb4 "$name" > "$BACKUP_FILE"
+	else
+		MYSQL_PWD="$pass" mysqldump --host="$DB_HOST_VALUE" --user="$user" --single-transaction --quick --no-tablespaces --default-character-set=utf8mb4 "$name" > "$BACKUP_FILE"
+	fi
+	assert_sql_dump "$BACKUP_FILE"
 }
 
+mysql_import_file() {
+	import_file="$1"
+	if [ -n "$DB_PORT_VALUE" ]; then
+		MYSQL_PWD="$pass" mysql --host="$DB_HOST_VALUE" --port="$DB_PORT_VALUE" --user="$user" "$name" < "$import_file"
+	else
+		MYSQL_PWD="$pass" mysql --host="$DB_HOST_VALUE" --user="$user" "$name" < "$import_file"
+	fi
+}
+
+import_database() {
+	require_cmd mysql
+	assert_sql_dump "$SQL_FILE"
+	assert_sql_dump_table_prefix "$SQL_FILE" "$SERVER_EXPECTED_DB_TABLE_PREFIX"
+	name="$(wp_config_value DB_NAME)"
+	user="$(wp_config_value DB_USER)"
+	pass="$(wp_config_value DB_PASSWORD)"
+	database_connection "$(wp_config_value DB_HOST)"
+	if ! mysql_import_file "$SQL_FILE"; then
+		if mysql_import_file "$BACKUP_FILE"; then fail "Database import failed; rollback completed"
+		else fail "Database import failed and rollback failed"
+		fi
+	fi
+	if command -v gzip >/dev/null 2>&1; then
+		gzip -f "$BACKUP_FILE"
+		gzip -t "$BACKUP_FILE.gz" || fail "Compressed database backup is invalid"
+	fi
+}
+
+sync_uploads() {
+	[ -f "$UPLOADS_ZIP" ] || fail "Uploads archive was not found"
+	require_cmd unzip
+	new="$WP_DIR/wp-content/uploads.__new__"
+	old="$WP_DIR/wp-content/uploads.__old__"
+	current="$WP_DIR/wp-content/uploads"
+	ARCHIVE_LISTING="$SERVER_EXPECTED_TMP_DIR/uploads-$timestamp.list"
+	[ ! -L "$new" ] && [ ! -L "$old" ] && [ ! -L "$current" ] || fail "Uploads paths must not be symbolic links"
+	unzip -tq "$UPLOADS_ZIP" >/dev/null || fail "Uploads archive integrity check failed"
+	unzip -Z1 "$UPLOADS_ZIP" > "$ARCHIVE_LISTING"
+	while IFS= read -r entry; do
+		case "$entry" in ''|/*|../*|*/../*|*/..) fail "Uploads archive contains an unsafe path" ;; esac
+	done < "$ARCHIVE_LISTING"
+	rm -f "$ARCHIVE_LISTING"
+	ARCHIVE_LISTING=''
+	uncompressed_kb="$(unzip -l "$UPLOADS_ZIP" | awk 'END { print int(($1 + 1023) / 1024) }')"
+	case "$uncompressed_kb" in ''|*[!0-9]*) fail "Uploads size check failed" ;; esac
+	assert_free_space_kb "$WP_DIR" "$uncompressed_kb" "WordPress filesystem"
+	rm -rf "$new" "$old"
+	TRANSIENT_TARGET="$current"; TRANSIENT_NEW="$new"; TRANSIENT_OLD="$old"
+	mkdir -p "$new"
+	unzip -q "$UPLOADS_ZIP" -d "$new"
+	find "$new" -type f -print | grep -q . || fail "Uploads archive contains no files"
+	[ ! -d "$current" ] || mv "$current" "$old"
+	if ! mv "$new" "$current"; then
+		[ ! -d "$old" ] || mv "$old" "$current"
+		fail "Atomic uploads replacement failed"
+	fi
+	rm -rf "$old"
+	TRANSIENT_NEW=''; TRANSIENT_OLD=''; TRANSIENT_TARGET=''
+}
+
+cleanup_wordpress() {
+	wp_cli search-replace "$LOCAL_URL" "$REMOTE_URL" --all-tables --precise --recurse-objects --skip-columns=guid
+	wp_cli option update home "$REMOTE_URL"
+	wp_cli option update siteurl "$REMOTE_URL"
+	wp_cli cache flush || true
+	wp_cli transient delete --all || true
+	wp_cli rewrite flush --hard || true
+}
+
+cleanup_backups() {
+	find "$BACKUP_DIR" -type f -name 'db-*.sql*' | sort -r | awk "NR>$KEEP_BACKUPS" | while IFS= read -r backup_file; do
+		[ -z "$backup_file" ] || rm -f "$backup_file"
+	done
+}
+
+assert_mode
+assert_server_policy
+assert_wordpress_target
+acquire_lock
+cleanup_stale_temp_files
+mkdir -p "$BACKUP_DIR"
+assert_free_space_kb "$WP_DIR" 0 "WordPress filesystem"
+assert_free_space_kb "$BACKUP_DIR" 0 "Backup filesystem"
+
 case "$DEPLOY_MODE" in
-	preflight) require_cmd git; require_cmd mysql; require_cmd mysqldump; require_cmd unzip; assert_database; wp_cli --info ;;
-	code) copy_code ;;
-	db|full)
-		[ "$DEPLOY_MODE" != full ] || copy_code
-		backup_database; import_database
-		[ -z "$UPLOADS_ZIP" ] || sync_uploads
-		cleanup_wordpress; cleanup
+	preflight)
+		require_cmd git
+		[ -f "$SERVER_GIT_SSH_KEY" ] || fail "Server Git SSH key was not found"
+		wp_cli --info
 		;;
-	*) fail "Unknown DEPLOY_MODE: $DEPLOY_MODE" ;;
+	code)
+		update_repository
+		copy_code
+		;;
+	db|full)
+		require_cmd wc
+		assert_sql_dump "$SQL_FILE"
+		assert_sql_dump_table_prefix "$SQL_FILE" "$SERVER_EXPECTED_DB_TABLE_PREFIX"
+		incoming_kb="$(wc -c < "$SQL_FILE" | awk '{ print int(($1 + 1023) / 1024) }')"
+		case "$incoming_kb" in ''|*[!0-9]*) fail "Incoming SQL size check failed" ;; esac
+		assert_free_space_kb "$BACKUP_DIR" "$incoming_kb" "Backup filesystem"
+		if [ "$DEPLOY_MODE" = full ]; then
+			update_repository
+			copy_code
+		fi
+		backup_database
+		import_database
+		[ -z "$UPLOADS_ZIP" ] || sync_uploads
+		cleanup_wordpress
+		cleanup_backups
+		;;
 esac
 
 echo "WordPress deployment completed ($DEPLOY_MODE)"
-
