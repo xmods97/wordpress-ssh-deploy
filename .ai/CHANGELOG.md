@@ -251,3 +251,27 @@ Next:
 
 Correction:
 - The subsequent DB import restored the local `active_plugins` option, so `deploy-smoke-plugin` is currently inactive; the DB homepage marker remains publicly verified.
+
+2026-08-12 | DEPLOY-BIDIRECTIONAL-SYNC | CLAUDE (implementer by user assignment) | READY_FOR_REVIEW
+
+Result:
+- Added the pull direction (staging -> local) as `pull-db`, `pull-files`, and `pull-full` with `-DryRun`, `-Confirm`, and `-Mirror`, alongside the unchanged `code`, `db`, and `full` push modes.
+- Pull is side-by-side by construction: it imports nothing, replaces no working file, and requires `LocalDatabaseTarget` to differ from `LocalDbName`, so a failed pull leaves the working local site untouched and needs no rollback.
+- Downloaded artifacts are verified before use: gzip integrity via the recorded ISIZE, SQL structure, exact table count, table prefix, and an archive listing checked for traversal, symlinks, and denied paths before a single byte is extracted.
+- `server-deploy.sh` gained `pull-db` and `pull-files` export modes that never import, never rotate backups, and never rewrite WordPress; production pull is refused there as well.
+- `-Mirror` is defined by the contract but fail-closed: it refuses both without and with `AllowDestructiveLocalReplace`.
+
+Files:
+- `deploy.ps1`, `src/WordPressSshDeploy.psm1`, `server-deploy.sh`, `deploy.config.example.ps1`, `tests/pull.Tests.ps1` (new), `README.md`, `docs/DEVELOPMENT-PLAN-RU.md`, `docs/RISKS-RU.md`, `.ai/STATE.md`, `.ai/CHANGELOG.md`, `.ai/HANDOFF.md`.
+
+Checks:
+- Full suite: 107 passed, 0 failed; `git diff --check` clean; PowerShell syntax check over 7 files clean; `sh -n` clean for `server-deploy.sh` and both test shell scripts.
+- No private hostname, account, path, database name, prefix, port, or credential in the working tree; private configs were never created or read.
+
+Risk:
+- The runner installed on staging does not know the pull modes yet, so no real pull is possible until it is reinstalled under a separate approval (R-032).
+- Pull was verified only by local mock tests; the runner pull modes were checked statically and with `sh -n`, never executed (R-033).
+- Activating a pulled copy stays manual (R-034). See R-035, R-036, R-037 for the remaining limitations.
+
+Next:
+- Independent Codex review of the branch, then integration. Staging, the local working database, commit, and push were not touched.

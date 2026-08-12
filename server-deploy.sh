@@ -46,6 +46,8 @@ DEPLOY_MODE="${DEPLOY_MODE:-code}"
 KEEP_BACKUPS="${KEEP_BACKUPS:-10}"
 SQL_FILE="${SQL_FILE:-}"
 UPLOADS_ZIP="${UPLOADS_ZIP:-}"
+PULL_ARTIFACT="${PULL_ARTIFACT:-}"
+PULL_PATHS="${PULL_PATHS:-}"
 PHP_BIN="${PHP_BIN:-php}"
 WP_CLI_BIN="${WP_CLI_BIN:-wp}"
 timestamp="$(date +%Y%m%d-%H%M%S)"
@@ -121,10 +123,33 @@ assert_table_prefix() {
 }
 
 assert_mode() {
-	case "$DEPLOY_MODE" in preflight|code|db|full) ;; *) fail "Unknown DEPLOY_MODE" ;; esac
+	case "$DEPLOY_MODE" in preflight|code|db|full|pull-db|pull-files) ;; *) fail "Unknown DEPLOY_MODE" ;; esac
+	if [ "$SERVER_ENVIRONMENT" = production ]; then
+		case "$DEPLOY_MODE" in
+			pull-db|pull-files) fail "Pulling from production is forbidden" ;;
+		esac
+	fi
 	if [ "$SERVER_ENVIRONMENT" = production ] && [ "$DEPLOY_MODE" != code ] && [ "$DEPLOY_MODE" != preflight ]; then
 		fail "Database and uploads deployment is forbidden for production"
 	fi
+}
+
+# Pull paths are WordPress-relative and must stay inside WP_DIR. The client applies the
+# same rules, so a mismatch here means the request did not come from this tool.
+assert_pull_path() {
+	value="$1"
+	case "$value" in
+		''|/*) fail "Pull path must be a non-empty relative path" ;;
+		*../*|*/..|../*|..) fail "Pull path contains an unsafe dot segment" ;;
+		./*|*/./*) fail "Pull path contains an unsafe dot segment" ;;
+		*\\*|*:*) fail "Pull path contains unsupported characters" ;;
+		*[[:space:]]*) fail "Pull path must not contain whitespace" ;;
+		wp-config*|.git|.git/*|.env|.env/*|.ssh|.ssh/*) fail "Pull path is permanently excluded" ;;
+		*/.git|*/.git/*|*/.ssh|*/.ssh/*|*/.env|*/.env/*) fail "Pull path is permanently excluded" ;;
+		*.pem|*.key|*id_rsa|*id_ed25519) fail "Pull path is permanently excluded" ;;
+		wp-content/cache|wp-content/cache/*|wp-content/upgrade|wp-content/upgrade/*) fail "Pull path is permanently excluded" ;;
+		wp-content/backup|wp-content/backup/*|wp-content/backups|wp-content/backups/*) fail "Pull path is permanently excluded" ;;
+	esac
 }
 
 assert_server_policy() {
@@ -161,6 +186,7 @@ assert_server_policy() {
 	assert_remote_path "$WP_CLI_BIN" WP_CLI_BIN
 	assert_temp_file "$SQL_FILE" SQL_FILE
 	assert_temp_file "$UPLOADS_ZIP" UPLOADS_ZIP
+	assert_temp_file "$PULL_ARTIFACT" PULL_ARTIFACT
 }
 
 assert_wordpress_target() {
@@ -234,7 +260,7 @@ acquire_lock() {
 
 cleanup_stale_temp_files() {
 	mkdir -p "$SERVER_EXPECTED_TMP_DIR"
-	find "$SERVER_EXPECTED_TMP_DIR" -type f \( -name 'local-db-*.sql' -o -name 'uploads-*.zip' -o -name 'uploads-*.list' \) -mtime +0 -exec rm -f {} \;
+	find "$SERVER_EXPECTED_TMP_DIR" -type f \( -name 'local-db-*.sql' -o -name 'uploads-*.zip' -o -name 'uploads-*.list' -o -name 'pull-db-*.sql.gz' -o -name 'pull-files-*.tar.gz' \) -mtime +0 -exec rm -f {} \;
 }
 
 assert_free_space_kb() {
@@ -373,6 +399,47 @@ backup_database() {
 	assert_sql_dump "$BACKUP_FILE"
 }
 
+# Pull export: read-only with respect to WordPress. It creates a backup and a compressed
+# copy for transfer, and never imports, rotates backups, or touches the site.
+export_database_for_pull() {
+	require_cmd gzip
+	require_cmd wc
+	[ -n "$PULL_ARTIFACT" ] || fail "PULL_ARTIFACT is required for pull-db"
+	backup_database
+	assert_sql_dump_table_prefix "$BACKUP_FILE" "$SERVER_EXPECTED_DB_TABLE_PREFIX"
+	gzip -c "$BACKUP_FILE" > "$PULL_ARTIFACT" || fail "Pull artifact could not be compressed"
+	gzip -t "$PULL_ARTIFACT" || fail "Pull artifact failed its gzip integrity check"
+	[ -s "$PULL_ARTIFACT" ] || fail "Pull artifact is empty"
+	printf 'PULL_ARTIFACT_READY %s %s\n' "$PULL_ARTIFACT" "$(wc -c < "$PULL_ARTIFACT" | tr -d ' ')"
+}
+
+export_files_for_pull() {
+	require_cmd tar
+	require_cmd gzip
+	require_cmd wc
+	[ -n "$PULL_ARTIFACT" ] || fail "PULL_ARTIFACT is required for pull-files"
+	[ -n "$PULL_PATHS" ] || fail "PULL_PATHS is required for pull-files"
+	old_ifs="$IFS"
+	IFS=','
+	# shellcheck disable=SC2086
+	set -- $PULL_PATHS
+	IFS="$old_ifs"
+	[ "$#" -gt 0 ] || fail "PULL_PATHS is required for pull-files"
+	for pull_path in "$@"; do
+		assert_pull_path "$pull_path"
+		[ -e "$WP_DIR/$pull_path" ] || fail "Pull path does not exist on the server"
+		assert_no_symlink_components "$WP_DIR" "$pull_path"
+	done
+	tar -czf "$PULL_ARTIFACT" -C "$WP_DIR" \
+		--exclude='.git' --exclude='.env' --exclude='.ssh' \
+		--exclude='wp-config*' --exclude='*.pem' --exclude='*.key' \
+		--exclude='id_rsa*' --exclude='id_ed25519*' \
+		-- "$@" || fail "Pull archive could not be created"
+	gzip -t "$PULL_ARTIFACT" || fail "Pull artifact failed its gzip integrity check"
+	[ -s "$PULL_ARTIFACT" ] || fail "Pull artifact is empty"
+	printf 'PULL_ARTIFACT_READY %s %s\n' "$PULL_ARTIFACT" "$(wc -c < "$PULL_ARTIFACT" | tr -d ' ')"
+}
+
 mysql_import_file() {
 	import_file="$1"
 	if [ -n "$DB_PORT_VALUE" ]; then
@@ -484,6 +551,15 @@ case "$DEPLOY_MODE" in
 		cleanup_wordpress
 		cleanup_backups
 		;;
+	pull-db)
+		export_database_for_pull
+		;;
+	pull-files)
+		export_files_for_pull
+		;;
 esac
 
-echo "WordPress deployment completed ($DEPLOY_MODE)"
+case "$DEPLOY_MODE" in
+	pull-db|pull-files) echo "WordPress pull export completed ($DEPLOY_MODE)" ;;
+	*) echo "WordPress deployment completed ($DEPLOY_MODE)" ;;
+esac
