@@ -691,7 +691,7 @@ DOMAIN: DEPLOYMENT
 TASK_LEAD: CODEX
 IMPLEMENTER: CODEX
 REVIEWER: CLAUDE
-STATUS: CHECKPOINT_COMPLETE
+STATUS: COMMITTED_PUSHED
 
 BRANCH: main
 WORKTREE: dedicated Codex worktree f6a5
@@ -709,6 +709,7 @@ RESULT:
 - Database rollback has one owner and starts only after import begins; protected transient files are registered in the trap, restored on failure, and replaced after remote WP-CLI cleanup.
 - Sync-path containment now covers both ordinary and full lists.
 - Local pull workspaces and Codex attachment directories are excluded from Git.
+- Independent Round3 review passed; commit `03d36eb` was pushed to `origin/main`.
 
 CHECKS:
 - Full Pester suite: 126 passed, 0 failed.
@@ -719,14 +720,14 @@ CHECKS:
 - Server smoke also passed ordinary preflight with a declared protected policy.
 
 RISKS:
-- No commit, push, runner rollout, staging pull, or real local apply was executed.
+- Protected runner rollout, staging pull, and real local apply remain unexecuted.
 - FullSyncPaths/FullPullPaths are explicit configuration lists; they must be completed per site before claiming a 100% site transfer.
 - Protected server runner/config/keys remain outside ordinary Git deployment and require a separate protected rollout.
 - No live SQL import or rollback was executed; byte-stream and rollback behavior are covered by local fixtures.
 - No live server protected replacement was executed.
 
 NEXT:
-- Stop for independent read-only Claude review. After review, use separate approvals for commit/push, protected runner rollout, and staging pull/apply smoke.
+- Use separate approvals for protected runner rollout and staging DB/pull smoke; do not run live actions as part of this commit.
 
 ## EXISTING PROJECT MIGRATION RULES
 

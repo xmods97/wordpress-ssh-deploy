@@ -2,7 +2,7 @@
 
 TEMPLATE_VERSION: existing-projects-v2
 
-HANDOFF_STATUS: READY
+HANDOFF_STATUS: ACCEPTED
 TASK_ID: DEPLOY-BIDIRECTIONAL-SYNC-REVIEW-FIXES-ROUND3
 TASK_BLOCK_SOURCE: `.ai/STATE.md`
 FROM_AGENT: CODEX
@@ -14,11 +14,11 @@ TARGET_BRANCH: main
 
 ## CURRENT CHECKPOINT
 
-Codex remains PROJECT_LEAD/TASK_LEAD and owns WORK_LOCK. This handoff requests
-independent read-only Claude review only; it does not authorize edits, commit,
-push, runner rollout, staging pull, or local apply.
+Codex remains PROJECT_LEAD/TASK_LEAD and owns WORK_LOCK. Independent Round3
+review passed and commit `03d36eb` is pushed to `origin/main`. This handoff does
+not authorize runner rollout, staging pull, or local apply.
 
-Implemented in the current Codex worktree (uncommitted on `main`):
+Implemented in the current Codex worktree on `main`:
 
 - Full deploy sends ordinary `SYNC_PATHS` separately from `FULL_SYNC_PATHS`; the
   runner validates both and selects the active list by mode.
@@ -38,11 +38,11 @@ Implemented in the current Codex worktree (uncommitted on `main`):
   file test.
 
 Checks: full Pester suite 126/126; PowerShell parsing passed; `sh -n` and the
-server smoke probes passed; `git diff --check` passed. No private configs were
-read or changed.
+server smoke probes passed; `git diff --check` passed. Commit `03d36eb` is
+pushed and the worktree is clean. No private configs were read or changed.
 
-Open: independent review, then separately approved commit/push, protected
-runner rollout, real staging pull, and real local apply.
+Open: separately approved protected runner rollout, real staging pull, and real
+local apply.
 
 ## Цель
 
