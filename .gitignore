@@ -1,6 +1,8 @@
 deploy.config.ps1
 server.config.sh
 .deploy/
+.pull/
+.codex-remote-attachments/
 *.local.ps1
 .DS_Store
 Thumbs.db

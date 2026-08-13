@@ -275,3 +275,68 @@ Risk:
 
 Next:
 - Independent Codex review of the branch, then integration. Staging, the local working database, commit, and push were not touched.
+
+2026-08-12 | DEPLOY-BIDIRECTIONAL-SYNC-FULL-BRIDGE | CODEX | CHECKPOINT_COMPLETE
+
+Result:
+- Added explicit full-push and full-pull path lists, a separate protected archive with paired confirmations, and remote protected-file backup/replacement.
+- Added `apply-pull` to back up the local database and configured pull paths, map the remote URL to the local URL, and atomically replace the verified workspace files.
+- Updated the example configuration, README, and development plan.
+
+Checks:
+- Full Pester suite: 116 passed, 0 failed; PowerShell parsing passed; `sh -n server-deploy.sh` passed; `git diff --check` passed.
+
+Risk:
+- No commit, push, runner rollout, staging pull, or real local apply was executed. Site-specific full path lists and protected runner policy still require review and separate rollout approval.
+
+Next:
+- Stop for independent Claude review.
+
+2026-08-13 | DEPLOY-BIDIRECTIONAL-SYNC-REVIEW-FIXES | CODEX | CHECKPOINT_COMPLETE
+
+Result:
+- Fixed full-mode server policy enforcement and blocked protected paths from ordinary sync.
+- Added byte-preserving native SQL import, PS5.1-safe file rollback, partial-import DB restore, protected replacement restore handling, and apply-pull workspace revalidation.
+- Updated pull activation documentation and added executable server smoke probes.
+
+Checks:
+- Full Pester suite: 124 passed, 0 failed; PowerShell parser checks passed; `sh -n` passed; `git diff --check` passed.
+- Server smoke probes passed for full ordinary-path policy mismatch and protected ordinary-sync rejection.
+
+Risk:
+- Commit, push, runner rollout, staging pull, and real local apply remain intentionally unexecuted.
+
+Next:
+- Stop for independent read-only Claude review.
+
+2026-08-13 | DEPLOY-BIDIRECTIONAL-SYNC-REVIEW-FIXES-ROUND2 | CODEX | CHECKPOINT_COMPLETE
+
+Result:
+- Fixed separate ordinary/full path policy handling and made the server protected-path list authoritative.
+- Made local SQL import byte-safe, added local prefix validation, and limited rollback to imports that actually started.
+- Added protected transient cleanup/recovery, moved protected replacement after WordPress cleanup, and extended protected-path containment checks to both sync lists.
+
+Checks:
+- Full Pester suite: 125 passed, 0 failed; PowerShell parser checks passed; `sh -n` passed; server smoke probes passed; `git diff --check` passed.
+
+Risk:
+- Commit, push, runner rollout, staging pull, and real local apply remain intentionally unexecuted.
+
+Next:
+- Stop for independent read-only Claude review.
+
+2026-08-13 | DEPLOY-BIDIRECTIONAL-SYNC-REVIEW-FIXES-ROUND3 | CODEX | CHECKPOINT_COMPLETE
+
+Result:
+- Fixed Windows PowerShell SQL stdin handling by forcing a no-preamble encoding before StandardInput creation and restoring the caller setting afterward.
+- Made local WordPress table-prefix validation explicitly ordinal and added regression coverage for both defects.
+- Added Git exclusions for local pull workspaces and Codex remote attachments before the commit checkpoint.
+
+Checks:
+- Full Pester suite: 126 passed, 0 failed; PowerShell parser checks passed; `sh -n` passed; server smoke probes passed; `git diff --check` passed.
+
+Risk:
+- Commit, push, runner rollout, staging pull, and real local apply remain intentionally unexecuted.
+
+Next:
+- Stop for independent read-only Claude review.

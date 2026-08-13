@@ -45,6 +45,16 @@ $DeployConfig = @{
 		'wp-content/plugins/example-plugin'
 	)
 
+	# Full deploy paths. Use this only for explicit -Mode full; code mode remains scoped
+	# to SyncPaths. Protected paths require -ReplaceProtected -ConfirmProtected.
+	FullSyncPaths = @(
+		'wp-content/themes/example-theme',
+		'wp-content/plugins/example-plugin'
+	)
+	ProtectedSyncPaths = @(
+		'wp-config.php'
+	)
+
 	KeepBackups = 10
 
 	# Exact number of tables the local database export must contain.
@@ -69,6 +79,18 @@ $DeployConfig = @{
 
 	# WordPress-relative paths that pull-files may bring down. Everything else is refused.
 	AllowedPullPaths = @(
+		'wp-content/uploads'
+	)
+
+	# Full pull paths. Configure the complete safe WordPress surface for a site.
+	# Protected files, .git, secrets, caches, and backups are always refused.
+	FullPullPaths = @(
+		'index.php',
+		'wp-admin',
+		'wp-includes',
+		'wp-content/themes',
+		'wp-content/plugins',
+		'wp-content/mu-plugins',
 		'wp-content/uploads'
 	)
 

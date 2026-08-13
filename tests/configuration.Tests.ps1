@@ -57,6 +57,35 @@ Describe 'Deploy configuration validation' {
 		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'Duplicate SyncPaths'
 	}
 
+	It 'accepts separate full and protected sync paths' {
+		$config = $validConfiguration.Clone()
+		$config.FullSyncPaths = @('wp-content/themes/example-theme', 'wp-content/plugins/example-plugin')
+		$config.ProtectedSyncPaths = @('wp-config.php')
+		@(Get-DeployConfigurationErrors $config).Count | Should Be 0
+	}
+
+	It 'rejects protected paths outside the explicit protected list rules' {
+		$config = $validConfiguration.Clone()
+		$config.ProtectedSyncPaths = @('../secrets', '.git/config')
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'Unsafe ProtectedSyncPaths value'
+	}
+
+	It 'does not allow a protected path in the ordinary full sync list' {
+		$config = $validConfiguration.Clone()
+		$config.FullSyncPaths = @('wp-config.php')
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'Unsafe FullSyncPaths value'
+		$config.FullSyncPaths = @('wp-content')
+		$config.ProtectedSyncPaths = @('wp-content/private.php')
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'overlaps ProtectedSyncPaths'
+	}
+
+	It 'does not allow a protected descendant in the ordinary code sync list' {
+		$config = $validConfiguration.Clone()
+		$config.SyncPaths = @('wp-content')
+		$config.ProtectedSyncPaths = @('wp-content/private.php')
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'SyncPaths overlaps ProtectedSyncPaths'
+	}
+
 	It 'rejects a runner inside the writable repository' {
 		$config = $validConfiguration.Clone()
 		$config.RemoteRunnerPath = '/srv/repos/example-site/server-deploy.sh'

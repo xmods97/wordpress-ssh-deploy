@@ -27,6 +27,24 @@ Describe 'POSIX shell quoting' {
 		$command | Should Match "sh '/usr/local/libexec/wordpress-ssh-deploy/example-site/server-deploy\.sh'$"
 	}
 
+	It 'carries separate full paths and the protected archive only when approved' {
+		$config = $validConfiguration.Clone()
+		$ordinary = @('wp-content/themes/example-theme')
+		$full = @('wp-admin', 'wp-content/themes/example-theme')
+		$command = New-RemoteDeployCommand $config 'full' '/srv/tmp/db.sql' '/srv/tmp/uploads.zip' -SyncPaths $ordinary -FullSyncPaths $full -ProtectedArchiveFile '/srv/tmp/protected.zip' -ReplaceProtected
+		$command | Should Match "SYNC_PATHS='wp-content/themes/example-theme'"
+		$command | Should Match "FULL_SYNC_PATHS='wp-admin,wp-content/themes/example-theme'"
+		$command | Should Match "PROTECTED_PATHS='wp-config.php'"
+		$command | Should Match "PROTECTED_ARCHIVE='/srv/tmp/protected\.zip'"
+		$command | Should Match "REPLACE_PROTECTED='1'"
+	}
+
+	It 'omits protected paths from ordinary deploy commands' {
+		$command = New-RemoteDeployCommand $validConfiguration 'code'
+		$command | Should Match "PROTECTED_PATHS=''"
+		$command | Should Match "REPLACE_PROTECTED='0'"
+	}
+
 	It 'does not expose a quoted value as a second command' {
 		$command = New-RemoteDeployCommand $validConfiguration 'db' "x'; touch /tmp/unsafe; echo '" ''
 		$command | Should Match 'SQL_FILE='

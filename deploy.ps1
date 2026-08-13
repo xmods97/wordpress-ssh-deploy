@@ -1,13 +1,16 @@
 [CmdletBinding()]
 param(
 	[Parameter(Position = 0)] [string] $Message = '',
-	[ValidateSet('full', 'code', 'db', 'pull-db', 'pull-files', 'pull-full')] [string] $Mode = 'code',
+	[ValidateSet('full', 'code', 'db', 'pull-db', 'pull-files', 'pull-full', 'apply-pull')] [string] $Mode = 'code',
 	[switch] $SkipGit,
 	[switch] $SkipUploads,
 	[switch] $PreflightOnly,
 	[switch] $DryRun,
 	[switch] $Confirm,
-	[switch] $Mirror
+	[switch] $Mirror,
+	[switch] $ReplaceProtected,
+	[switch] $ConfirmProtected,
+	[string] $PullWorkspace = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,6 +28,52 @@ function New-Zip([string] $SourceDirectory, [string] $DestinationZip) {
 	)
 }
 
+function New-ProtectedArchive([string] $StageDirectory, [string] $DestinationZip) {
+	if (-not $DeployConfig.Contains('ProtectedSyncPaths') -or @($DeployConfig.ProtectedSyncPaths).Count -eq 0) {
+		throw 'Protected replacement requires ProtectedSyncPaths in deploy.config.ps1.'
+	}
+	New-Item -ItemType Directory -Force -Path $StageDirectory | Out-Null
+	foreach ($relative in @($DeployConfig.ProtectedSyncPaths)) {
+		$source = Join-Path $DeployConfig.LocalWpPath $relative
+		Assert-Path $source "Protected local file ($relative)"
+		$destination = Join-Path $StageDirectory $relative
+		New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+		Copy-Item -LiteralPath $source -Destination $destination -Force
+	}
+	New-Zip $StageDirectory $DestinationZip
+	Assert-ZipArchiveFile $DestinationZip
+}
+
+function Invoke-LocalMysqlDump([string] $Path) {
+	$dbArgs = @("--host=$($DeployConfig.LocalDbHost)", "--user=$($DeployConfig.LocalDbUser)", '--single-transaction', '--quick', '--hex-blob', '--default-character-set=utf8mb4', '--result-file=' + $Path, $DeployConfig.LocalDbName)
+	$previousPassword = $env:MYSQL_PWD
+	try {
+		if ($DeployConfig.LocalDbPassword) { $env:MYSQL_PWD = $DeployConfig.LocalDbPassword }
+		else { Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue }
+		Invoke-CheckedCommand $DeployConfig.MysqldumpPath $dbArgs $repoRoot
+	} finally {
+		if ($null -eq $previousPassword) { Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue }
+		else { $env:MYSQL_PWD = $previousPassword }
+	}
+}
+
+function Invoke-LocalMysqlImport([string] $Path) {
+	$mysqlArgs = @(
+		"--host=$($DeployConfig.LocalDbHost)",
+		"--user=$($DeployConfig.LocalDbUser)",
+		'--default-character-set=utf8mb4',
+		$DeployConfig.LocalDbName
+	)
+	$environment = @{}
+	if ($DeployConfig.LocalDbPassword) { $environment.MYSQL_PWD = [string] $DeployConfig.LocalDbPassword }
+	Invoke-NativeProcessWithFileInput -FilePath $DeployConfig.MysqlPath -Arguments $mysqlArgs -InputPath $Path -EnvironmentVariables $environment | Out-Null
+}
+
+function Invoke-LocalWpCli([string[]] $Arguments) {
+	& $DeployConfig.LocalPhpPath $DeployConfig.LocalWpCliPath "--path=$($DeployConfig.LocalWpPath)" @Arguments
+	if ($LASTEXITCODE -ne 0) { throw "Command failed ($LASTEXITCODE): $($DeployConfig.LocalWpCliPath)" }
+}
+
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $modulePath = Join-Path $repoRoot 'src\WordPressSshDeploy.psm1'
 $configPath = Join-Path $repoRoot 'deploy.config.ps1'
@@ -40,25 +89,41 @@ if (-not $DeployConfig) { throw 'deploy.config.ps1 must define $DeployConfig.' }
 Assert-DeployConfiguration -Configuration $DeployConfig
 Assert-DeployModeAllowed -Environment $DeployConfig.Environment -Mode $Mode
 $isPull = $Mode -in (Get-PullModeNames)
+$isApplyPull = $Mode -eq 'apply-pull'
 if ($Message) {
 	throw 'Automatic Git commit/push was removed. Commit and push separately, then run deploy without Message.'
 }
 if ($SkipGit -and $Mode -ne 'db') {
 	throw '-SkipGit is supported only for db mode. Code deployment requires a clean, pushed Git checkout.'
 }
-if (-not $isPull -and ($DryRun -or $Confirm -or $Mirror)) {
+if (-not $isPull -and -not $isApplyPull -and ($DryRun -or $Confirm -or $Mirror)) {
 	throw '-DryRun, -Confirm, and -Mirror apply only to pull modes.'
 }
-if ($isPull -and ($SkipGit -or $SkipUploads -or $PreflightOnly)) {
+if (($isPull -or $isApplyPull) -and ($SkipGit -or $SkipUploads -or $PreflightOnly)) {
 	throw '-SkipGit, -SkipUploads, and -PreflightOnly apply only to push modes.'
+}
+if ($isApplyPull -and ($Mirror -or $ReplaceProtected -or $ConfirmProtected)) {
+	throw '-Mirror, -ReplaceProtected, and -ConfirmProtected do not apply to apply-pull.'
+}
+if (-not ($Mode -in @('full', 'apply-pull')) -and ($ReplaceProtected -or $ConfirmProtected)) {
+	throw '-ReplaceProtected and -ConfirmProtected apply only to full mode.'
+}
+if ($ConfirmProtected -and -not $ReplaceProtected) {
+	throw '-ConfirmProtected requires -ReplaceProtected.'
+}
+if ($ReplaceProtected -and -not $ConfirmProtected) {
+	throw 'Protected replacement requires both -ReplaceProtected and -ConfirmProtected.'
 }
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $buildDir = Join-Path $repoRoot ".deploy\$stamp"
 $sqlPath = Join-Path $buildDir 'local-db.sql'
 $uploadsZip = Join-Path $buildDir 'uploads.zip'
+$protectedStage = Join-Path $buildDir 'protected'
+$protectedZip = Join-Path $buildDir 'protected.zip'
 $remoteSql = "$($DeployConfig.RemoteTmpPath)/local-db-$stamp.sql"
 $remoteUploads = "$($DeployConfig.RemoteTmpPath)/uploads-$stamp.zip"
+$remoteProtected = "$($DeployConfig.RemoteTmpPath)/protected-$stamp.zip"
 $target = "$($DeployConfig.SshUser)@$($DeployConfig.SshHost)"
 $remoteCleanupNeeded = $false
 $sshArgs = @('-p', [string]$DeployConfig.SshPort)
@@ -164,6 +229,101 @@ if ($isPull) {
 	return
 }
 
+if ($isApplyPull) {
+	$plan = New-ApplyPullPlan -Configuration $DeployConfig -Workspace $PullWorkspace -WorkspaceRoot $repoRoot -DryRun:$DryRun -Confirmed:$Confirm
+	Write-Step 'Apply pulled workspace plan'
+	Get-ApplyPullSummaryLines $plan | ForEach-Object { Write-Host "    $_" }
+	if ($plan.IsDryRun) {
+		Write-Ok 'Dry run: local database and working files were not changed.'
+		return
+	}
+
+	Assert-Path $DeployConfig.LocalWpPath 'Local WordPress'
+	Assert-Path (Join-Path $DeployConfig.LocalWpPath 'wp-config.php') 'wp-config.php'
+	Assert-Path $plan.DatabaseSql 'Pulled database SQL'
+	Assert-Path $plan.FilesRoot 'Pulled files directory'
+	Assert-ApplyPullWorkspace -FilesRoot $plan.FilesRoot -PullPaths $plan.PullPaths -ExcludedPaths @($DeployConfig.ExcludedPullPaths)
+	New-Item -ItemType Directory -Force -Path $plan.LocalBackupDirectory | Out-Null
+	$applyStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+	$dbBackup = Join-Path $plan.LocalBackupDirectory "local-db-$applyStamp.sql"
+	$filesBackup = Join-Path $plan.LocalBackupDirectory "files-$applyStamp"
+	$dbBackupReady = $false
+	$dbImportStarted = $false
+	$fileSwaps = @()
+	try {
+		Write-Step 'Backup local database and configured pull paths'
+		Invoke-LocalMysqlDump $dbBackup
+		Assert-SqlDumpFile $dbBackup
+		$dbBackupReady = $true
+		New-Item -ItemType Directory -Force -Path $filesBackup | Out-Null
+		foreach ($relative in @($plan.PullPaths)) {
+			$target = Join-Path $DeployConfig.LocalWpPath $relative
+			$backup = Join-Path $filesBackup $relative
+			if (Test-Path -LiteralPath $target) {
+				New-Item -ItemType Directory -Force -Path (Split-Path -Parent $backup) | Out-Null
+				Copy-Item -LiteralPath $target -Destination $backup -Recurse -Force
+			}
+		}
+
+		Assert-SqlDumpFile $plan.DatabaseSql
+		$null = Assert-SqlDumpTableSet $plan.DatabaseSql $DeployConfig.ExpectedDbTablePrefix $DeployConfig.ExpectedDbTableCount
+		$localPrefix = ([string] (Invoke-LocalWpCli @('config', 'get', 'table_prefix', '--type=variable'))).Trim()
+		if (-not [string]::Equals($localPrefix, [string] $DeployConfig.ExpectedDbTablePrefix, [StringComparison]::Ordinal)) {
+			throw "Local WordPress table prefix does not match ExpectedDbTablePrefix: $localPrefix"
+		}
+		Write-Step 'Import pulled database and map server URL to local URL'
+		$dbImportStarted = $true
+		Invoke-LocalMysqlImport $plan.DatabaseSql
+		Invoke-LocalWpCli @('search-replace', $plan.RemoteUrl, $plan.LocalUrl, '--all-tables', '--precise', '--recurse-objects', '--skip-columns=guid')
+		Invoke-LocalWpCli @('option', 'update', 'home', $plan.LocalUrl)
+		Invoke-LocalWpCli @('option', 'update', 'siteurl', $plan.LocalUrl)
+		Invoke-LocalWpCli @('cache', 'flush')
+
+		Write-Step 'Replace all configured pulled paths'
+		foreach ($relative in @($plan.PullPaths)) {
+			$source = Join-Path $plan.FilesRoot $relative
+			$target = Join-Path $DeployConfig.LocalWpPath $relative
+			if (-not (Test-Path -LiteralPath $source)) {
+				throw "Pulled path is missing from the verified workspace: $relative"
+			}
+			$new = "$target.__new__.$applyStamp"
+			$old = "$target.__old__.$applyStamp"
+			Remove-Item -LiteralPath $new, $old -Recurse -Force -ErrorAction SilentlyContinue
+			New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
+			if (Test-Path -LiteralPath $source -PathType Container) {
+				New-Item -ItemType Directory -Force -Path $new | Out-Null
+				Get-ChildItem -LiteralPath $source -Force | ForEach-Object {
+					Copy-Item -LiteralPath $_.FullName -Destination $new -Recurse -Force
+				}
+			} else {
+				Copy-Item -LiteralPath $source -Destination $new -Force
+			}
+			$hadTarget = Test-Path -LiteralPath $target
+			if ($hadTarget) { Move-Item -LiteralPath $target -Destination $old }
+			try {
+				Move-Item -LiteralPath $new -Destination $target
+			} catch {
+				if ($hadTarget -and (Test-Path -LiteralPath $old)) { Move-Item -LiteralPath $old -Destination $target -Force }
+				throw
+			}
+			$fileSwaps += [pscustomobject] @{ Target = $target; Old = $old; HadTarget = $hadTarget }
+		}
+		foreach ($swap in $fileSwaps) {
+			if ($swap.HadTarget -and (Test-Path -LiteralPath $swap.Old)) { Remove-Item -LiteralPath $swap.Old -Recurse -Force }
+		}
+
+		Write-Ok 'Pulled database and all configured files applied locally; local URL mapping completed.'
+	} catch {
+		Write-Warning 'Local pull apply failed; attempting to restore the local database and pulled paths backup.'
+		Restore-FileSwaps $fileSwaps
+		if ($dbBackupReady -and $dbImportStarted -and (Test-Path -LiteralPath $dbBackup -PathType Leaf)) {
+			try { Invoke-LocalMysqlImport $dbBackup } catch { Write-Warning 'Local database restore failed; preserve the backup for manual recovery.' }
+		}
+		throw
+	}
+	return
+}
+
 try {
 	Write-Step 'Local preflight'
 	Assert-Path $DeployConfig.LocalWpPath 'Local WordPress'
@@ -221,23 +381,31 @@ try {
 			New-Zip $DeployConfig.LocalUploadsPath $uploadsZip
 			Assert-ZipArchiveFile $uploadsZip
 		}
+		if ($Mode -eq 'full' -and $ReplaceProtected) {
+			Write-Step 'Pack explicitly approved protected files'
+			New-ProtectedArchive $protectedStage $protectedZip
+		}
 		Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, "mkdir -p $(ConvertTo-ShSingleQuotedString $DeployConfig.RemoteTmpPath)")) $repoRoot
 		$remoteCleanupNeeded = $true
 		Invoke-CheckedCommand 'scp' ($scpArgs + @($sqlPath, "$target`:$remoteSql")) $repoRoot
 		if (-not $SkipUploads) { Invoke-CheckedCommand 'scp' ($scpArgs + @($uploadsZip, "$target`:$remoteUploads")) $repoRoot }
+		if ($Mode -eq 'full' -and $ReplaceProtected) { Invoke-CheckedCommand 'scp' ($scpArgs + @($protectedZip, "$target`:$remoteProtected")) $repoRoot }
 	}
 
 	Write-Step 'Run remote deployment'
 	$sqlArg = if ($Mode -ne 'code') { $remoteSql } else { '' }
 	$uploadsArg = if ($Mode -ne 'code' -and -not $SkipUploads) { $remoteUploads } else { '' }
-	Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, (New-RemoteDeployCommand $DeployConfig $Mode $sqlArg $uploadsArg))) $repoRoot
+	$protectedArg = if ($Mode -eq 'full' -and $ReplaceProtected) { $remoteProtected } else { '' }
+	$syncPaths = @($DeployConfig.SyncPaths)
+	$fullSyncPaths = if ($DeployConfig.Contains('FullSyncPaths')) { @($DeployConfig.FullSyncPaths) } else { @($DeployConfig.SyncPaths) }
+	Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, (New-RemoteDeployCommand $DeployConfig $Mode $sqlArg $uploadsArg -SyncPaths $syncPaths -FullSyncPaths $fullSyncPaths -ProtectedArchiveFile $protectedArg -ReplaceProtected:$ReplaceProtected))) $repoRoot
 	$remoteCleanupNeeded = $false
 
 	Write-Host "`nDeploy completed: $($DeployConfig.LocalUrl) -> $($DeployConfig.RemoteUrl)" -ForegroundColor Green
 } finally {
 	if ($remoteCleanupNeeded) {
 		try {
-			$cleanupCommand = "rm -f $(ConvertTo-ShSingleQuotedString $remoteSql) $(ConvertTo-ShSingleQuotedString $remoteUploads)"
+			$cleanupCommand = "rm -f $(ConvertTo-ShSingleQuotedString $remoteSql) $(ConvertTo-ShSingleQuotedString $remoteUploads) $(ConvertTo-ShSingleQuotedString $remoteProtected)"
 			Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, $cleanupCommand)) $repoRoot
 		} catch {
 			Write-Warning 'Remote temporary file cleanup could not be confirmed. Run preflight after SSH is restored.'

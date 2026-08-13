@@ -27,7 +27,7 @@ DEPLOYMENT_LEAD: INHERIT
 
 ## ACTIVE TASK INDEX
 
-ACTIVE_TASK_IDS: DEPLOY-BIDIRECTIONAL-SYNC
+ACTIVE_TASK_IDS: DEPLOY-BIDIRECTIONAL-SYNC-REVIEW-FIXES-ROUND3
 
 
 
@@ -682,6 +682,51 @@ RISKS:
 
 Завершённые задачи удаляются из `ACTIVE_TASK_IDS`, но их итог сохраняется в `.ai/CHANGELOG.md` и Git.
 
+
+## TASK: DEPLOY-BIDIRECTIONAL-SYNC-REVIEW-FIXES-ROUND3
+
+TASK_ID: DEPLOY-BIDIRECTIONAL-SYNC-REVIEW-FIXES-ROUND3
+TASK_NAME: Third-round review fixes for SQL import and prefix validation
+DOMAIN: DEPLOYMENT
+TASK_LEAD: CODEX
+IMPLEMENTER: CODEX
+REVIEWER: CLAUDE
+STATUS: CHECKPOINT_COMPLETE
+
+BRANCH: main
+WORKTREE: dedicated Codex worktree f6a5
+BASE_COMMIT: 626bddf
+WORK_LOCK: CODEX
+
+CRITICAL: YES
+PLAN_APPROVED: YES (2026-08-13)
+EXECUTION_APPROVED: YES (2026-08-13, local implementation and tests only)
+
+RESULT:
+- Full deploy now sends ordinary `SYNC_PATHS` and separate `FULL_SYNC_PATHS`; the runner validates both and selects the effective list by mode.
+- Server protected policy is authoritative: ordinary deploys send no protected list, while explicit replacement must match `SERVER_PROTECTED_PATHS`; ordinary sync rejects protected paths.
+- Native SQL import forces a no-preamble console encoding before Windows PowerShell creates StandardInput, then streams the raw bytes; apply-pull checks the local WordPress prefix with StringComparison.Ordinal before import.
+- Database rollback has one owner and starts only after import begins; protected transient files are registered in the trap, restored on failure, and replaced after remote WP-CLI cleanup.
+- Sync-path containment now covers both ordinary and full lists.
+- Local pull workspaces and Codex attachment directories are excluded from Git.
+
+CHECKS:
+- Full Pester suite: 126 passed, 0 failed.
+- PowerShell parser checks passed for deploy.ps1 and WordPressSshDeploy.psm1.
+- POSIX shell syntax check passed for server-deploy.sh.
+- git diff --check passed.
+- Independent server smoke passed: full ordinary-path policy mismatch and protected ordinary-sync rejection.
+- Server smoke also passed ordinary preflight with a declared protected policy.
+
+RISKS:
+- No commit, push, runner rollout, staging pull, or real local apply was executed.
+- FullSyncPaths/FullPullPaths are explicit configuration lists; they must be completed per site before claiming a 100% site transfer.
+- Protected server runner/config/keys remain outside ordinary Git deployment and require a separate protected rollout.
+- No live SQL import or rollback was executed; byte-stream and rollback behavior are covered by local fixtures.
+- No live server protected replacement was executed.
+
+NEXT:
+- Stop for independent read-only Claude review. After review, use separate approvals for commit/push, protected runner rollout, and staging pull/apply smoke.
 
 ## EXISTING PROJECT MIGRATION RULES
 

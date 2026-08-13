@@ -3,14 +3,46 @@
 TEMPLATE_VERSION: existing-projects-v2
 
 HANDOFF_STATUS: READY
-TASK_ID: DEPLOY-BIDIRECTIONAL-SYNC
+TASK_ID: DEPLOY-BIDIRECTIONAL-SYNC-REVIEW-FIXES-ROUND3
 TASK_BLOCK_SOURCE: `.ai/STATE.md`
-FROM_AGENT: CLAUDE
-TO_AGENT: CODEX
-CREATED_AT: 2026-08-12
-BASE_COMMIT: b907e4a
-SOURCE_BRANCH: agent/deploy-bidirectional-sync
+FROM_AGENT: CODEX
+TO_AGENT: CLAUDE
+CREATED_AT: 2026-08-13
+BASE_COMMIT: 626bddf
+SOURCE_BRANCH: main
 TARGET_BRANCH: main
+
+## CURRENT CHECKPOINT
+
+Codex remains PROJECT_LEAD/TASK_LEAD and owns WORK_LOCK. This handoff requests
+independent read-only Claude review only; it does not authorize edits, commit,
+push, runner rollout, staging pull, or local apply.
+
+Implemented in the current Codex worktree (uncommitted on `main`):
+
+- Full deploy sends ordinary `SYNC_PATHS` separately from `FULL_SYNC_PATHS`; the
+  runner validates both and selects the active list by mode.
+- The server protected-path policy is authoritative: ordinary sync sends no
+  protected list, while explicit replacement must match the server policy.
+- Protected replacement is staged after database import and can restore the
+  protected backup on replacement failure; transient protected copies are trap
+  managed and removed on success.
+- Local `mysql` import forces a no-preamble console encoding before Windows
+  PowerShell creates StandardInput, then closes the raw pipe without changing
+  SQL bytes; apply-pull checks the staged workspace and compares the local
+  table prefix with `StringComparison.Ordinal` before import, and restores the
+  local database only after an import has started.
+- SyncPaths and FullSyncPaths are both checked for overlap with protected paths.
+- `.pull/` and `.codex-remote-attachments/` are ignored and cannot enter a commit accidentally.
+- Windows PowerShell 5.1-safe reverse file rollback is covered by a real temp
+  file test.
+
+Checks: full Pester suite 126/126; PowerShell parsing passed; `sh -n` and the
+server smoke probes passed; `git diff --check` passed. No private configs were
+read or changed.
+
+Open: independent review, then separately approved commit/push, protected
+runner rollout, real staging pull, and real local apply.
 
 ## Цель
 

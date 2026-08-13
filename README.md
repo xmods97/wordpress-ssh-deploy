@@ -116,21 +116,25 @@ The tool has two directions and they are not symmetric.
 **Push (`code`, `db`, `full`) sends local → staging.** It replaces remote data,
 so the remote runner takes a backup first and can roll the database back.
 
-**Pull (`pull-db`, `pull-files`, `pull-full`) brings staging → local, and never
-replaces anything locally.** A pull downloads verified artifacts into a
-side-by-side workspace under `.pull/<timestamp>/` and stops:
+**Pull (`pull-db`, `pull-files`, `pull-full`) brings staging → local.** The
+download phase never replaces anything locally: it stores verified artifacts
+side-by-side under `.pull/<timestamp>/` and stops:
 
 - the database arrives as a verified `database.sql`, which you import into
   `LocalDatabaseTarget` yourself when you decide to. `LocalDatabaseTarget` must
   be a different database from `LocalDbName`; the working local database is
   never written by a pull;
 - files arrive extracted under `files/`, additively. No working file is
-  replaced, moved, or deleted;
-- because nothing local is overwritten, there is no local rollback to perform:
-  a failed pull leaves the working site exactly as it was.
+  replaced, moved, or deleted during download;
+- `apply-pull -PullWorkspace <workspace> -Confirm` is the separate activation
+  step. It revalidates the staged workspace (including reparse-point checks),
+  backs up the local database and every configured pull path, imports the
+  database byte-for-byte through `mysql`, maps the remote URL to `LocalUrl`,
+  then atomically replaces the configured files. A failed apply attempts local
+  database and file restore, including when the import fails part-way through.
 
-Every pull run ends with `Pull artifacts prepared side-by-side; working local
-site was not replaced.` Activation is a separate, manual step.
+Every download run ends with `Pull artifacts prepared side-by-side; working
+local site was not replaced.` Activation is explicit and separate.
 
 Pull is off unless `PullEnabled = $true`, and it is **never** allowed when
 `Environment` is `production` — refused by configuration validation, by the
@@ -187,11 +191,17 @@ has not been updated yet, and no real pull has ever been run.** See
 # Database and full pull require an explicit confirmation
 .\deploy.ps1 -Mode pull-db -Confirm
 .\deploy.ps1 -Mode pull-full -Confirm
+
+# Activate a verified pull workspace locally after reviewing its contents.
+.\deploy.ps1 -Mode apply-pull -PullWorkspace .\.pull\<timestamp> -DryRun
+.\deploy.ps1 -Mode apply-pull -PullWorkspace .\.pull\<timestamp> -Confirm
 ```
 
 Pull switches (`-DryRun`, `-Confirm`, `-Mirror`) are rejected for push modes,
 and push switches (`-SkipGit`, `-SkipUploads`, `-PreflightOnly`) are rejected
-for pull modes.
+for pull modes. Protected push files are never taken from Git: `full` requires
+both `-ReplaceProtected` and `-ConfirmProtected`, transfers a separately
+staged archive, and the remote runner creates a backup before replacement.
 
 Code deployment never creates commits or pushes. Commit and push separately
 before running deploy. For `code` and `full`, the local checkout must be clean

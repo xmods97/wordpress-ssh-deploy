@@ -24,6 +24,8 @@ SERVER_CONFIG="$SCRIPT_DIR/server.config.sh"
 : "${SERVER_PHP_BIN:?SERVER_PHP_BIN is required in server.config.sh}"
 : "${SERVER_WP_CLI_BIN:?SERVER_WP_CLI_BIN is required in server.config.sh}"
 : "${SERVER_SYNC_PATHS:?SERVER_SYNC_PATHS is required in server.config.sh}"
+: "${SERVER_FULL_SYNC_PATHS:=${SERVER_SYNC_PATHS}}"
+: "${SERVER_PROTECTED_PATHS:=}"
 : "${SERVER_KEEP_BACKUPS:?SERVER_KEEP_BACKUPS is required in server.config.sh}"
 : "${SERVER_MIN_FREE_SPACE_MB:?SERVER_MIN_FREE_SPACE_MB is required in server.config.sh}"
 : "${SERVER_LOCK_DIR:?SERVER_LOCK_DIR is required in server.config.sh}"
@@ -39,6 +41,7 @@ SERVER_CONFIG="$SCRIPT_DIR/server.config.sh"
 : "${EXPECTED_DB_TABLE_PREFIX:?EXPECTED_DB_TABLE_PREFIX is required}"
 : "${EXPECTED_REMOTE_DOMAIN:?EXPECTED_REMOTE_DOMAIN is required}"
 : "${SYNC_PATHS:?SYNC_PATHS is required}"
+: "${FULL_SYNC_PATHS:=${SYNC_PATHS}}"
 : "${GIT_SSH_KEY:?GIT_SSH_KEY is required}"
 : "${MIN_REMOTE_FREE_SPACE_MB:?MIN_REMOTE_FREE_SPACE_MB is required}"
 
@@ -48,6 +51,9 @@ SQL_FILE="${SQL_FILE:-}"
 UPLOADS_ZIP="${UPLOADS_ZIP:-}"
 PULL_ARTIFACT="${PULL_ARTIFACT:-}"
 PULL_PATHS="${PULL_PATHS:-}"
+PROTECTED_PATHS="${PROTECTED_PATHS:-}"
+REPLACE_PROTECTED="${REPLACE_PROTECTED:-0}"
+PROTECTED_ARCHIVE="${PROTECTED_ARCHIVE:-}"
 PHP_BIN="${PHP_BIN:-php}"
 WP_CLI_BIN="${WP_CLI_BIN:-wp}"
 timestamp="$(date +%Y%m%d-%H%M%S)"
@@ -57,6 +63,8 @@ BACKUP_FILE=''
 TRANSIENT_NEW=''
 TRANSIENT_OLD=''
 TRANSIENT_TARGET=''
+PROTECTED_STAGE=''
+protected_backup=''
 
 normalize_url() {
 	value="$1"
@@ -165,6 +173,14 @@ assert_server_policy() {
 	[ "$PHP_BIN" = "$SERVER_PHP_BIN" ] || fail "PHP path does not match server policy"
 	[ "$WP_CLI_BIN" = "$SERVER_WP_CLI_BIN" ] || fail "WP-CLI path does not match server policy"
 	[ "$SYNC_PATHS" = "$SERVER_SYNC_PATHS" ] || fail "Sync paths do not match server policy"
+	[ "$FULL_SYNC_PATHS" = "$SERVER_FULL_SYNC_PATHS" ] || fail "Full sync paths do not match server policy"
+	if [ "$DEPLOY_MODE" = full ]; then ACTIVE_SYNC_PATHS="$FULL_SYNC_PATHS"; else ACTIVE_SYNC_PATHS="$SYNC_PATHS"; fi
+	server_protected_paths="$SERVER_PROTECTED_PATHS"
+	if [ "$REPLACE_PROTECTED" = 1 ]; then
+		[ "$PROTECTED_PATHS" = "$server_protected_paths" ] || fail "Protected paths do not match server policy"
+	else
+		[ -z "$PROTECTED_PATHS" ] || fail "Protected paths require explicit replacement confirmation"
+	fi
 	[ "$KEEP_BACKUPS" = "$SERVER_KEEP_BACKUPS" ] || fail "Backup retention does not match server policy"
 	[ "$MIN_REMOTE_FREE_SPACE_MB" = "$SERVER_MIN_FREE_SPACE_MB" ] || fail "Free-space policy does not match server policy"
 	case "$SERVER_GIT_SSH_KEY" in *[!A-Za-z0-9_./-]*) fail "Server Git SSH key path contains unsafe characters" ;; esac
@@ -186,6 +202,7 @@ assert_server_policy() {
 	assert_remote_path "$WP_CLI_BIN" WP_CLI_BIN
 	assert_temp_file "$SQL_FILE" SQL_FILE
 	assert_temp_file "$UPLOADS_ZIP" UPLOADS_ZIP
+	assert_temp_file "$PROTECTED_ARCHIVE" PROTECTED_ARCHIVE
 	assert_temp_file "$PULL_ARTIFACT" PULL_ARTIFACT
 }
 
@@ -222,6 +239,10 @@ cleanup_exit() {
 		assert_temp_file "$UPLOADS_ZIP" UPLOADS_ZIP
 		rm -f "$UPLOADS_ZIP"
 	fi
+	if [ -n "$PROTECTED_ARCHIVE" ]; then
+		assert_temp_file "$PROTECTED_ARCHIVE" PROTECTED_ARCHIVE
+		rm -f "$PROTECTED_ARCHIVE"
+	fi
 	if [ -n "$ARCHIVE_LISTING" ]; then
 		assert_temp_file "$ARCHIVE_LISTING" ARCHIVE_LISTING
 		rm -f "$ARCHIVE_LISTING"
@@ -237,6 +258,9 @@ cleanup_exit() {
 				fi
 				;;
 		esac
+	fi
+	if [ -n "$PROTECTED_STAGE" ]; then
+		case "$PROTECTED_STAGE" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -rf "$PROTECTED_STAGE" ;; esac
 	fi
 	if [ "$lock_acquired" -eq 1 ]; then
 		rm -f "$SERVER_LOCK_DIR/pid"
@@ -260,7 +284,7 @@ acquire_lock() {
 
 cleanup_stale_temp_files() {
 	mkdir -p "$SERVER_EXPECTED_TMP_DIR"
-	find "$SERVER_EXPECTED_TMP_DIR" -type f \( -name 'local-db-*.sql' -o -name 'uploads-*.zip' -o -name 'uploads-*.list' -o -name 'pull-db-*.sql.gz' -o -name 'pull-files-*.tar.gz' \) -mtime +0 -exec rm -f {} \;
+	find "$SERVER_EXPECTED_TMP_DIR" -type f \( -name 'local-db-*.sql' -o -name 'uploads-*.zip' -o -name 'uploads-*.list' -o -name 'protected-*.zip' -o -name 'protected-*.list' -o -name 'pull-db-*.sql.gz' -o -name 'pull-files-*.tar.gz' \) -mtime +0 -exec rm -f {} \;
 }
 
 assert_free_space_kb() {
@@ -323,10 +347,23 @@ database_connection() {
 
 assert_sync_path() {
 	relative="$1"
+	case ",$SERVER_PROTECTED_PATHS," in *",$relative,"*) fail "Protected path is not allowed in ordinary sync paths" ;; esac
 	case "$relative" in
 		''|.|/*|*\\*|*:*) fail "Unsafe sync path" ;;
-		../*|*/../*|*/..|./*|*/./*|*/.|.git|.git/*|.deploy|.deploy/*|wp-config.php) fail "Unsafe sync path" ;;
+		../*|*/../*|*/..|./*|*/./*|*/.|.git|.git/*|.deploy|.deploy/*) fail "Unsafe sync path" ;;
+		wp-config.php|.env|*.pem|*.key|*id_rsa|*id_ed25519)
+			fail "Protected path is not allowed in ordinary sync paths"
+			;;
 	esac
+}
+
+assert_protected_path() {
+	value="$1"
+	case "$value" in
+		''|/*|*../*|*/..|../*|./*|*/./*|*\\*|*:*) fail "Unsafe protected path" ;;
+	esac
+	case ",$SERVER_PROTECTED_PATHS," in *",$value,"*) ;; *) fail "Protected path was not declared by policy" ;; esac
+	[ "$REPLACE_PROTECTED" = 1 ] || fail "Protected replacement requires explicit confirmation"
 }
 
 assert_no_symlink_components() {
@@ -349,12 +386,13 @@ copy_code() {
 	canonical_wp="$(CDPATH= cd -P "$WP_DIR" && pwd)"
 	old_ifs="$IFS"
 	IFS=','
-	for relative in $SYNC_PATHS; do
+	for relative in $ACTIVE_SYNC_PATHS; do
 		IFS="$old_ifs"
 		assert_sync_path "$relative"
 		source_path="$REPO_DIR/$relative"
 		target_path="$canonical_wp/$relative"
-		[ -d "$source_path" ] || fail "Configured sync source was not found"
+		[ -e "$source_path" ] || fail "Configured sync source was not found: $relative"
+		[ ! -L "$source_path" ] || fail "Configured sync source must not be a symbolic link: $relative"
 		assert_no_symlink_components "$canonical_wp" "$relative"
 		case "$target_path" in "$canonical_wp"/*) ;; *) fail "Sync target escaped WordPress directory" ;; esac
 		mkdir -p "$(dirname "$target_path")"
@@ -365,11 +403,15 @@ copy_code() {
 		TRANSIENT_NEW="$target_path.__new__.$timestamp"
 		TRANSIENT_OLD="$target_path.__old__.$timestamp"
 		rm -rf "$TRANSIENT_NEW" "$TRANSIENT_OLD"
-		mkdir -p "$TRANSIENT_NEW"
-		if command -v rsync >/dev/null 2>&1; then
-			rsync -a "$source_path/" "$TRANSIENT_NEW/"
+		if [ -d "$source_path" ]; then
+			mkdir -p "$TRANSIENT_NEW"
+			if command -v rsync >/dev/null 2>&1; then
+				rsync -a "$source_path/" "$TRANSIENT_NEW/"
+			else
+				cp -R "$source_path/." "$TRANSIENT_NEW/"
+			fi
 		else
-			cp -R "$source_path/." "$TRANSIENT_NEW/"
+			cp -p "$source_path" "$TRANSIENT_NEW"
 		fi
 		[ ! -e "$target_path" ] || mv "$target_path" "$TRANSIENT_OLD"
 		if ! mv "$TRANSIENT_NEW" "$target_path"; then
@@ -378,6 +420,110 @@ copy_code() {
 		fi
 		rm -rf "$TRANSIENT_OLD"
 		TRANSIENT_NEW=''; TRANSIENT_OLD=''; TRANSIENT_TARGET=''
+		IFS=','
+	done
+	IFS="$old_ifs"
+}
+
+stage_protected_files() {
+	[ "$REPLACE_PROTECTED" = 1 ] || return 0
+	[ "$DEPLOY_MODE" = full ] || fail "Protected replacement is allowed only for full deploy"
+	[ -n "$PROTECTED_ARCHIVE" ] || fail "Protected archive is required for protected replacement"
+	require_cmd unzip
+	unzip -tq "$PROTECTED_ARCHIVE" >/dev/null || fail "Protected archive integrity check failed"
+	PROTECTED_STAGE="$SERVER_EXPECTED_TMP_DIR/protected-$timestamp"
+	rm -rf "$PROTECTED_STAGE"
+	mkdir -p "$PROTECTED_STAGE"
+	ARCHIVE_LISTING="$SERVER_EXPECTED_TMP_DIR/protected-$timestamp.list"
+	unzip -Z1 "$PROTECTED_ARCHIVE" > "$ARCHIVE_LISTING"
+	entry_count=0
+	while IFS= read -r entry; do
+		case "$entry" in
+			'') continue ;;
+			*/) continue ;;
+		esac
+		assert_protected_path "$entry"
+		entry_count=$((entry_count + 1))
+	done < "$ARCHIVE_LISTING"
+	[ "$entry_count" -gt 0 ] || fail "Protected archive contains no files"
+	unzip -q "$PROTECTED_ARCHIVE" -d "$PROTECTED_STAGE" || fail "Protected archive extraction failed"
+	if [ -n "$(find "$PROTECTED_STAGE" -type l -print)" ]; then
+		fail "Protected archive contains a symbolic link"
+	fi
+	old_ifs="$IFS"
+	IFS=','
+	for relative in $PROTECTED_PATHS; do
+		IFS="$old_ifs"
+		[ -f "$PROTECTED_STAGE/$relative" ] || fail "Protected archive is missing declared file: $relative"
+		IFS=','
+	done
+	IFS="$old_ifs"
+	rm -f "$ARCHIVE_LISTING"
+	ARCHIVE_LISTING=''
+}
+
+backup_protected_files() {
+	[ "$REPLACE_PROTECTED" = 1 ] || return 0
+	[ "$DEPLOY_MODE" = full ] || fail "Protected replacement is allowed only for full deploy"
+	[ -n "$PROTECTED_PATHS" ] || fail "Protected replacement requires protected paths"
+	protected_backup="$BACKUP_DIR/protected-$timestamp"
+	mkdir -p "$protected_backup"
+	old_ifs="$IFS"
+	IFS=','
+	for relative in $PROTECTED_PATHS; do
+		IFS="$old_ifs"
+		assert_protected_path "$relative"
+		source_path="$PROTECTED_STAGE/$relative"
+		target_path="$WP_DIR/$relative"
+		[ -f "$source_path" ] || fail "Protected source file was not found in archive: $relative"
+		[ -f "$target_path" ] || fail "Protected target file was not found on server: $relative"
+		assert_no_symlink_components "$WP_DIR" "$relative"
+		[ ! -L "$target_path" ] || fail "Protected target file must not be a symbolic link: $relative"
+		mkdir -p "$protected_backup/$(dirname "$relative")"
+		cp -p "$target_path" "$protected_backup/$relative" || fail "Protected backup failed: $relative"
+		IFS=','
+	done
+	IFS="$old_ifs"
+	printf 'PROTECTED_BACKUP_READY %s\n' "$protected_backup"
+}
+
+copy_protected_files() {
+	[ "$REPLACE_PROTECTED" = 1 ] || return 0
+	old_ifs="$IFS"
+	IFS=','
+	for relative in $PROTECTED_PATHS; do
+		IFS="$old_ifs"
+		assert_protected_path "$relative"
+		source_path="$PROTECTED_STAGE/$relative"
+		target_path="$WP_DIR/$relative"
+		new_path="$target_path.__new__.$timestamp"
+		old_path="$target_path.__old__.$timestamp"
+		mkdir -p "$(dirname "$target_path")"
+		TRANSIENT_TARGET="$target_path"
+		TRANSIENT_NEW="$new_path"
+		TRANSIENT_OLD="$old_path"
+		cp -p "$source_path" "$new_path" || fail "Protected file staging failed: $relative"
+		mv "$target_path" "$old_path" || { restore_protected_files; fail "Protected file backup swap failed: $relative"; }
+		if ! mv "$new_path" "$target_path"; then
+			restore_protected_files
+			fail "Protected file replacement failed: $relative"
+		fi
+		rm -f "$old_path"
+		TRANSIENT_NEW=''; TRANSIENT_OLD=''; TRANSIENT_TARGET=''
+		IFS=','
+	done
+	IFS="$old_ifs"
+}
+
+restore_protected_files() {
+	[ -n "${protected_backup:-}" ] || return 0
+	old_ifs="$IFS"
+	IFS=','
+	for relative in $PROTECTED_PATHS; do
+		IFS="$old_ifs"
+		[ -f "$protected_backup/$relative" ] || continue
+		mkdir -p "$(dirname "$WP_DIR/$relative")"
+		cp -p "$protected_backup/$relative" "$WP_DIR/$relative" || true
 		IFS=','
 	done
 	IFS="$old_ifs"
@@ -543,12 +689,15 @@ case "$DEPLOY_MODE" in
 		assert_free_space_kb "$BACKUP_DIR" "$incoming_kb" "Backup filesystem"
 		if [ "$DEPLOY_MODE" = full ]; then
 			update_repository
+			stage_protected_files
+			backup_protected_files
 			copy_code
 		fi
 		backup_database
 		import_database
 		[ -z "$UPLOADS_ZIP" ] || sync_uploads
 		cleanup_wordpress
+		[ "$DEPLOY_MODE" = full ] && copy_protected_files
 		cleanup_backups
 		;;
 	pull-db)

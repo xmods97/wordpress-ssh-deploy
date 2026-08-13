@@ -93,6 +93,14 @@ Describe 'Pull configuration schema' {
 		@(Get-DeployConfigurationErrors (New-PullConfiguration)).Count | Should Be 0
 	}
 
+	It 'uses the dedicated full pull path list for pull-full' {
+		$config = New-PullConfiguration
+		$config.FullPullPaths = @('wp-admin', 'wp-content/uploads')
+		$plan = New-PullPlan $config 'pull-full' '20260812-000000' (Join-Path ([IO.Path]::GetTempPath()) 'pull-plan-root') -DryRun
+		$plan.PullPathSource | Should Be 'FullPullPaths'
+		$plan.PullPaths | Should Be @('wp-admin', 'wp-content/uploads')
+	}
+
 	It 'rejects a non-boolean pull switch' {
 		$config = $exampleConfiguration.Clone()
 		$config.PullEnabled = 'yes'
@@ -498,16 +506,21 @@ Describe 'deploy.ps1 pull wiring' {
 		$modeParameter = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Mode' }
 		$validate = $modeParameter.Attributes | Where-Object { $_.TypeName.Name -eq 'ValidateSet' }
 		$values = @($validate.PositionalArguments | ForEach-Object { $_.Value })
-		foreach ($mode in @('code', 'db', 'full', 'pull-db', 'pull-files', 'pull-full')) {
+		foreach ($mode in @('code', 'db', 'full', 'pull-db', 'pull-files', 'pull-full', 'apply-pull')) {
 			$values -contains $mode | Should Be $true
 		}
 	}
 
 	It 'declares the pull switches' {
 		$names = @($ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
-		foreach ($switch in @('DryRun', 'Confirm', 'Mirror')) {
+		foreach ($switch in @('DryRun', 'Confirm', 'Mirror', 'ReplaceProtected', 'ConfirmProtected', 'PullWorkspace')) {
 			$names -contains $switch | Should Be $true
 		}
+	}
+
+	It 'requires a paired protected replacement confirmation' {
+		$deploy | Should Match 'Protected replacement requires both -ReplaceProtected and -ConfirmProtected'
+		$deploy | Should Match 'ConfirmProtected requires -ReplaceProtected'
 	}
 
 	It 'refuses pull switches for push modes and push switches for pull modes' {
@@ -570,6 +583,93 @@ Describe 'deploy.ps1 pull wiring' {
 		$deploy | Should Match "Normalize-SqlDumpTablePrefix \`$sqlPath"
 		$deploy | Should Match 'Deploy completed:'
 	}
+
+	It 'applies every configured pull path with a local backup before replacement' {
+		$applyBlock = [regex]::Match($deploy, '(?s)if \(\$isApplyPull\) \{.*?\r?\n\treturn\r?\n\}').Value
+		$applyBlock | Should Match 'Invoke-LocalMysqlDump \$dbBackup'
+		$applyBlock | Should Match 'foreach \(\$relative in @\(\$plan\.PullPaths\)\)'
+		$applyBlock | Should Match 'Pulled path is missing from the verified workspace'
+		$applyBlock | Should Match 'attempting to restore the local database and pulled paths backup'
+		$applyBlock | Should Match 'dbImportStarted'
+		$applyBlock | Should Match "config', 'get', 'table_prefix'"
+		$applyBlock | Should Match 'Local WordPress table prefix does not match ExpectedDbTablePrefix'
+		$applyBlock | Should Not Match 'Invoke-WithRollback'
+	}
+
+	It 'builds a safe apply-pull plan under .pull' {
+		$config = New-PullConfiguration
+		$workspaceRoot = Join-Path ([IO.Path]::GetTempPath()) 'apply-plan-root'
+		$plan = New-ApplyPullPlan $config (Join-Path $workspaceRoot '.pull\20260812-000000') $workspaceRoot -DryRun
+		$plan.Mode | Should Be 'apply-pull'
+		$plan.WorkingDatabase | Should Be $config.LocalDbName
+		(Get-ErrorMessage { New-ApplyPullPlan $config (Join-Path $config.LocalWpPath 'x') $workspaceRoot -DryRun }) |
+			Should Match 'outside LocalWpPath'
+	}
+
+	It 'streams SQL input as unchanged bytes to a native process' {
+		$root = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+		$consumer = Join-Path $root 'read-stdin.ps1'
+		$input = Join-Path $root 'input.sql'
+		$output = Join-Path $root 'output.bin'
+		$previousInputEncoding = [Console]::InputEncoding
+		try {
+			New-Item -ItemType Directory -Force -Path $root | Out-Null
+			[IO.File]::WriteAllText($consumer, '$bytes = New-Object byte[] 4096; $stream = [Console]::OpenStandardInput(); $count = $stream.Read($bytes, 0, $bytes.Length); [IO.File]::WriteAllBytes($args[0], [byte[]] $bytes[0..($count - 1)])', (New-Object Text.UTF8Encoding($false)))
+			$expected = [byte[]] @(0, 0xA9, 0xFF, 0x0A, 0x00, 0x7F)
+			[IO.File]::WriteAllBytes($input, $expected)
+			[Console]::InputEncoding = New-Object Text.UTF8Encoding($true)
+			Invoke-NativeProcessWithFileInput (Get-Command powershell.exe).Source @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $consumer, $output) $input | Out-Null
+			[BitConverter]::ToString([IO.File]::ReadAllBytes($output)) | Should Be ([BitConverter]::ToString($expected))
+		} finally {
+			[Console]::InputEncoding = $previousInputEncoding
+			Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+		}
+	}
+
+	It 'uses ordinal comparison for the local WordPress table prefix' {
+		$script = Get-Content -LiteralPath (Join-Path $repoRoot 'deploy.ps1') -Raw
+		$script | Should Match 'StringComparison\]::Ordinal'
+		$script | Should Not Match '\$localPrefix\s+-ne\s+\[string\]'
+	}
+
+	It 'restores file swaps in reverse order without Select-Object Reverse' {
+		$root = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+		try {
+			New-Item -ItemType Directory -Force -Path $root | Out-Null
+			$first = Join-Path $root 'first.txt'; $second = Join-Path $root 'second.txt'
+			$firstOld = Join-Path $root 'first.old'; $secondOld = Join-Path $root 'second.old'
+			Set-Content -LiteralPath $first -Value 'new-first'; Set-Content -LiteralPath $second -Value 'new-second'
+			Set-Content -LiteralPath $firstOld -Value 'old-first'; Set-Content -LiteralPath $secondOld -Value 'old-second'
+			$swaps = @(
+				[pscustomobject] @{ Target = $first; Old = $firstOld; HadTarget = $true },
+				[pscustomobject] @{ Target = $second; Old = $secondOld; HadTarget = $true }
+			)
+			Restore-FileSwaps $swaps
+			(Get-Content $first -Raw).Trim() | Should Be 'old-first'
+			(Get-Content $second -Raw).Trim() | Should Be 'old-second'
+		} finally {
+			Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+		}
+	}
+
+	It 'revalidates the staged files before apply' {
+		$root = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+		$files = Join-Path $root 'files'
+		try {
+			New-Item -ItemType Directory -Force -Path (Join-Path $files 'wp-content/uploads') | Out-Null
+			Set-Content -LiteralPath (Join-Path $files 'wp-content/uploads/marker.txt') -Value 'ok'
+			{ Assert-ApplyPullWorkspace $files @('wp-content/uploads') } | Should Not Throw
+			(Get-ErrorMessage { Assert-ApplyPullWorkspace $files @('wp-content/themes') }) | Should Match 'missing'
+		} finally {
+			Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+		}
+	}
+
+	It 'does not use the Windows PowerShell 5.1 reverse pipeline for apply rollback' {
+		$deploy | Should Not Match 'Select-Object -Reverse'
+		$deploy | Should Match 'Restore-FileSwaps \$fileSwaps'
+		$deploy | Should Match 'dbBackupReady'
+	}
 }
 
 Describe 'Pull tests never reach a server' {
@@ -617,5 +717,32 @@ Describe 'Remote runner pull safety' {
 		$exportSection | Should Match 'assert_sql_dump_table_prefix'
 		$exportSection | Should Not Match 'mysql_import_file'
 		$exportSection | Should Not Match 'rm -f'
+	}
+
+	It 'requires a separately approved protected archive and backs up before replacement' {
+		$runner | Should Match 'PROTECTED_ARCHIVE'
+		$runner | Should Match 'stage_protected_files'
+		$runner | Should Match 'PROTECTED_BACKUP_READY'
+		$runner | Should Match 'Protected replacement requires explicit confirmation'
+	}
+
+	It 'checks both ordinary and full path lists against server policy' {
+		$runner | Should Match '\[ "\$SYNC_PATHS" = "\$SERVER_SYNC_PATHS" \]'
+		$runner | Should Match '\[ "\$FULL_SYNC_PATHS" = "\$SERVER_FULL_SYNC_PATHS" \]'
+		$runner | Should Match 'ACTIVE_SYNC_PATHS'
+	}
+
+	It 'never permits protected paths through ordinary sync' {
+		$runner | Should Match 'Protected path is not allowed in ordinary sync paths'
+	}
+
+	It 'replaces protected files only after database import' {
+		$importIndex = $runner.IndexOf("`n`t`timport_database`n")
+		$protectedIndex = $runner.LastIndexOf('copy_protected_files')
+		$cleanupIndex = $runner.IndexOf("`n`t`tcleanup_wordpress`n")
+		$importIndex | Should BeGreaterThan -1
+		$cleanupIndex | Should BeGreaterThan $importIndex
+		$protectedIndex | Should BeGreaterThan $importIndex
+		$protectedIndex | Should BeGreaterThan $cleanupIndex
 	}
 }
