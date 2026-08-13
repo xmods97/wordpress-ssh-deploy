@@ -5,6 +5,15 @@ $DeployConfig = @{
 	# Required: development, staging, or production.
 	# Production permits only code deployment.
 	Environment = 'staging'
+	SiteId      = 'example-site'
+	DisplayName = 'Example site'
+
+	# The deploy tool lives in its own repository. Site code and runtime artifacts are
+	# isolated per profile and never stored in this repository.
+	CodeRepositoryPath = 'C:\Sites\example-site-code'
+	WorkRoot           = 'C:\Users\you\AppData\Local\wordpress-ssh-deploy\example-site'
+	GitRemoteName      = 'origin'
+	GitBranch          = 'main'
 
 	LocalWpPath      = 'C:\Sites\example.test'
 	LocalUrl         = 'http://example.test'
@@ -70,29 +79,26 @@ $DeployConfig = @{
 	# validated. Pull is never allowed when Environment is 'production'.
 	PullEnabled = $false
 
-	# Pull imports here, never into LocalDbName. Must be a different database, so the
-	# working local site keeps running untouched while the pulled copy is verified.
-	LocalDatabaseTarget = 'wordpress_pulled'
-
-	# Local backups taken before any local write. Must be outside LocalWpPath.
-	LocalBackupDirectory = 'C:\Sites\backups\example.test'
+# Pull downloads to a workspace first. A separately confirmed apply backs up and
+# replaces this profile's one working local database (LocalDbName) and paths.
+# Local backups must be outside LocalWpPath.
+LocalBackupDirectory = 'C:\Sites\backups\example.test'
 
 	# WordPress-relative paths that pull-files may bring down. Everything else is refused.
 	AllowedPullPaths = @(
 		'wp-content/uploads'
 	)
 
-	# Full pull paths. Configure the complete safe WordPress surface for a site.
-	# Protected files, .git, secrets, caches, and backups are always refused.
-	FullPullPaths = @(
-		'index.php',
-		'wp-admin',
-		'wp-includes',
+# Full pull is composed from explicit classes. Core files are never downloaded
+# or replaced: the existing local WordPress installation remains the test copy.
+	PullContentPaths = @(
 		'wp-content/themes',
 		'wp-content/plugins',
-		'wp-content/mu-plugins',
-		'wp-content/uploads'
+		'wp-content/mu-plugins'
 	)
+	PullMediaPaths = @('wp-content/uploads')
+CorePolicy = 'preserve-local-core'
+	ExpectedWordPressCoreVersion = ''
 
 	# Extra exclusions on top of the permanent deny list (wp-config*, .git, .ssh, .env,
 	# key material, caches, backups). Configuration can extend that list, never shorten it.
@@ -102,6 +108,10 @@ $DeployConfig = @{
 
 	# Keep true. When true, pull-db and pull-full refuse to run without -Confirm.
 	RequirePullConfirmation = $true
+	ExpectedPullDbTableCount = 12
+	KeepLocalBackups = 5
+	KeepBackupDays = 30
+	MaxBackupSizeMB = 10240
 
 	# Reserved for mirror pull, which deletes local files the remote no longer has.
 	# Mirror is part of the contract but refuses to run in this version.

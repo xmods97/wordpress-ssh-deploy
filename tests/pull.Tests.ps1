@@ -29,7 +29,7 @@ function New-GzipFile([string] $Path, [byte[]] $Content) {
 function New-TarHeaderBlock([string] $Name, [long] $Size, [string] $TypeFlag) {
 	$block = New-Object byte[] 512
 	$ascii = [Text.Encoding]::ASCII
-	$nameBytes = $ascii.GetBytes($Name)
+	$nameBytes = (New-Object Text.UTF8Encoding($false)).GetBytes($Name)
 	[Array]::Copy($nameBytes, 0, $block, 0, [Math]::Min($nameBytes.Length, 100))
 	$fields = @(
 		@(100, '0000644'), @(108, '0000000'), @(116, '0000000'),
@@ -83,7 +83,7 @@ function New-SqlDumpFile([string] $Path, [string] $Prefix, [int] $TableCount, [s
 Describe 'Pull configuration schema' {
 	It 'keeps a push-only configuration valid without any pull key' {
 		$config = $exampleConfiguration.Clone()
-		foreach ($key in @('PullEnabled', 'LocalDatabaseTarget', 'LocalBackupDirectory', 'AllowedPullPaths', 'ExcludedPullPaths', 'RequirePullConfirmation', 'AllowDestructiveLocalReplace', 'LocalPhpPath', 'LocalWpCliPath', 'MysqlPath')) {
+		foreach ($key in @('PullEnabled', 'LocalBackupDirectory', 'AllowedPullPaths', 'ExcludedPullPaths', 'RequirePullConfirmation', 'AllowDestructiveLocalReplace', 'LocalPhpPath', 'LocalWpCliPath', 'MysqlPath')) {
 			$config.Remove($key)
 		}
 		@(Get-DeployConfigurationErrors $config).Count | Should Be 0
@@ -101,26 +101,116 @@ Describe 'Pull configuration schema' {
 		$plan.PullPaths | Should Be @('wp-admin', 'wp-content/uploads')
 	}
 
+	It 'uses the site-specific workspace and content/media pull classes' {
+		$plan = New-PullPlan (New-PullConfiguration) 'pull-full' '20260812-000000' (Join-Path ([IO.Path]::GetTempPath()) 'multi-site-root') -DryRun -Confirmed
+		$plan.Workspace | Should Match '\\.pull\\example-site\\20260812-000000$'
+		$plan.PullPathSource | Should Be 'PullContentPaths+PullMediaPaths'
+		$plan.PullPaths | Should Be @('wp-content/themes', 'wp-content/plugins', 'wp-content/mu-plugins', 'wp-content/uploads')
+	}
+
+	It 'creates and verifies a profile-bound pull manifest with artifact hashes' {
+		$config = New-PullConfiguration
+		$root = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+		$plan = New-PullPlan $config 'pull-full' '20260812-000000' $root -DryRun -Confirmed
+		try {
+		New-Item -ItemType Directory -Force -Path $plan.Workspace | Out-Null
+		New-GzipFile $plan.LocalDbArchive ([Text.Encoding]::UTF8.GetBytes('database-artifact'))
+		New-GzipFile $plan.LocalFilesArchive ([Text.Encoding]::UTF8.GetBytes('files-artifact'))
+		Set-Content -LiteralPath $plan.LocalDbSql -Value 'CREATE TABLE `wp_posts` (id int);' -NoNewline
+		New-Item -ItemType Directory -Force -Path (Join-Path $plan.FilesStagingDirectory 'wp-content/uploads') | Out-Null
+		Set-Content -LiteralPath (Join-Path $plan.FilesStagingDirectory 'wp-content/uploads/marker.txt') -Value 'original' -NoNewline
+		$null = New-PullManifest $config $plan $plan.ManifestPath
+		(Assert-PullManifest $config $plan.ManifestPath $plan).SiteId | Should Be 'example-site'
+		[IO.File]::AppendAllText($plan.LocalFilesArchive, 'tamper')
+		(Get-ErrorMessage { Assert-PullManifest $config $plan.ManifestPath $plan }) | Should Match 'hash does not match'
+		} finally {
+			if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+		}
+	}
+
+	It 'refuses extracted SQL or files changed after the manifest was created' {
+		$config = New-PullConfiguration
+		$root = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+		$plan = New-PullPlan $config 'pull-full' '20260812-000000' $root -DryRun -Confirmed
+		try {
+			New-Item -ItemType Directory -Force -Path $plan.Workspace, (Join-Path $plan.FilesStagingDirectory 'wp-content/uploads') | Out-Null
+			New-GzipFile $plan.LocalDbArchive ([Text.Encoding]::UTF8.GetBytes('database-archive'))
+			New-GzipFile $plan.LocalFilesArchive ([Text.Encoding]::UTF8.GetBytes('files-archive'))
+			Set-Content -LiteralPath $plan.LocalDbSql -Value 'CREATE TABLE `wp_posts` (id int);' -NoNewline
+			Set-Content -LiteralPath (Join-Path $plan.FilesStagingDirectory 'wp-content/uploads/marker.txt') -Value 'original' -NoNewline
+			$null = New-PullManifest $config $plan $plan.ManifestPath
+			Add-Content -LiteralPath $plan.LocalDbSql -Value 'tamper'
+			(Get-ErrorMessage { Assert-PullManifest $config $plan.ManifestPath $plan }) | Should Match 'Extracted pull database SQL hash does not match'
+			Set-Content -LiteralPath $plan.LocalDbSql -Value 'CREATE TABLE `wp_posts` (id int);' -NoNewline
+			Set-Content -LiteralPath (Join-Path $plan.FilesStagingDirectory 'wp-content/uploads/marker.txt') -Value 'tamper' -NoNewline
+			(Get-ErrorMessage { Assert-PullManifest $config $plan.ManifestPath $plan }) | Should Match 'Extracted pull files hash does not match'
+		} finally {
+			if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+		}
+	}
+
+	It 'never schedules the newest complete local backup group for deletion' {
+		$root = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+		try {
+			New-Item -ItemType Directory -Force -Path $root | Out-Null
+			foreach ($stamp in @('20260101-000000', '20260102-000000', '20260103-000000')) {
+				Set-Content -LiteralPath (Join-Path $root "local-db-$stamp.sql") -Value $stamp -NoNewline
+				New-Item -ItemType Directory -Force -Path (Join-Path $root "files-$stamp") | Out-Null
+			}
+			$plan = Get-LocalBackupRetentionPlan -BackupDirectory $root -Keep 1 -KeepDays 1 -MaxBytes 1 -Now ([datetime]'2026-02-01')
+			(@($plan.Remove | ForEach-Object { $_.Stamp }) -contains '20260103-000000') | Should Be $false
+			(@($plan.Kept | ForEach-Object { $_.Stamp }) -contains '20260103-000000') | Should Be $true
+			$sizePlan = Get-LocalBackupRetentionPlan -BackupDirectory $root -Keep 3 -KeepDays 0 -MaxBytes 1 -Now ([datetime]'2026-01-04')
+			(@($sizePlan.Remove | ForEach-Object { $_.Stamp }) -contains '20260103-000000') | Should Be $false
+			(@($sizePlan.Kept | ForEach-Object { $_.Stamp }) -contains '20260103-000000') | Should Be $true
+		} finally {
+			if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+		}
+	}
+
 	It 'rejects a non-boolean pull switch' {
 		$config = $exampleConfiguration.Clone()
 		$config.PullEnabled = 'yes'
 		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'PullEnabled must be a boolean'
 	}
 
-	It 'refuses pull for production' {
+	It 'refuses a pull for production without the private opt-in' {
 		$config = New-PullConfiguration
 		$config.Environment = 'production'
-		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'PullEnabled must be false for production'
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'Production pull requires AllowProductionPull'
 	}
 
-	It 'refuses a pull target equal to the working local database' {
+	It 'accepts only an explicitly configured production pull profile' {
 		$config = New-PullConfiguration
-		$config.LocalDatabaseTarget = $config.LocalDbName
-		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'LocalDatabaseTarget must differ from LocalDbName'
+		$config.Environment = 'production'
+		$config.AllowProductionPull = $true
+		@(Get-DeployConfigurationErrors $config).Count | Should Be 0
+		(Get-ErrorMessage { Assert-DeployModeAllowed -Environment 'production' -Mode 'pull-full' }) |
+			Should Match 'requires the explicit -AllowProductionPull switch'
+		Get-ErrorMessage { Assert-DeployModeAllowed -Environment 'production' -Mode 'pull-full' -AllowProductionPull } | Should Be ''
+	}
+
+	It 'does not allow the production opt-in on a non-production profile' {
+		$config = New-PullConfiguration
+		$config.AllowProductionPull = $true
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'may be true only for a production read-only pull profile'
+	}
+
+	It 'uses one working local database for a separately confirmed apply' {
+		$config = New-PullConfiguration
+		$config.Contains('LocalDatabaseTarget') | Should Be $false
+		$plan = New-ApplyPullPlan $config (Join-Path ([IO.Path]::GetTempPath()) ".pull\$($config.SiteId)\20260812-000000") ([IO.Path]::GetTempPath()) -DryRun
+		$plan.WorkingDatabase | Should Be $config.LocalDbName
+	}
+
+	It 'rejects the removed secondary local database setting' {
+		$config = New-PullConfiguration
+		$config.LocalDatabaseTarget = 'legacy_target'
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'Unknown configuration key: LocalDatabaseTarget'
 	}
 
 	It 'requires every pull key once pull is enabled' {
-		foreach ($key in @('LocalDatabaseTarget', 'LocalBackupDirectory', 'LocalPhpPath', 'LocalWpCliPath', 'MysqlPath', 'AllowedPullPaths')) {
+		foreach ($key in @('LocalBackupDirectory', 'LocalPhpPath', 'LocalWpCliPath', 'MysqlPath', 'AllowedPullPaths')) {
 			$config = New-PullConfiguration
 			$config.Remove($key)
 			(Get-DeployConfigurationErrors $config) -join "`n" |
@@ -160,11 +250,23 @@ Describe 'Pull configuration schema' {
 }
 
 Describe 'Pull mode gating' {
-	It 'forbids every pull mode for production' {
+	It 'requires the explicit switch for every production pull mode' {
 		foreach ($mode in (Get-PullModeNames)) {
 			$message = Get-ErrorMessage { Assert-DeployModeAllowed -Environment 'production' -Mode $mode }
-			$message | Should Match 'Pulling from production is never allowed'
+			$message | Should Match 'requires the explicit -AllowProductionPull switch'
 		}
+	}
+
+	It 'permits only the one-local-copy core policy' {
+		$config = New-PullConfiguration
+		$config.CorePolicy = 'download-matching'
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'CorePolicy must be preserve-local-core'
+	}
+
+	It 'requires the production switch for local apply-pull' {
+		(Get-ErrorMessage { Assert-DeployModeAllowed -Environment 'production' -Mode 'apply-pull' }) |
+			Should Match 'requires the explicit -AllowProductionPull switch'
+		Get-ErrorMessage { Assert-DeployModeAllowed -Environment 'production' -Mode 'apply-pull' -AllowProductionPull } | Should Be ''
 	}
 
 	It 'refuses a pull mode while pull is disabled' {
@@ -298,6 +400,17 @@ Describe 'Pull artifact verification' {
 }
 
 Describe 'Pull archive listing safety' {
+	It 'keeps UTF-8 names from ordinary tar headers' {
+		$file = [IO.Path]::GetTempFileName()
+		try {
+			$unicodeName = 'wp-content/uploads/' + ([string] [char]0x444) + [char]0x43e + [char]0x442 + [char]0x43e + '.png'
+			New-TarFile $file @(@{ Name = $unicodeName; TypeFlag = '0'; Content = 'x' })
+			(Get-TarEntryList $file)[0].Name | Should Be $unicodeName
+		} finally {
+			Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+		}
+	}
+
 	It 'lists ordinary entries with their sizes' {
 		$file = [IO.Path]::GetTempFileName()
 		try {
@@ -392,7 +505,7 @@ Describe 'Pull plan' {
 
 		$files = New-PullPlan (New-PullConfiguration) 'pull-files' '20260812-000000' $workspaceRoot
 		$files.IncludeDatabase | Should Be $false
-		$files.DatabaseTarget | Should Be ''
+		(@($files.PSObject.Properties.Name) -contains 'DatabaseTarget') | Should Be $false
 		$files.RemoteDbArtifact | Should Be ''
 
 		$full = New-PullPlan (New-PullConfiguration) 'pull-full' '20260812-000000' $workspaceRoot -Confirmed
@@ -400,11 +513,10 @@ Describe 'Pull plan' {
 		$full.IncludeFiles | Should Be $true
 	}
 
-	It 'never targets the working local database' {
+	It 'keeps download side-by-side and reserves the working local database for apply' {
 		$plan = New-PullPlan (New-PullConfiguration) 'pull-full' '20260812-000000' $workspaceRoot -Confirmed
-		$plan.DatabaseTarget | Should Not Be $plan.WorkingDatabase
-		$plan.DatabaseTarget | Should Be 'wordpress_pulled'
 		$plan.WorkingDatabase | Should Be 'wordpress'
+		(@($plan.PSObject.Properties.Name) -contains 'DatabaseTarget') | Should Be $false
 	}
 
 	It 'keeps the workspace outside the working WordPress copy' {
@@ -435,7 +547,7 @@ Describe 'Pull plan' {
 		$config = New-PullConfiguration
 		$config.Environment = 'production'
 		(Get-ErrorMessage { New-PullPlan $config 'pull-db' '20260812-000000' $workspaceRoot -Confirmed }) |
-			Should Match 'Pulling from production is never allowed'
+			Should Match 'requires the explicit -AllowProductionPull switch'
 	}
 
 	It 'rejects an unsafe run stamp' {
@@ -443,10 +555,10 @@ Describe 'Pull plan' {
 			Should Match 'stamp contains unsupported characters'
 	}
 
-	It 'summarises the plan without leaking the working database as a target' {
+	It 'summarises download and one-local-copy apply boundaries' {
 		$summary = (Get-PullSummaryLines (New-PullPlan (New-PullConfiguration) 'pull-full' '20260812-000000' $workspaceRoot -Confirmed)) -join "`n"
-		$summary | Should Match 'never written by pull'
-		$summary | Should Match 'prepared side-by-side, not activated'
+		$summary | Should Match 'never written by download'
+		$summary | Should Match 'replaced only by a separate confirmed apply after backup'
 		$summary | Should Match 'working files untouched'
 	}
 }
@@ -513,8 +625,38 @@ Describe 'deploy.ps1 pull wiring' {
 
 	It 'declares the pull switches' {
 		$names = @($ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
-		foreach ($switch in @('DryRun', 'Confirm', 'Mirror', 'ReplaceProtected', 'ConfirmProtected', 'PullWorkspace')) {
+		foreach ($switch in @('DryRun', 'Confirm', 'Mirror', 'ReplaceProtected', 'ConfirmProtected', 'PullWorkspace', 'ConfigPath')) {
 			$names -contains $switch | Should Be $true
+		}
+	}
+
+	It 'keeps the default config and supports a separate site config path' {
+		$deploy | Should Match "\$ConfigPath = ''"
+		$deploy | Should Match 'Join-Path'
+		$deploy | Should Match 'IsPathRooted'
+		$deploy | Should Match 'Configuration file was not found'
+	}
+
+	It 'resolves GNU long-name metadata without treating it as a file entry' {
+		$file = [IO.Path]::GetTempFileName()
+		$destination = Join-Path ([IO.Path]::GetTempPath()) ('pull-long-name-' + [guid]::NewGuid().ToString('N'))
+		$longName = 'wp-content/uploads/' + ('nested-' * 18) + 'asset.txt'
+		try {
+			New-TarFile $file @(
+				@{ Name = '././@LongLink'; TypeFlag = 'L'; Content = $longName + [char] 0 },
+				@{ Name = 'truncated'; TypeFlag = '0'; Content = 'hello' }
+			)
+			$entries = @(Get-TarEntryList $file)
+			$entries.Count | Should Be 1
+			$entries[0].Name | Should Be $longName
+			(Assert-PullArchiveEntries $entries @('wp-content/uploads')) | Should Be 1
+
+			New-Item -ItemType Directory -Path $destination | Out-Null
+			(Expand-TarArchive $file $destination) | Should Be 1
+			(Get-Content -LiteralPath (Join-Path $destination ($longName -replace '/', '\')) -Raw) | Should Be 'hello'
+		} finally {
+			Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+			Remove-Item -LiteralPath $destination -Recurse -Force -ErrorAction SilentlyContinue
 		}
 	}
 
@@ -587,6 +729,10 @@ Describe 'deploy.ps1 pull wiring' {
 	It 'applies every configured pull path with a local backup before replacement' {
 		$applyBlock = [regex]::Match($deploy, '(?s)if \(\$isApplyPull\) \{.*?\r?\n\treturn\r?\n\}').Value
 		$applyBlock | Should Match 'Invoke-LocalMysqlDump \$dbBackup'
+		$applyBlock | Should Match 'Invoke-LocalMysqlDump \$dbBackup \$plan\.WorkingDatabase'
+		$applyBlock | Should Match 'Invoke-LocalMysqlImport \$plan\.DatabaseSql \$plan\.WorkingDatabase'
+		$applyBlock | Should Match 'Invoke-LocalMysqlImport \$dbBackup \$plan\.WorkingDatabase'
+		$deploy | Should Match '\(\x27--result-file=\x27 \+ \$Path\)'
 		$applyBlock | Should Match 'foreach \(\$relative in @\(\$plan\.PullPaths\)\)'
 		$applyBlock | Should Match 'Pulled path is missing from the verified workspace'
 		$applyBlock | Should Match 'attempting to restore the local database and pulled paths backup'
@@ -594,12 +740,16 @@ Describe 'deploy.ps1 pull wiring' {
 		$applyBlock | Should Match "config', 'get', 'table_prefix'"
 		$applyBlock | Should Match 'Local WordPress table prefix does not match ExpectedDbTablePrefix'
 		$applyBlock | Should Not Match 'Invoke-WithRollback'
+		$applyBlock | Should Match 'No rollback is attempted after a successful apply'
+		$applyBlock | Should Match 'Assert-PreservedLocalCore'
+		$applyBlock | Should Not Match 'LocalCorePath'
+		$deploy | Should Match "Invoke-LocalWpCli @\('core', 'version'\)"
 	}
 
 	It 'builds a safe apply-pull plan under .pull' {
 		$config = New-PullConfiguration
 		$workspaceRoot = Join-Path ([IO.Path]::GetTempPath()) 'apply-plan-root'
-		$plan = New-ApplyPullPlan $config (Join-Path $workspaceRoot '.pull\20260812-000000') $workspaceRoot -DryRun
+		$plan = New-ApplyPullPlan $config (Join-Path $workspaceRoot ".pull\$($config.SiteId)\20260812-000000") $workspaceRoot -DryRun
 		$plan.Mode | Should Be 'apply-pull'
 		$plan.WorkingDatabase | Should Be $config.LocalDbName
 		(Get-ErrorMessage { New-ApplyPullPlan $config (Join-Path $config.LocalWpPath 'x') $workspaceRoot -DryRun }) |
@@ -668,6 +818,7 @@ Describe 'deploy.ps1 pull wiring' {
 	It 'does not use the Windows PowerShell 5.1 reverse pipeline for apply rollback' {
 		$deploy | Should Not Match 'Select-Object -Reverse'
 		$deploy | Should Match 'Restore-FileSwaps \$fileSwaps'
+		$deploy | Should Match '\$fileSwaps\.Count -gt 0'
 		$deploy | Should Match 'dbBackupReady'
 	}
 }
@@ -693,7 +844,7 @@ Describe 'Remote runner pull safety' {
 
 	It 'accepts the pull modes and refuses them for production' {
 		$runner | Should Match 'preflight\|code\|db\|full\|pull-db\|pull-files'
-		$runner | Should Match 'Pulling from production is forbidden'
+		$runner | Should Match 'Production pull requires explicit read-only opt-in'
 	}
 
 	It 'never imports, rotates backups, or rewrites WordPress while pulling' {
@@ -713,10 +864,20 @@ Describe 'Remote runner pull safety' {
 
 	It 'keeps the pull export read-only for the WordPress database' {
 		$exportSection = [regex]::Match($runner, '(?s)export_database_for_pull\(\).*?\n\}').Value
-		$exportSection | Should Match 'backup_database'
+		$exportSection | Should Match 'backup_database_for_pull'
+		$exportSection | Should Not Match '(?m)^\s*backup_database\s*$'
 		$exportSection | Should Match 'assert_sql_dump_table_prefix'
 		$exportSection | Should Not Match 'mysql_import_file'
 		$exportSection | Should Not Match 'rm -f'
+	}
+
+	It 'restricts pull SQL export to the active prefix table list' {
+		$pullBackup = [regex]::Match($runner, '(?s)backup_database_for_pull\(\).*?\n\}').Value
+		$pullBackup | Should Match 'db tables --all-tables-with-prefix --format=csv'
+		$pullBackup | Should Match 'SERVER_EXPECTED_DB_TABLE_PREFIX'
+		$pullBackup | Should Match 'mysqldump.*"\$@"'
+		$pullBackup | Should Not Match 'mysqldump.*"\$name" >'
+		$pullBackup | Should Match 'unsafe identifier'
 	}
 
 	It 'requires a separately approved protected archive and backs up before replacement' {

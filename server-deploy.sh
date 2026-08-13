@@ -26,6 +26,7 @@ SERVER_CONFIG="$SCRIPT_DIR/server.config.sh"
 : "${SERVER_SYNC_PATHS:?SERVER_SYNC_PATHS is required in server.config.sh}"
 : "${SERVER_FULL_SYNC_PATHS:=${SERVER_SYNC_PATHS}}"
 : "${SERVER_PROTECTED_PATHS:=}"
+: "${SERVER_ALLOW_PRODUCTION_PULL:=0}"
 : "${SERVER_KEEP_BACKUPS:?SERVER_KEEP_BACKUPS is required in server.config.sh}"
 : "${SERVER_MIN_FREE_SPACE_MB:?SERVER_MIN_FREE_SPACE_MB is required in server.config.sh}"
 : "${SERVER_LOCK_DIR:?SERVER_LOCK_DIR is required in server.config.sh}"
@@ -54,6 +55,7 @@ PULL_PATHS="${PULL_PATHS:-}"
 PROTECTED_PATHS="${PROTECTED_PATHS:-}"
 REPLACE_PROTECTED="${REPLACE_PROTECTED:-0}"
 PROTECTED_ARCHIVE="${PROTECTED_ARCHIVE:-}"
+ALLOW_PRODUCTION_PULL="${ALLOW_PRODUCTION_PULL:-0}"
 PHP_BIN="${PHP_BIN:-php}"
 WP_CLI_BIN="${WP_CLI_BIN:-wp}"
 timestamp="$(date +%Y%m%d-%H%M%S)"
@@ -134,10 +136,10 @@ assert_mode() {
 	case "$DEPLOY_MODE" in preflight|code|db|full|pull-db|pull-files) ;; *) fail "Unknown DEPLOY_MODE" ;; esac
 	if [ "$SERVER_ENVIRONMENT" = production ]; then
 		case "$DEPLOY_MODE" in
-			pull-db|pull-files) fail "Pulling from production is forbidden" ;;
+			pull-db|pull-files) [ "$ALLOW_PRODUCTION_PULL" = 1 ] || fail "Production pull requires explicit read-only opt-in" ;;
 		esac
 	fi
-	if [ "$SERVER_ENVIRONMENT" = production ] && [ "$DEPLOY_MODE" != code ] && [ "$DEPLOY_MODE" != preflight ]; then
+	if [ "$SERVER_ENVIRONMENT" = production ] && [ "$DEPLOY_MODE" != code ] && [ "$DEPLOY_MODE" != preflight ] && [ "$DEPLOY_MODE" != pull-db ] && [ "$DEPLOY_MODE" != pull-files ]; then
 		fail "Database and uploads deployment is forbidden for production"
 	fi
 }
@@ -174,6 +176,10 @@ assert_server_policy() {
 	[ "$WP_CLI_BIN" = "$SERVER_WP_CLI_BIN" ] || fail "WP-CLI path does not match server policy"
 	[ "$SYNC_PATHS" = "$SERVER_SYNC_PATHS" ] || fail "Sync paths do not match server policy"
 	[ "$FULL_SYNC_PATHS" = "$SERVER_FULL_SYNC_PATHS" ] || fail "Full sync paths do not match server policy"
+	case "$ALLOW_PRODUCTION_PULL" in 0|1) ;; *) fail "ALLOW_PRODUCTION_PULL must be 0 or 1" ;; esac
+	if [ "$DEPLOY_MODE" = pull-db ] || [ "$DEPLOY_MODE" = pull-files ]; then
+		[ "$ALLOW_PRODUCTION_PULL" = "$SERVER_ALLOW_PRODUCTION_PULL" ] || fail "Production pull permission does not match server policy"
+	fi
 	if [ "$DEPLOY_MODE" = full ]; then ACTIVE_SYNC_PATHS="$FULL_SYNC_PATHS"; else ACTIVE_SYNC_PATHS="$SYNC_PATHS"; fi
 	server_protected_paths="$SERVER_PROTECTED_PATHS"
 	if [ "$REPLACE_PROTECTED" = 1 ]; then
@@ -545,17 +551,53 @@ backup_database() {
 	assert_sql_dump "$BACKUP_FILE"
 }
 
+backup_database_for_pull() {
+	require_cmd mysqldump
+	require_cmd awk
+	name="$(wp_config_value DB_NAME)"
+	user="$(wp_config_value DB_USER)"
+	pass="$(wp_config_value DB_PASSWORD)"
+	database_connection "$(wp_config_value DB_HOST)"
+	active_tables_raw="$(wp_cli db tables --all-tables-with-prefix --format=csv)" || fail "Could not determine active WordPress tables"
+	active_tables="$(printf '%s\n' "$active_tables_raw" | awk -F',' '{ for (i = 1; i <= NF; i++) { gsub(/\r/, "", $i); if ($i != "" && $i != "table" && $i != "name" && $i != "table_name") print $i } }')"
+	[ -n "$active_tables" ] || fail "Active WordPress table list is empty"
+	old_ifs="$IFS"
+	IFS='
+'
+	set -- $active_tables
+	IFS="$old_ifs"
+	[ "$#" -gt 0 ] || fail "Active WordPress table list is empty"
+	for table in "$@"; do
+		case "$table" in
+			''|*[!A-Za-z0-9_]*) fail "Active table list contains an unsafe identifier" ;;
+		esac
+		case "$table" in
+			"$SERVER_EXPECTED_DB_TABLE_PREFIX"*) ;;
+			*) fail "Active table list contains a table outside server policy" ;;
+		esac
+	done
+	mkdir -p "$BACKUP_DIR"
+	BACKUP_FILE="$BACKUP_DIR/db-$timestamp.sql"
+	if [ -n "$DB_PORT_VALUE" ]; then
+		MYSQL_PWD="$pass" mysqldump --host="$DB_HOST_VALUE" --port="$DB_PORT_VALUE" --user="$user" --single-transaction --quick --no-tablespaces --default-character-set=utf8mb4 "$name" "$@" > "$BACKUP_FILE"
+	else
+		MYSQL_PWD="$pass" mysqldump --host="$DB_HOST_VALUE" --user="$user" --single-transaction --quick --no-tablespaces --default-character-set=utf8mb4 "$name" "$@" > "$BACKUP_FILE"
+	fi
+	assert_sql_dump "$BACKUP_FILE"
+}
+
 # Pull export: read-only with respect to WordPress. It creates a backup and a compressed
-# copy for transfer, and never imports, rotates backups, or touches the site.
+# copy for transfer, and never imports or touches the site.
 export_database_for_pull() {
 	require_cmd gzip
 	require_cmd wc
 	[ -n "$PULL_ARTIFACT" ] || fail "PULL_ARTIFACT is required for pull-db"
-	backup_database
+	backup_database_for_pull
 	assert_sql_dump_table_prefix "$BACKUP_FILE" "$SERVER_EXPECTED_DB_TABLE_PREFIX"
 	gzip -c "$BACKUP_FILE" > "$PULL_ARTIFACT" || fail "Pull artifact could not be compressed"
 	gzip -t "$PULL_ARTIFACT" || fail "Pull artifact failed its gzip integrity check"
 	[ -s "$PULL_ARTIFACT" ] || fail "Pull artifact is empty"
+	cleanup_backups
 	printf 'PULL_ARTIFACT_READY %s %s\n' "$PULL_ARTIFACT" "$(wc -c < "$PULL_ARTIFACT" | tr -d ' ')"
 }
 
@@ -656,8 +698,11 @@ cleanup_wordpress() {
 }
 
 cleanup_backups() {
-	find "$BACKUP_DIR" -type f -name 'db-*.sql*' | sort -r | awk "NR>$KEEP_BACKUPS" | while IFS= read -r backup_file; do
-		[ -z "$backup_file" ] || rm -f "$backup_file"
+	find "$BACKUP_DIR" -maxdepth 1 -type f -name 'db-*.sql*' | sort -r | awk "NR>$KEEP_BACKUPS" | while IFS= read -r backup_file; do
+		[ -z "$backup_file" ] || rm -f -- "$backup_file"
+	done
+	find "$BACKUP_DIR" -maxdepth 1 -type d -name 'protected-*' | sort -r | awk "NR>$KEEP_BACKUPS" | while IFS= read -r backup_dir; do
+		[ -z "$backup_dir" ] || rm -rf -- "$backup_dir"
 	done
 }
 

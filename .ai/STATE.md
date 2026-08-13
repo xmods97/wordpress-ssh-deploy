@@ -27,11 +27,109 @@ DEPLOYMENT_LEAD: INHERIT
 
 ## ACTIVE TASK INDEX
 
-ACTIVE_TASK_IDS: DEPLOY-BIDIRECTIONAL-SYNC-REVIEW-FIXES-ROUND3
+ACTIVE_TASK_IDS: MULTISITE-FOUNDATION-REVIEW-FIXES
 
 
 
 Перед работой агент обязан выбрать ровно один `TASK_ID` из списка и работать только в его блоке.
+
+## TASK: MULTISITE-FOUNDATION-REVIEW-FIXES
+
+TASK_ID: MULTISITE-FOUNDATION-REVIEW-FIXES
+TASK_NAME: Correct independent review findings for the single-local-copy multisite foundation
+DOMAIN: DEPLOYMENT
+TASK_LEAD: CODEX
+REVIEWER: CLAUDE
+STATUS: READY_FOR_COMMIT_PUSH
+
+BRANCH: main
+WORKTREE: dedicated Codex worktree (local path intentionally omitted)
+BASE_COMMIT: 1ff1287
+WORK_LOCK: CODEX
+
+CRITICAL: YES
+PLAN_APPROVED: YES (2026-08-13)
+EXECUTION_APPROVED: YES (2026-08-13, local implementation and tests only)
+LIVE_ACTIONS: NOT_EXECUTED
+
+RESULT:
+- `apply-pull` backs up, imports, URL-rewrites and rolls back the same `LocalDbName` used by `LocalWpPath`; the former separate target database contract was removed.
+- Downloaded archives, extracted SQL and extracted files tree are bound to the manifest before apply.
+- Backup cleanup shares one retention planner, preserves the newest backup group, and a retention failure cannot roll back a completed apply.
+- Local core is preserved and structurally checked in the working copy; an optional expected core version is checked through WP-CLI.
+- Menu shows profile context and confirms the selected site/server or local database; site Git verifies branch, cleanliness and upstream.
+- Tracked AI metadata no longer contains real infrastructure paths, host values, ports, database prefixes or URLs.
+- Legacy `LocalDatabaseTarget` was removed from the two ignored private profiles. They intentionally remain blocked until their operator supplies the required `SiteId`, `CodeRepositoryPath` and `WorkRoot` values.
+
+CHECKS:
+- Full Pester suite: 139 passed, 0 failed.
+- PowerShell parser: deploy, module, management scripts and pull tests passed.
+- `git diff --check`: passed.
+- Direct local Bash invocation is blocked by the Windows/WSL sandbox; shell parsing passed inside the Pester test harness.
+
+RISKS:
+- A live pull/apply remains unexecuted and requires a separate approved rollout after review.
+- Manual restoration of a successfully applied local backup remains a follow-up command; automatic rollback covers failed apply only.
+
+SCOPE:
+- Reconcile apply-pull with one working local WordPress copy and its LocalDbName.
+- Fix backup retention, extracted-artifact integrity, local core policy, menu and site Git safeguards.
+- Redact real infrastructure values from tracked AI metadata.
+
+OUT_OF_SCOPE:
+- Live SSH, server changes, database imports, rollback, commit, push, merge and production rollout.
+
+NEXT_ACTION:
+- Commit and push approved after independent review and P2 follow-up checks; no live action is included.
+
+## TASK: MULTISITE-FOUNDATION-MVP
+
+TASK_ID: MULTISITE-FOUNDATION-MVP
+TASK_NAME: Multi-site profile foundation and guarded management workflow
+DOMAIN: DEPLOYMENT
+TASK_LEAD: CODEX
+REVIEWER: CLAUDE
+STATUS: READY_FOR_REVIEW
+
+BRANCH: main
+WORKTREE: dedicated Codex worktree (local path intentionally omitted)
+BASE_COMMIT: 1ff1287
+WORK_LOCK: CODEX
+
+CRITICAL: YES
+PLAN_APPROVED: YES (2026-08-13)
+EXECUTION_APPROVED: YES (2026-08-13, local implementation and tests only)
+LIVE_ACTIONS: NOT_EXECUTED
+
+### RESULT
+
+- Разделены `ToolRoot`, `CodeRepositoryPath` и профильный `WorkRoot`; workspace pull теперь привязан к `SiteId`.
+- Добавлены `PullContentPaths`, `PullMediaPaths`, `CorePolicy`, отдельный `ExpectedPullDbTableCount` и настройки локальной ротации backup.
+- Pull создаёт `manifest.json` с профилем, классами путей и SHA-256 архивов; apply-pull проверяет manifest и хэши до локальной записи.
+- Добавлены JSONL run logs, локальная ротация backup по количеству/возрасту/размеру и удалённая ротация database/protected backup.
+- Добавлены `site-git.ps1`, read-only `verify.ps1`, `backup-cleanup.ps1` и guarded `menu.ps1`; Git-команды работают только с репозиторием сайта, не с репозиторием инструмента.
+- Обновлены example config, README и regression-тесты; локальные pull-workspaces и remote attachments остаются в `.gitignore`.
+
+### CHECKS
+
+- Full Pester: 135 passed, 0 failed.
+- PowerShell parser/import: passed for deploy, menu, site-git, verify and relevant tests.
+- Git Bash `-n server-deploy.sh`: passed.
+- `git diff --check`: passed; warnings только о возможной нормализации LF/CRLF Git.
+- Live SSH, staging/production pull or deploy, database import, rollback, commit, push, merge and Claude review: not executed.
+
+### RISKS
+
+- Existing private site profiles must add `SiteId`, `CodeRepositoryPath`, and `WorkRoot` before use.
+- Superseded by MULTISITE-FOUNDATION-REVIEW-FIXES: the one supported policy is `preserve-local-core` for the existing working local installation.
+- New runner retention and profile behavior require a separate staging rollout and visible marker check.
+
+NEXT_ACTION:
+- Independent read-only Claude review of the local diff; after review, decide whether to commit/push and schedule staging rollout.
+
+CONTEXT_STATUS: NORMAL
+LIMIT_STATUS: STOP_AFTER_CHECKPOINT
+STOP_AFTER_CHECKPOINT: YES
 
 ## TASK: DEPLOY-BIDIRECTIONAL-SYNC
 
@@ -74,7 +172,7 @@ LIMIT_STATUS: SAVE
 STOP_AFTER_CHECKPOINT: YES
 
 RESULT:
-- pull реализован как side-by-side: `LocalDatabaseTarget` обязан отличаться от `LocalDbName`, рабочие файлы не заменяются, локальный rollback не нужен и не реализован
+- Историческая side-by-side модель с отдельной `LocalDatabaseTarget` заменена единым локальным рабочим сайтом: подтверждённый apply создаёт backup и восстанавливает его при ошибке.
 - production pull отвергается независимо валидацией конфигурации, локальным гейтом режима и runner
 - `-Mirror` определён контрактом и fail-closed: отказ и без `AllowDestructiveLocalReplace`, и с ним
 - скачанные артефакты проверяются до использования: gzip integrity через ISIZE, структура SQL, точное число таблиц, prefix, отсутствие чужих и смешанных идентификаторов, листинг архива на traversal и symlink
@@ -357,14 +455,14 @@ LAST_SYNC_COMMIT: 26a57c8
 WORK_LOCK: CODEX
 
 CRITICAL: YES
-PLAN_SUMMARY: Verify Laragon before writes; create only the new wordpress_staging_fixture database and local WordPress at D:\laragon\www\wordpress-staging-fixture.local; then update only the ignored fixture deploy.config.ps1. Stop on an existing database, directory, or database authentication requirement.
+PLAN_SUMMARY: Verify the local PHP/MySQL environment; create only a new fixture database and local WordPress directory; then update only the ignored fixture configuration. Stop on an existing database, directory, or database authentication requirement.
 PLAN_APPROVED: YES (2026-08-10)
 EXECUTION_APPROVED: YES (2026-08-10)
 
 IN_SCOPE:
 - read-only Laragon capability and collision checks
 - new database wordpress_staging_fixture only
-- new local WordPress fixture at D:\laragon\www\wordpress-staging-fixture.local only
+- new local WordPress fixture at a private local path only
 - ignored fixture deploy.config.ps1 update to actual local paths
 
 OUT_OF_SCOPE:
@@ -376,7 +474,7 @@ ALLOWED_FILES:
 - .ai/CHANGELOG.md
 - .ai/HANDOFF.md
 - dedicated fixture workspace private config only
-- D:\laragon\www\wordpress-staging-fixture.local only
+- a private local fixture path only
 
 RISKS:
 - local database creation and WordPress installation are intentionally isolated but still write to Laragon
@@ -390,7 +488,7 @@ LIMIT_STATUS: SAVE
 STOP_AFTER_CHECKPOINT: YES
 
 RESULT:
-- created only the new Laragon database wordpress_staging_fixture and WordPress fixture at D:\laragon\www\wordpress-staging-fixture.local
+- created only a new local fixture database and WordPress fixture at a private local path
 - updated only the ignored fixture deploy.config.ps1 to the real local path and database
 
 CHECKS:
@@ -694,7 +792,7 @@ REVIEWER: CLAUDE
 STATUS: COMMITTED_PUSHED
 
 BRANCH: main
-WORKTREE: dedicated Codex worktree f6a5
+WORKTREE: dedicated Codex worktree (local path intentionally omitted)
 BASE_COMMIT: 626bddf
 WORK_LOCK: CODEX
 
@@ -728,6 +826,124 @@ RISKS:
 
 NEXT:
 - Use separate approvals for protected runner rollout and staging DB/pull smoke; do not run live actions as part of this commit.
+
+## TASK: STAGING-PULL-LOCAL-APPLY-VISIBLE
+
+TASK_ID: STAGING-PULL-LOCAL-APPLY-VISIBLE
+TASK_NAME: Apply verified staging pull to local WordPress and verify visibly
+DOMAIN: DEPLOYMENT
+TASK_LEAD: CODEX
+IMPLEMENTER: CODEX
+REVIEWER: CLAUDE
+STATUS: READY_FOR_REVIEW
+
+BRANCH: main
+WORKTREE: dedicated Codex worktree f6a5
+BASE_COMMIT: 1ff1287
+WORK_LOCK: CODEX
+
+CRITICAL: YES
+PLAN_APPROVED: YES (2026-08-13)
+EXECUTION_APPROVED: YES (2026-08-13)
+
+RESULT:
+- Pull runner exports only the active configured-prefix tables; inactive alternative-prefix tables were not exported or deleted.
+- Full staging pull completed to `.pull\\20260813-180905` with remote DB backup, verified SQL, code, themes, plugins, and uploads archive.
+- Local apply created a DB/files backup, imported the verified SQL, mapped URLs to the Laragon vhost, and replaced configured full-pull paths.
+- Local homepage visibly shows marker `STAGING-PULL-FULL-VERIFY-20260813-01`.
+- Screenshot saved outside the repository at `staging-pull-local-homepage.png`.
+
+CHECKS:
+- Full Pester suite: 127 passed, 0 failed before the final local backup-path fix; pull suite: 70 passed, 0 failed after it.
+- Staging pull artifact: 14 CREATE TABLE statements, all active prefix, zero foreign/`wp_*` tables.
+- Local verification: home/siteurl used the private local URL; active configured-prefix table count matched; HTTP 200 and marker visible.
+- Local DB backup exists under `D:\\laragon\\backups\\wordpress-staging-fixture`.
+
+RISKS:
+- Current code and tests are uncommitted; no push or merge was performed.
+- The live runner was updated on staging and its previous version was saved remotely.
+- Independent Claude review is still required before commit/push of these new fixes.
+
+NEXT:
+- Stop for independent read-only Claude review.
+
+## TASK: PORTFOLIO-PRODUCTION-READONLY-PULL
+
+TASK_ID: PORTFOLIO-PRODUCTION-READONLY-PULL
+TASK_NAME: Production portfolio full read-only pull to local side-by-side workspace
+DOMAIN: DEPLOYMENT
+TASK_LEAD: CODEX
+IMPLEMENTER: CODEX
+REVIEWER: CLAUDE
+STATUS: READY_FOR_REVIEW
+
+BRANCH: main
+WORKTREE: dedicated Codex worktree f6a5
+BASE_COMMIT: 1ff1287
+WORK_LOCK: CODEX
+
+CRITICAL: YES
+PLAN_APPROVED: YES (2026-08-13)
+EXECUTION_APPROVED: YES (2026-08-13)
+
+RESULT:
+- Added explicit production read-only pull guard: private `AllowProductionPull = $true` plus CLI `-AllowProductionPull`; production db/full/apply-pull remain forbidden.
+- Installed a separate production-read-only pull runner/policy; the prior remote runner/config was backed up in the private server runtime.
+- Completed a production-read-only `pull-full` into a private local workspace; working local site and database were not replaced.
+- Fixed UTF-8 tar header decoding so Cyrillic media names survive extraction on Windows.
+
+CHECKS:
+- Production pull artifacts: expected SQL table set and selected-file count matched between remote export and local workspace.
+- Remote DB backup exists; pull temp artifacts were cleaned; inactive tables and production content were not deleted or rewritten.
+- Full Pester suite: 133 passed, 0 failed; `sh -n` runner and smoke scripts passed; `git diff --check` passed.
+
+RISKS:
+- The portfolio staged copy is verified but not applied to the local WordPress site; local DB target remains unused.
+- Current code, tests, and private profile changes are uncommitted; no push, merge, local apply, production deploy, rollback, or Claude review performed.
+- The successful `.pull` workspace is a large ignored runtime artifact and is intentionally excluded from the private-material scan.
+
+NEXT:
+- Stop for independent read-only Claude review. Local apply requires a separate plan and double approval.
+
+## TASK: PORTFOLIO-LOCAL-FULL-APPLY
+
+TASK_ID: PORTFOLIO-LOCAL-FULL-APPLY
+TASK_NAME: Apply verified portfolio pull to a side-by-side local WordPress copy
+DOMAIN: DEPLOYMENT
+TASK_LEAD: CODEX
+IMPLEMENTER: CODEX
+REVIEWER: CLAUDE
+STATUS: READY_FOR_REVIEW
+
+BRANCH: main
+WORKTREE: dedicated Codex worktree f6a5
+BASE_COMMIT: 1ff1287
+WORK_LOCK: CODEX
+
+CRITICAL: YES
+PLAN_APPROVED: YES (2026-08-13)
+EXECUTION_APPROVED: YES (2026-08-13)
+
+RESULT:
+- Bootstrapped a private local target from an existing local WordPress core, using a separate local database under the superseded two-local-copy design.
+- Created database and file backups in a private local backup directory before apply.
+- Applied a verified pull workspace into a private local target database and local files, including uploads/media; mapped `home` and `siteurl` to the private local URL.
+- Removed only bootstrap leftovers absent from the verified pull, then restored the 16 standard WordPress root/core files required locally because the production pull profile does not include them as sync paths. No stale `et-cache` files remain.
+
+CHECKS:
+- Local HTTP: 200; homepage visibly rendered the expected pulled content.
+- Local DB: `home` and `siteurl` pointed to the local URL; active configured-prefix table count matched; this historical run used the superseded separate-target design.
+- Files: all 9,151 verified pulled files present by exact path/size comparison; 0 missing and 0 stale pulled-path files; 1,860 upload files present. Local core bootstrap files are tracked separately from the 9,151 pull files.
+- Screenshot retained only in private local evidence storage.
+- Full Pester suite: 133 passed, 0 failed; shell syntax checks and `git diff --check` passed.
+
+RISKS:
+- Production was read-only throughout; no production deploy, SQL write, cleanup of remote inactive tables, rollback, commit, push, merge, or Claude review was performed.
+- Current repository code/profile changes remain uncommitted. Independent Claude review is still required before commit/push.
+- Exact byte-level hash comparison of all files was not required after the verified archive extraction; current path/size comparison and visible runtime verification passed.
+
+NEXT:
+- Stop for independent read-only Claude review.
 
 ## EXISTING PROJECT MIGRATION RULES
 

@@ -505,9 +505,13 @@ function ConvertFrom-TarHeaderBlock {
 	foreach ($byte in $Block) { if ($byte -ne 0) { $empty = $false; break } }
 	if ($empty) { return $null }
 
+	# GNU tar stores POSIX path fields as bytes; the remote WordPress files use UTF-8.
+	# ASCII decoding turns Cyrillic names into literal '?' characters, which then become
+	# invalid Windows paths during extraction.
 	$ascii = [Text.Encoding]::ASCII
-	$name = $ascii.GetString($Block, 0, 100).TrimEnd([char] 0)
-	$prefix = $ascii.GetString($Block, 345, 155).TrimEnd([char] 0)
+	$utf8 = New-Object Text.UTF8Encoding($false, $true)
+	$name = $utf8.GetString($Block, 0, 100).TrimEnd([char] 0)
+	$prefix = $utf8.GetString($Block, 345, 155).TrimEnd([char] 0)
 	if ($prefix) { $name = "$prefix/$name" }
 	$sizeField = $ascii.GetString($Block, 124, 12).Trim([char] 0, ' ')
 	$size = [long] 0
@@ -521,12 +525,37 @@ function ConvertFrom-TarHeaderBlock {
 	return [pscustomobject] @{ Name = $name; Size = $size; TypeFlag = [string] $typeFlag }
 }
 
+function Read-TarPayloadBytes {
+	param(
+		[Parameter(Mandatory = $true)] [IO.Stream] $Stream,
+		[Parameter(Mandatory = $true)] [long] $Size
+	)
+
+	if ($Size -lt 0 -or $Size -gt 1MB) {
+		throw 'Archive metadata record is unreasonably large.'
+	}
+	$bytes = New-Object byte[] ([int] $Size)
+	$offset = 0
+	while ($offset -lt $bytes.Length) {
+		$read = $Stream.Read($bytes, $offset, $bytes.Length - $offset)
+		if ($read -le 0) { throw 'Archive is truncated.' }
+		$offset += $read
+	}
+	$padding = [long] ([Math]::Ceiling($Size / 512.0)) * 512 - $Size
+	if ($padding -gt 0) {
+		if (($Stream.Position + $padding) -gt $Stream.Length) { throw 'Archive is truncated.' }
+		$Stream.Seek($padding, [IO.SeekOrigin]::Current) | Out-Null
+	}
+	return $bytes
+}
+
 function Get-TarEntryList {
 	[CmdletBinding()]
 	param([Parameter(Mandatory = $true)] [string] $Path)
 
 	$entries = New-Object 'System.Collections.Generic.List[object]'
 	$stream = $null
+	$pendingLongName = $null
 	try {
 		$stream = [IO.File]::OpenRead($Path)
 		$header = New-Object byte[] 512
@@ -536,6 +565,17 @@ function Get-TarEntryList {
 			if ($read -ne 512) { throw 'Archive listing is truncated.' }
 			$entry = ConvertFrom-TarHeaderBlock $header
 			if ($null -eq $entry) { break }
+			if ($entry.TypeFlag -eq 'L') {
+				if ($pendingLongName) { throw 'Archive contains consecutive GNU long-name records.' }
+				$payload = Read-TarPayloadBytes $stream $entry.Size
+				$pendingLongName = [Text.Encoding]::UTF8.GetString($payload).TrimEnd([char] 0)
+				if (-not $pendingLongName) { throw 'Archive contains an empty GNU long-name record.' }
+				continue
+			}
+			if ($pendingLongName) {
+				$entry.Name = $pendingLongName
+				$pendingLongName = $null
+			}
 			$entries.Add($entry)
 
 			$skip = [long] ([Math]::Ceiling($entry.Size / 512.0)) * 512
@@ -544,6 +584,7 @@ function Get-TarEntryList {
 				$stream.Seek($skip, [IO.SeekOrigin]::Current) | Out-Null
 			}
 		}
+		if ($pendingLongName) { throw 'Archive contains an unterminated GNU long-name record.' }
 	} finally {
 		if ($stream) { $stream.Dispose() }
 	}
@@ -567,6 +608,7 @@ function Expand-TarArchive {
 	}
 	$extracted = 0
 	$stream = $null
+	$pendingLongName = $null
 	try {
 		$stream = [IO.File]::OpenRead($Path)
 		$header = New-Object byte[] 512
@@ -576,6 +618,17 @@ function Expand-TarArchive {
 			if ($read -ne 512) { throw 'Archive is truncated.' }
 			$entry = ConvertFrom-TarHeaderBlock $header
 			if ($null -eq $entry) { break }
+			if ($entry.TypeFlag -eq 'L') {
+				if ($pendingLongName) { throw 'Archive contains consecutive GNU long-name records.' }
+				$payload = Read-TarPayloadBytes $stream $entry.Size
+				$pendingLongName = [Text.Encoding]::UTF8.GetString($payload).TrimEnd([char] 0)
+				if (-not $pendingLongName) { throw 'Archive contains an empty GNU long-name record.' }
+				continue
+			}
+			if ($pendingLongName) {
+				$entry.Name = $pendingLongName
+				$pendingLongName = $null
+			}
 			if ($entry.TypeFlag -notin @('0', '5')) {
 				throw "Archive contains an unsupported entry type: $($entry.Name)"
 			}
@@ -613,6 +666,7 @@ function Expand-TarArchive {
 			$padding = [long] ([Math]::Ceiling($entry.Size / 512.0)) * 512 - $entry.Size
 			if ($padding -gt 0) { $stream.Seek($padding, [IO.SeekOrigin]::Current) | Out-Null }
 		}
+		if ($pendingLongName) { throw 'Archive contains an unterminated GNU long-name record.' }
 	} finally {
 		if ($stream) { $stream.Dispose() }
 	}
@@ -778,6 +832,7 @@ function New-RemotePullCommand {
 		@('EXPECTED_DB_NAME', $Configuration.ExpectedRemoteDbName),
 		@('EXPECTED_DB_TABLE_PREFIX', $Configuration.ExpectedDbTablePrefix),
 		@('SYNC_PATHS', ($Configuration.SyncPaths -join ',')),
+		@('ALLOW_PRODUCTION_PULL', $(if ($Configuration.Contains('AllowProductionPull') -and $Configuration.AllowProductionPull) { '1' } else { '0' })),
 		@('DEPLOY_MODE', $PullMode),
 		@('SQL_FILE', ''),
 		@('UPLOADS_ZIP', ''),
@@ -898,13 +953,205 @@ function Test-PullPathAllowed {
 	return $true
 }
 
+function Get-ProfileSiteId {
+	[CmdletBinding()]
+	param([Parameter(Mandatory = $true)] [System.Collections.IDictionary] $Configuration)
+
+	if ($Configuration.Contains('SiteId') -and -not [string]::IsNullOrWhiteSpace([string] $Configuration.SiteId)) {
+		return ([string] $Configuration.SiteId).Trim().ToLowerInvariant()
+	}
+	return 'default-site'
+}
+
+function Get-PullPathSelection {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory = $true)] [System.Collections.IDictionary] $Configuration,
+		[Parameter(Mandatory = $true)] [string] $Mode
+	)
+
+    if ($Mode -eq 'pull-full' -and $Configuration.Contains('FullPullPaths')) {
+        return [pscustomobject] @{ Values = @($Configuration.FullPullPaths); Source = 'FullPullPaths' }
+    }
+    if ($Mode -eq 'pull-full' -and ($Configuration.Contains('PullContentPaths') -or $Configuration.Contains('PullMediaPaths'))) {
+        $content = if ($Configuration.Contains('PullContentPaths')) { @($Configuration.PullContentPaths) } else { @() }
+        $media = if ($Configuration.Contains('PullMediaPaths')) { @($Configuration.PullMediaPaths) } else { @() }
+        return [pscustomobject] @{ Values = @($content + $media); Source = 'PullContentPaths+PullMediaPaths' }
+    }
+	return [pscustomobject] @{ Values = @($Configuration.AllowedPullPaths); Source = 'AllowedPullPaths' }
+}
+
+function Get-FileSha256Hex {
+	[CmdletBinding()]
+	param([Parameter(Mandatory = $true)] [string] $Path)
+
+	if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "File not found for hashing: $Path" }
+	return ([string] (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash).Replace('-', '').ToLowerInvariant()
+}
+
+function Get-DirectorySha256Hex {
+	[CmdletBinding()]
+	param([Parameter(Mandatory = $true)] [string] $Path)
+
+	if (-not (Test-Path -LiteralPath $Path -PathType Container)) { throw "Directory not found for hashing: $Path" }
+	$root = [IO.Path]::GetFullPath($Path).TrimEnd([char]'\', [char]'/')
+	$entries = @(Get-ChildItem -LiteralPath $root -Recurse -Force | Sort-Object FullName)
+	$builder = New-Object Text.StringBuilder
+	foreach ($entry in $entries) {
+		if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Reparse-point file is not allowed in a pull workspace: $($entry.FullName)" }
+		$relative = $entry.FullName.Substring($root.Length).TrimStart([char]'\', [char]'/').Replace([char]'\', [char]'/')
+		if ($entry.PSIsContainer) {
+			[void] $builder.Append('D:').Append($relative).Append("`n")
+		} else {
+			[void] $builder.Append('F:').Append($relative).Append("`n").Append((Get-FileSha256Hex $entry.FullName)).Append("`n")
+		}
+	}
+	$sha = [Security.Cryptography.SHA256]::Create()
+	try {
+		return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($builder.ToString())))).Replace('-', '').ToLowerInvariant()
+	} finally {
+		$sha.Dispose()
+	}
+}
+
+function Get-LocalBackupRetentionPlan {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory = $true)] [string] $BackupDirectory,
+		[Parameter(Mandatory = $true)] [ValidateRange(1, 1000)] [int] $Keep,
+		[ValidateRange(0, 36500)] [int] $KeepDays = 0,
+		[ValidateRange(0, 10485760)] [long] $MaxBytes = 0,
+		[datetime] $Now = (Get-Date)
+	)
+
+	if (-not (Test-Path -LiteralPath $BackupDirectory -PathType Container)) {
+		return [pscustomobject] @{ Groups = @(); Remove = @(); Kept = @() }
+	}
+	$groups = @(Get-ChildItem -LiteralPath $BackupDirectory -Force -ErrorAction SilentlyContinue |
+		Where-Object { $_.Name -match '^(local-db|files)-([0-9]{8}-[0-9]{6})' } |
+		Group-Object { ([regex]::Match($_.Name, '^(?:local-db|files)-([0-9]{8}-[0-9]{6})')).Groups[1].Value } |
+		Sort-Object Name -Descending |
+		ForEach-Object {
+			$stamp = [DateTime]::MinValue
+			[DateTime]::TryParseExact($_.Name, 'yyyyMMdd-HHmmss', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref] $stamp) | Out-Null
+			$bytes = [long] 0
+			foreach ($item in @($_.Group)) {
+				if ($item.PSIsContainer) {
+					foreach ($file in @(Get-ChildItem -LiteralPath $item.FullName -File -Recurse -ErrorAction SilentlyContinue)) { $bytes += [long] $file.Length }
+				} else { $bytes += [long] $item.Length }
+			}
+			[pscustomobject] @{ Stamp = $_.Name; Items = @($_.Group); Date = $stamp; Bytes = $bytes }
+		})
+
+	$remove = New-Object 'System.Collections.Generic.List[object]'
+	for ($index = 0; $index -lt $groups.Count; $index++) {
+		if ($index -eq 0) { continue } # A recoverable local copy always retains its newest complete backup group.
+		$group = $groups[$index]
+		$expired = $KeepDays -gt 0 -and $group.Date -ne [DateTime]::MinValue -and $group.Date -lt $Now.AddDays(-$KeepDays)
+		if ($index -ge $Keep -or $expired) { $remove.Add($group) }
+	}
+	$removeStamps = @($remove | ForEach-Object { $_.Stamp })
+	$survivors = @($groups | Where-Object { $removeStamps -notcontains $_.Stamp })
+	$totalBytes = [long] 0
+	foreach ($group in $survivors) { $totalBytes += [long] $group.Bytes }
+	for ($index = $survivors.Count - 1; $index -ge 1 -and $MaxBytes -gt 0 -and $totalBytes -gt $MaxBytes; $index--) {
+		$group = $survivors[$index]
+		$remove.Add($group)
+		$totalBytes -= [long] $group.Bytes
+	}
+	$removeStamps = @($remove | ForEach-Object { $_.Stamp })
+	return [pscustomobject] @{ Groups = @($groups); Remove = $remove.ToArray(); Kept = @($groups | Where-Object { $removeStamps -notcontains $_.Stamp }) }
+}
+
+function New-PullManifest {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory = $true)] [System.Collections.IDictionary] $Configuration,
+		[Parameter(Mandatory = $true)] [object] $Plan,
+		[Parameter(Mandatory = $true)] [string] $ManifestPath
+	)
+
+	$artifactHashes = [ordered] @{}
+	if ($Plan.IncludeDatabase -and (Test-Path -LiteralPath $Plan.LocalDbArchive -PathType Leaf)) {
+		$artifactHashes.database = Get-FileSha256Hex $Plan.LocalDbArchive
+		$artifactHashes.databaseSql = Get-FileSha256Hex $Plan.LocalDbSql
+	}
+	if ($Plan.IncludeFiles -and (Test-Path -LiteralPath $Plan.LocalFilesArchive -PathType Leaf)) {
+		$artifactHashes.files = Get-FileSha256Hex $Plan.LocalFilesArchive
+		$artifactHashes.filesTree = Get-DirectorySha256Hex $Plan.FilesStagingDirectory
+	}
+	$manifest = [ordered] @{
+		ManifestVersion       = 1
+		SiteId                = Get-ProfileSiteId $Configuration
+		Environment           = [string] $Configuration.Environment
+		RemoteUrl             = [string] $Configuration.RemoteUrl
+		Mode                  = [string] $Plan.Mode
+		Stamp                 = [string] $Plan.Stamp
+		ExpectedDbTablePrefix = [string] $Plan.ExpectedTablePrefix
+		ExpectedDbTableCount  = [int] $Plan.ExpectedTableCount
+		WordPressCoreVersion  = if ($Configuration.Contains('ExpectedWordPressCoreVersion')) { [string] $Configuration.ExpectedWordPressCoreVersion } else { '' }
+		PathClasses           = [ordered] @{
+			core    = if ($Configuration.Contains('CorePolicy')) { [string] $Configuration.CorePolicy } else { 'preserve-local-core' }
+			content = if ($Configuration.Contains('PullContentPaths')) { @($Configuration.PullContentPaths) } else { @() }
+			media   = if ($Configuration.Contains('PullMediaPaths')) { @($Configuration.PullMediaPaths) } else { @() }
+			never   = @(Get-PullDenyList)
+		}
+		PullPaths             = @($Plan.PullPaths)
+		Artifacts             = $artifactHashes
+		CreatedUtc            = [DateTime]::UtcNow.ToString('o')
+	}
+	New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ManifestPath) | Out-Null
+	$manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $ManifestPath -Encoding UTF8
+	return $manifest
+}
+
+function Assert-PullManifest {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory = $true)] [System.Collections.IDictionary] $Configuration,
+		[Parameter(Mandatory = $true)] [string] $ManifestPath,
+		[Parameter(Mandatory = $true)] [object] $Plan
+	)
+
+	if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) { throw "Pull manifest was not found: $ManifestPath" }
+	try { $manifest = Get-Content -Raw -LiteralPath $ManifestPath | ConvertFrom-Json } catch { throw "Pull manifest is invalid: $ManifestPath" }
+	if ([int] $manifest.ManifestVersion -ne 1) { throw 'Unsupported pull manifest version.' }
+	if ([string] $manifest.SiteId -ne (Get-ProfileSiteId $Configuration)) { throw 'Pull manifest SiteId does not match the selected profile.' }
+	if ([string] $manifest.Environment -ne [string] $Configuration.Environment) { throw 'Pull manifest environment does not match the selected profile.' }
+	if ([string] $manifest.RemoteUrl -ne [string] $Configuration.RemoteUrl) { throw 'Pull manifest remote URL does not match the selected profile.' }
+	if ([string] $manifest.ExpectedDbTablePrefix -ne [string] $Configuration.ExpectedDbTablePrefix) { throw 'Pull manifest database prefix does not match the selected profile.' }
+	if ([int] $manifest.ExpectedDbTableCount -ne [int] $Plan.ExpectedTableCount) { throw 'Pull manifest database table count does not match the selected profile.' }
+	if ([string] $manifest.Mode -ne [string] $Plan.Mode -and [string] $Plan.Mode -ne 'apply-pull') { throw 'Pull manifest mode does not match the selected operation.' }
+	$manifestPaths = @($manifest.PullPaths | ForEach-Object { [string] $_ })
+	if (($manifestPaths -join "`n") -ne (@($Plan.PullPaths) -join "`n")) { throw 'Pull manifest path list does not match the selected profile.' }
+	$databaseSql = if ($Plan.PSObject.Properties['DatabaseSql']) { [string] $Plan.DatabaseSql } else { [string] $Plan.LocalDbSql }
+	$filesRoot = if ($Plan.PSObject.Properties['FilesRoot']) { [string] $Plan.FilesRoot } else { [string] $Plan.FilesStagingDirectory }
+	if ($manifest.Artifacts.database) {
+		$databaseArchive = Join-Path $Plan.Workspace 'database.sql.gz'
+		if (-not (Test-Path -LiteralPath $databaseArchive -PathType Leaf)) { throw 'Pull database artifact referenced by the manifest is missing.' }
+		if ((Get-FileSha256Hex $databaseArchive) -ne [string] $manifest.Artifacts.database) { throw 'Pull database artifact hash does not match the pull manifest.' }
+		if (-not $manifest.Artifacts.databaseSql) { throw 'Pull database SQL hash is missing from the pull manifest.' }
+		if (-not (Test-Path -LiteralPath $databaseSql -PathType Leaf)) { throw 'Extracted pull database SQL referenced by the manifest is missing.' }
+		if ((Get-FileSha256Hex $databaseSql) -ne [string] $manifest.Artifacts.databaseSql) { throw 'Extracted pull database SQL hash does not match the pull manifest.' }
+	}
+	if ($manifest.Artifacts.files) {
+		$filesArchive = Join-Path $Plan.Workspace 'files.tar.gz'
+		if (-not (Test-Path -LiteralPath $filesArchive -PathType Leaf)) { throw 'Pull files artifact referenced by the manifest is missing.' }
+		if ((Get-FileSha256Hex $filesArchive) -ne [string] $manifest.Artifacts.files) { throw 'Pull files artifact hash does not match the pull manifest.' }
+		if (-not $manifest.Artifacts.filesTree) { throw 'Pull files tree hash is missing from the pull manifest.' }
+		if (-not (Test-Path -LiteralPath $filesRoot -PathType Container)) { throw 'Extracted pull files referenced by the manifest are missing.' }
+		if ((Get-DirectorySha256Hex $filesRoot) -ne [string] $manifest.Artifacts.filesTree) { throw 'Extracted pull files hash does not match the pull manifest.' }
+	}
+	return $manifest
+}
+
 function Add-PullConfigurationErrors {
 	param(
 		[System.Collections.Generic.List[string]] $Errors,
 		[System.Collections.IDictionary] $Configuration
 	)
 
-	foreach ($key in @('PullEnabled', 'RequirePullConfirmation', 'AllowDestructiveLocalReplace')) {
+	foreach ($key in @('PullEnabled', 'AllowProductionPull', 'RequirePullConfirmation', 'AllowDestructiveLocalReplace')) {
 		if ($Configuration.Contains($key) -and $Configuration[$key] -isnot [bool]) {
 			Add-ValidationError $Errors "$key must be a boolean."
 		}
@@ -917,25 +1164,21 @@ function Add-PullConfigurationErrors {
 		return
 	}
 
-	if ($Configuration.Environment -eq 'production') {
-		Add-ValidationError $Errors 'PullEnabled must be false for production. Pulling from production is never allowed.'
+	$allowProductionPull = $Configuration.Contains('AllowProductionPull') -and $Configuration['AllowProductionPull'] -is [bool] -and $Configuration['AllowProductionPull']
+	if ($Configuration.Environment -eq 'production' -and -not $allowProductionPull) {
+		Add-ValidationError $Errors 'Production pull requires AllowProductionPull = $true in the private configuration.'
+	}
+	if ($Configuration.Environment -ne 'production' -and $allowProductionPull) {
+		Add-ValidationError $Errors 'AllowProductionPull may be true only for a production read-only pull profile.'
 	}
 
-	foreach ($key in @('LocalDatabaseTarget', 'LocalBackupDirectory', 'LocalPhpPath', 'LocalWpCliPath', 'MysqlPath')) {
+	foreach ($key in @('LocalBackupDirectory', 'LocalPhpPath', 'LocalWpCliPath', 'MysqlPath')) {
 		if (-not $Configuration.Contains($key)) {
 			Add-ValidationError $Errors "Missing configuration value while PullEnabled is true: $key"
 			continue
 		}
 		if ($Configuration[$key] -isnot [string] -or [string]::IsNullOrWhiteSpace($Configuration[$key])) {
 			Add-ValidationError $Errors "Configuration value must be a non-empty string: $key"
-		}
-	}
-
-	if ($Configuration['LocalDatabaseTarget'] -is [string]) {
-		if ($Configuration.LocalDatabaseTarget -notmatch '^[A-Za-z0-9_]+$') {
-			Add-ValidationError $Errors 'LocalDatabaseTarget contains unsupported characters.'
-		} elseif ($Configuration.LocalDatabaseTarget -ieq $Configuration.LocalDbName) {
-			Add-ValidationError $Errors 'LocalDatabaseTarget must differ from LocalDbName. Pull never imports into the working local database.'
 		}
 	}
 
@@ -951,7 +1194,7 @@ function Add-PullConfigurationErrors {
 		}
 	}
 
-	foreach ($key in @('AllowedPullPaths', 'FullPullPaths', 'ExcludedPullPaths')) {
+	foreach ($key in @('AllowedPullPaths', 'FullPullPaths', 'PullContentPaths', 'PullMediaPaths', 'ExcludedPullPaths')) {
 		if (-not $Configuration.Contains($key)) {
 			if ($key -eq 'AllowedPullPaths') {
 				Add-ValidationError $Errors 'Missing configuration value while PullEnabled is true: AllowedPullPaths'
@@ -988,6 +1231,13 @@ function Add-PullConfigurationErrors {
 	if ($allowDestructive -and -not $requireConfirmation) {
 		Add-ValidationError $Errors 'AllowDestructiveLocalReplace requires RequirePullConfirmation to stay true.'
 	}
+	if ($Configuration.Contains('ExpectedPullDbTableCount') -and ($Configuration.ExpectedPullDbTableCount -isnot [int] -or $Configuration.ExpectedPullDbTableCount -lt 1)) {
+		Add-ValidationError $Errors 'ExpectedPullDbTableCount must be an integer greater than or equal to 1.'
+	}
+	$corePolicy = if ($Configuration.Contains('CorePolicy')) { [string] $Configuration.CorePolicy } else { 'preserve-local-core' }
+	if ($corePolicy -ne 'preserve-local-core') {
+		Add-ValidationError $Errors 'CorePolicy must be preserve-local-core. Pull never downloads or replaces WordPress core.'
+	}
 }
 
 function Assert-PullAllowed {
@@ -997,13 +1247,14 @@ function Assert-PullAllowed {
 		[Parameter(Mandatory = $true)] [string] $Mode,
 		[switch] $Confirmed,
 		[switch] $Mirror,
-		[switch] $DryRun
+		[switch] $DryRun,
+		[switch] $AllowProductionPull
 	)
 
 	if ($Mode -notin (Get-PullModeNames)) {
 		throw "Assert-PullAllowed expects a pull mode, not '$Mode'."
 	}
-	Assert-DeployModeAllowed -Environment $Configuration.Environment -Mode $Mode
+	Assert-DeployModeAllowed -Environment $Configuration.Environment -Mode $Mode -AllowProductionPull:$AllowProductionPull
 	if (-not ($Configuration.Contains('PullEnabled') -and $Configuration['PullEnabled'] -is [bool] -and $Configuration['PullEnabled'])) {
 		throw 'Pull is disabled. Set PullEnabled = $true in deploy.config.ps1 before using a pull mode.'
 	}
@@ -1037,33 +1288,29 @@ function New-PullPlan {
 		[Parameter(Mandatory = $true)] [string] $WorkspaceRoot,
 		[switch] $DryRun,
 		[switch] $Confirmed,
-		[switch] $Mirror
+		[switch] $Mirror,
+		[switch] $AllowProductionPull
 	)
 
-	Assert-PullAllowed -Configuration $Configuration -Mode $Mode -Confirmed:$Confirmed -Mirror:$Mirror -DryRun:$DryRun
+	Assert-PullAllowed -Configuration $Configuration -Mode $Mode -Confirmed:$Confirmed -Mirror:$Mirror -DryRun:$DryRun -AllowProductionPull:$AllowProductionPull
 	if ($Stamp -notmatch '^[0-9A-Za-z-]+$') {
 		throw 'Pull run stamp contains unsupported characters.'
 	}
 
 	# Everything a pull writes locally lives here, never inside the working WordPress copy.
-	$workspace = Join-Path $WorkspaceRoot ".pull\$Stamp"
+	$siteId = Get-ProfileSiteId $Configuration
+	$workspace = Join-Path (Join-Path $WorkspaceRoot '.pull') (Join-Path $siteId $Stamp)
 	$wpRoot = $Configuration.LocalWpPath.TrimEnd('\', '/')
 	if ([IO.Path]::GetFullPath($workspace).StartsWith($wpRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
 		throw 'Pull workspace must be outside LocalWpPath.'
-	}
-
-	# Defence in depth: Add-PullConfigurationErrors already rejects this combination, and
-	# the plan refuses to name the working database as a target under any circumstance.
-	$databaseTarget = [string] $Configuration.LocalDatabaseTarget
-	if ($databaseTarget -ieq [string] $Configuration.LocalDbName) {
-		throw 'Pull target database must differ from the working local database.'
 	}
 
 	$excluded = @()
 	if ($Configuration.Contains('ExcludedPullPaths') -and $Configuration['ExcludedPullPaths'] -is [Array]) {
 		$excluded = @($Configuration.ExcludedPullPaths)
 	}
-	$pullPathSource = @(if ($Mode -eq 'pull-full' -and $Configuration.Contains('FullPullPaths')) { @($Configuration.FullPullPaths) } else { @($Configuration.AllowedPullPaths) })
+	$pathSelection = Get-PullPathSelection $Configuration $Mode
+	$pullPathSource = @($pathSelection.Values)
 	$pullPaths = @()
 	if ($pullPathSource.Count -gt 0) {
 		$pullPaths = @($pullPathSource | Where-Object { Test-PullPathAllowed $_ -ExcludedPaths $excluded })
@@ -1078,12 +1325,13 @@ function New-PullPlan {
 	$remoteTmp = $Configuration.RemoteTmpPath.TrimEnd('/')
 	return [pscustomobject] @{
 		Mode                  = $Mode
+		SiteId                = $siteId
 		Stamp                 = $Stamp
 		IsDryRun              = [bool] $DryRun
 		IncludeDatabase       = $includeDatabase
 		IncludeFiles          = $includeFiles
 		Workspace             = $workspace
-		DatabaseTarget        = if ($includeDatabase) { $databaseTarget } else { '' }
+		ManifestPath          = Join-Path $workspace 'manifest.json'
 		WorkingDatabase       = [string] $Configuration.LocalDbName
 		LocalBackupDirectory  = [string] $Configuration.LocalBackupDirectory
 		RemoteDbArtifact      = if ($includeDatabase) { "$remoteTmp/pull-db-$Stamp.sql.gz" } else { '' }
@@ -1093,10 +1341,10 @@ function New-PullPlan {
 		LocalFilesArchive     = if ($includeFiles) { Join-Path $workspace 'files.tar.gz' } else { '' }
 		FilesStagingDirectory = if ($includeFiles) { Join-Path $workspace 'files' } else { '' }
 		PullPaths             = $pullPaths
-		PullPathSource        = if ($Mode -eq 'pull-full' -and $Configuration.Contains('FullPullPaths')) { 'FullPullPaths' } else { 'AllowedPullPaths' }
+		PullPathSource        = $pathSelection.Source
 		ExcludedPaths         = $excluded
 		ExpectedTablePrefix   = [string] $Configuration.ExpectedDbTablePrefix
-		ExpectedTableCount    = [int] $Configuration.ExpectedDbTableCount
+        ExpectedTableCount    = if ($Configuration.Contains('ExpectedPullDbTableCount')) { [int] $Configuration.ExpectedPullDbTableCount } else { [int] $Configuration.ExpectedDbTableCount }
 	}
 }
 
@@ -1107,11 +1355,13 @@ function Get-PullSummaryLines {
 	$lines = @(
 		"Mode                : $($Plan.Mode)",
 		"Dry run             : $($Plan.IsDryRun)",
+		"Site ID             : $($Plan.SiteId)",
 		"Workspace           : $($Plan.Workspace)",
-		"Working database    : $($Plan.WorkingDatabase) (never written by pull)"
+		"Manifest            : $($Plan.ManifestPath)",
+		"Working database    : $($Plan.WorkingDatabase) (never written by download)"
 	)
 	if ($Plan.IncludeDatabase) {
-		$lines += "Pull target database: $($Plan.DatabaseTarget) (prepared side-by-side, not activated)"
+		$lines += "Apply target database: $($Plan.WorkingDatabase) (replaced only by a separate confirmed apply after backup)"
 		$lines += "Remote artifact     : $($Plan.RemoteDbArtifact)"
 		$lines += "Verified SQL        : $($Plan.LocalDbSql)"
 		$lines += "Expected tables     : $($Plan.ExpectedTableCount) with prefix '$($Plan.ExpectedTablePrefix)'"
@@ -1153,17 +1403,20 @@ function New-ApplyPullPlan {
 	if ($workspaceFull.StartsWith($wpRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
 		throw 'PullWorkspace must be outside LocalWpPath.'
 	}
-	$pullRoot = Join-Path $rootFull '.pull'
+	$pullRoot = Join-Path (Join-Path $rootFull '.pull') (Get-ProfileSiteId $Configuration)
 	if (-not $workspaceFull.StartsWith($pullRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
 		throw 'PullWorkspace must be an existing .pull workspace created by pull-full.'
 	}
-	$applyPullPathSource = if ($Configuration.Contains('FullPullPaths')) { @($Configuration.FullPullPaths) } else { @($Configuration.AllowedPullPaths) }
+	$pathSelection = Get-PullPathSelection $Configuration 'pull-full'
+	$applyPullPathSource = @($pathSelection.Values)
 	$applyPullPaths = @($applyPullPathSource | Where-Object { Test-PullPathAllowed $_ -ExcludedPaths @($Configuration.ExcludedPullPaths) })
 
 	return [pscustomobject] @{
 		Mode             = 'apply-pull'
+		SiteId           = Get-ProfileSiteId $Configuration
 		IsDryRun         = [bool] $DryRun
 		Workspace        = $workspaceFull
+		ManifestPath     = Join-Path $workspaceFull 'manifest.json'
 		DatabaseSql      = Join-Path $workspaceFull 'database.sql'
 		FilesRoot        = Join-Path $workspaceFull 'files'
 		WorkingDatabase  = [string] $Configuration.LocalDbName
@@ -1172,6 +1425,8 @@ function New-ApplyPullPlan {
 		RemoteUrl        = [string] $Configuration.RemoteUrl
 		LocalUrl         = [string] $Configuration.LocalUrl
 		PullPaths        = $applyPullPaths
+		ExpectedTablePrefix = [string] $Configuration.ExpectedDbTablePrefix
+		ExpectedTableCount  = if ($Configuration.Contains('ExpectedPullDbTableCount')) { [int] $Configuration.ExpectedPullDbTableCount } else { [int] $Configuration.ExpectedDbTableCount }
 	}
 }
 
@@ -1218,9 +1473,11 @@ function Get-ApplyPullSummaryLines {
 	return @(
 		'Mode                : apply-pull',
 		"Dry run             : $($Plan.IsDryRun)",
+		"Site ID             : $($Plan.SiteId)",
 		"Workspace           : $($Plan.Workspace)",
+		"Manifest            : $($Plan.ManifestPath)",
 		"Database SQL        : $($Plan.DatabaseSql)",
-		"Working database    : $($Plan.WorkingDatabase) (will be replaced after backup)",
+		"Target database     : $($Plan.WorkingDatabase) (will be replaced after backup in the one working local WordPress copy)",
 		"Local URL mapping   : $($Plan.RemoteUrl) -> $($Plan.LocalUrl)",
 		"Working files       : $($Plan.PullPaths -join ', ') (replaced only after local backup and explicit -Confirm)"
 	)
@@ -1240,6 +1497,9 @@ function Get-DeployConfigurationErrors {
 	}
 
 	$requiredStringKeys = @(
+		'SiteId',
+		'CodeRepositoryPath',
+		'WorkRoot',
 		'Environment',
 		'LocalWpPath',
 		'LocalUrl',
@@ -1265,20 +1525,26 @@ function Get-DeployConfigurationErrors {
 		'ExpectedRemoteDbName',
 		'ExpectedDbTablePrefix'
 	)
-	$optionalKeys = @('LocalDbPassword', 'SshKeyPath')
+	$optionalKeys = @('LocalDbPassword', 'SshKeyPath', 'DisplayName', 'GitRemoteName', 'GitBranch', 'ExpectedWordPressCoreVersion', 'CorePolicy')
 	$otherRequiredKeys = @('SshPort', 'KeepBackups', 'ExpectedDbTableCount', 'MinimumLocalFreeSpaceMB', 'MinimumRemoteFreeSpaceMB', 'SyncPaths')
 	$optionalPathKeys = @('FullSyncPaths', 'ProtectedSyncPaths')
 	# Pull keys are optional so that a push-only configuration stays valid unchanged.
 	# Add-PullConfigurationErrors enforces the full schema once PullEnabled is true.
 	$pullKeys = @(
 		'PullEnabled',
-		'LocalDatabaseTarget',
+		'AllowProductionPull',
 		'LocalBackupDirectory',
 		'AllowedPullPaths',
 		'FullPullPaths',
 		'ExcludedPullPaths',
 		'RequirePullConfirmation',
 		'AllowDestructiveLocalReplace',
+		'ExpectedPullDbTableCount',
+		'KeepLocalBackups',
+		'KeepBackupDays',
+		'MaxBackupSizeMB',
+		'PullContentPaths',
+		'PullMediaPaths',
 		'LocalPhpPath',
 		'LocalWpCliPath',
 		'MysqlPath'
@@ -1356,6 +1622,21 @@ function Get-DeployConfigurationErrors {
 	if ($Configuration.ExpectedDbTablePrefix -notmatch '^[A-Za-z0-9_]+$') {
 		Add-ValidationError $errors 'ExpectedDbTablePrefix contains unsupported characters.'
 	}
+	if ($Configuration.SiteId -notmatch '^[a-z0-9][a-z0-9-]{0,62}$') {
+		Add-ValidationError $errors 'SiteId must be a unique lowercase kebab-case identifier.'
+	}
+	foreach ($key in @('CodeRepositoryPath', 'WorkRoot')) {
+		if (-not [IO.Path]::IsPathRooted($Configuration[$key])) {
+			Add-ValidationError $errors "$key must be an absolute local path."
+		}
+	}
+	if ([IO.Path]::IsPathRooted($Configuration.CodeRepositoryPath) -and [IO.Path]::IsPathRooted($Configuration.WorkRoot)) {
+		$codeRoot = ([IO.Path]::GetFullPath($Configuration.CodeRepositoryPath)).TrimEnd('\', '/') + '\'
+		$workRoot = ([IO.Path]::GetFullPath($Configuration.WorkRoot)).TrimEnd('\', '/') + '\'
+		if ($workRoot.StartsWith($codeRoot, [StringComparison]::OrdinalIgnoreCase) -or $codeRoot.StartsWith($workRoot, [StringComparison]::OrdinalIgnoreCase)) {
+			Add-ValidationError $errors 'WorkRoot and CodeRepositoryPath must be separate roots.'
+		}
+	}
 
 	foreach ($key in @('RemoteWpPath', 'RemoteRepoPath', 'RemoteRunnerPath', 'RemoteTmpPath', 'RemoteBackups', 'RemoteGitSshKey', 'RemotePhpPath', 'RemoteWpCliPath', 'ExpectedRemoteWpPath')) {
 		if (-not (Test-RemotePath $Configuration[$key])) {
@@ -1371,7 +1652,7 @@ function Get-DeployConfigurationErrors {
 		Add-ValidationError $errors 'RemoteWpPath does not match ExpectedRemoteWpPath.'
 	}
 
-	foreach ($key in @('LocalWpPath', 'LocalUploadsPath', 'MysqldumpPath', 'GitPath')) {
+	foreach ($key in @('LocalWpPath', 'LocalUploadsPath', 'MysqldumpPath', 'GitPath', 'CodeRepositoryPath', 'WorkRoot')) {
 		if (-not [IO.Path]::IsPathRooted($Configuration[$key])) {
 			Add-ValidationError $errors "$key must be an absolute local path."
 		}
@@ -1406,6 +1687,11 @@ function Get-DeployConfigurationErrors {
 	}
 	if ($Configuration.KeepBackups -isnot [int] -or $Configuration.KeepBackups -lt 1 -or $Configuration.KeepBackups -gt 1000) {
 		Add-ValidationError $errors 'KeepBackups must be an integer from 1 to 1000.'
+	}
+	foreach ($key in @('KeepLocalBackups', 'KeepBackupDays', 'MaxBackupSizeMB')) {
+		if ($Configuration.Contains($key) -and ($Configuration[$key] -isnot [int] -or $Configuration[$key] -lt 1 -or $Configuration[$key] -gt 1048576)) {
+			Add-ValidationError $errors "$key must be an integer from 1 to 1048576."
+		}
 	}
 	if ($Configuration.ExpectedDbTableCount -isnot [int] -or $Configuration.ExpectedDbTableCount -lt 1) {
 		Add-ValidationError $errors 'ExpectedDbTableCount must be an integer greater than or equal to 1.'
@@ -1495,15 +1781,20 @@ function Assert-DeployModeAllowed {
 
 		[Parameter(Mandatory = $true)]
 		[ValidateSet('full', 'code', 'db', 'pull-db', 'pull-files', 'pull-full', 'apply-pull')]
-		[string] $Mode
+		[string] $Mode,
+
+		[switch] $AllowProductionPull
 	)
 
-	if ($Environment -eq 'production' -and ($Mode -in (Get-PullModeNames) -or $Mode -eq 'apply-pull')) {
-		throw "Mode '$Mode' is forbidden for production. Pulling from production is never allowed."
+	if ($Environment -eq 'production' -and $Mode -in (Get-PullModeNames) -and -not $AllowProductionPull) {
+		throw "Mode '$Mode' requires the explicit -AllowProductionPull switch for production read-only pull."
 	}
-	if ($Environment -eq 'production' -and $Mode -ne 'code') {
+	if ($Environment -eq 'production' -and $Mode -eq 'apply-pull' -and -not $AllowProductionPull) {
+		throw "Mode '$Mode' requires the explicit -AllowProductionPull switch for a local production pull apply."
+	}
+	if ($Environment -eq 'production' -and $Mode -ne 'code' -and $Mode -notin (Get-PullModeNames) -and $Mode -ne 'apply-pull') {
 		throw "Mode '$Mode' is forbidden for production. Use code mode."
 	}
 }
 
-Export-ModuleMember -Function Get-DeployConfigurationErrors, Assert-DeployConfiguration, Assert-DeployModeAllowed, ConvertTo-ShSingleQuotedString, New-RemoteDeployCommand, Invoke-CheckedCommand, Invoke-CommandOutput, ConvertTo-WindowsProcessArgument, Invoke-NativeProcessWithFileInput, Restore-FileSwaps, Get-DirectoryContentSizeBytes, Assert-AvailableDiskSpace, Assert-SqlDumpFile, Assert-SqlDumpTablePrefix, Normalize-SqlDumpTablePrefix, Assert-ZipArchiveFile, Get-PullModeNames, Get-PullDenyList, Test-PullPathAllowed, Assert-PullAllowed, Assert-GzipFile, Expand-GzipFile, Get-SqlDumpTableNames, Assert-SqlDumpTableSet, Get-TarEntryList, Assert-PullArchiveEntries, New-RemotePullCommand, New-PullPlan, Get-PullSummaryLines, New-ApplyPullPlan, Assert-ApplyPullWorkspace, Get-ApplyPullSummaryLines, Expand-TarArchive
+Export-ModuleMember -Function Get-DeployConfigurationErrors, Assert-DeployConfiguration, Assert-DeployModeAllowed, ConvertTo-ShSingleQuotedString, New-RemoteDeployCommand, Invoke-CheckedCommand, Invoke-CommandOutput, ConvertTo-WindowsProcessArgument, Invoke-NativeProcessWithFileInput, Restore-FileSwaps, Get-DirectoryContentSizeBytes, Assert-AvailableDiskSpace, Assert-SqlDumpFile, Assert-SqlDumpTablePrefix, Normalize-SqlDumpTablePrefix, Assert-ZipArchiveFile, Get-PullModeNames, Get-PullDenyList, Test-PullPathAllowed, Assert-PullAllowed, Assert-GzipFile, Expand-GzipFile, Get-SqlDumpTableNames, Assert-SqlDumpTableSet, Get-TarEntryList, Assert-PullArchiveEntries, New-RemotePullCommand, New-PullPlan, Get-PullSummaryLines, New-ApplyPullPlan, Assert-ApplyPullWorkspace, Get-ApplyPullSummaryLines, Expand-TarArchive, Get-ProfileSiteId, Get-PullPathSelection, Get-FileSha256Hex, Get-DirectorySha256Hex, Get-LocalBackupRetentionPlan, New-PullManifest, Assert-PullManifest

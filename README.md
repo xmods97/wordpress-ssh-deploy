@@ -1,9 +1,9 @@
 # wordpress-ssh-deploy
 
-A small, auditable deployment workflow for moving a local WordPress site to a
-remote Linux host over SSH. The Windows-side PowerShell script exports and
-uploads data; the remote POSIX shell script backs up the destination and applies
-the deployment.
+A small, auditable, multi-site deployment workflow for moving a local WordPress
+site to a remote Linux host over SSH. The deploy tool is separate from each
+site's private Git repository; a profile binds one site code checkout, one
+working-artifact root, one local database, and one remote target.
 
 > [!WARNING]
 > `db` and `full` replace the remote database. `full` can also replace the
@@ -20,6 +20,9 @@ the deployment.
 - explicit path and database safety locks
 - configurable backup retention
 - local and remote preflight checks
+- profile-bound pull workspaces with manifest and SHA-256 artifact checks
+- separate site Git status/commit/push commands and a guarded PowerShell menu
+- local and remote backup retention
 
 ## Requirements
 
@@ -39,33 +42,48 @@ Remote Linux host:
 
 ## Setup
 
-1. Copy these files into the root of the WordPress code repository.
-2. Copy `deploy.config.example.ps1` to `deploy.config.ps1`.
-3. Select the target `Environment`: `development`, `staging`, or `production`.
-4. Fill every path, host, database safety lock, and `SyncPaths` entry.
-5. Set `ExpectedRemoteDomain`, `ExpectedRemoteWpPath`,
+1. Keep this tool in its own repository; do not copy it into a site's code repository.
+2. Copy `deploy.config.example.ps1` to a private site profile such as
+   `deploy.config.ps1` or `deploy.config.portfolio.ps1`.
+3. Set a unique lowercase `SiteId`, `CodeRepositoryPath`, and `WorkRoot`.
+   `CodeRepositoryPath` is the private Git repository for this site; `WorkRoot`
+   stores pull workspaces, logs, and local deployment artifacts outside both repos.
+   When migrating an older private profile, remove `LocalDatabaseTarget`: it is
+   intentionally unsupported. `apply-pull` backs up and replaces the one local
+   WordPress database, `LocalDbName`, after its separate confirmation.
+4. Select the target `Environment`: `development`, `staging`, or `production`.
+5. Fill every path, host, database safety lock, and `SyncPaths` entry.
+6. Set `ExpectedRemoteDomain`, `ExpectedRemoteWpPath`,
    `ExpectedRemoteDbName`, and `ExpectedDbTablePrefix` to the exact expected
    target values.
-6. Keep `deploy.config.ps1` private. It is excluded by `.gitignore`.
-7. Clone the same repository on the remote host.
-8. Create a protected runner directory outside the Git checkout, for example
+7. Keep all private `deploy.config*.ps1` profiles private. They are excluded by
+   `.gitignore`. Select a profile with `-ConfigPath`; without it the script uses
+   `deploy.config.ps1`.
+8. Clone the site's private code repository on the remote host.
+9. Create a protected runner directory outside the Git checkout, for example
    `/usr/local/libexec/wordpress-ssh-deploy/example-site/`.
-9. Install `server-deploy.sh` and a filled `server.config.sh` in that directory.
+10. Install `server-deploy.sh` and a filled `server.config.sh` in that directory.
    Set `RemoteRunnerPath` to the installed `server-deploy.sh`.
-10. Keep the directory and both files administrator-owned. A typical setup is
+11. Keep the directory and both files administrator-owned. A typical setup is
     mode `0755` for the directory and runner, and `0640` for
     `server.config.sh` with read access for the deploy user's group.
-11. Set `WP_ENVIRONMENT_TYPE` in the target WordPress configuration to the same
+12. Set `WP_ENVIRONMENT_TYPE` in the target WordPress configuration to the same
     environment value.
-12. Run a preflight before the first deployment.
+13. Run a preflight before the first deployment.
 
 ```powershell
 .\deploy.ps1 -PreflightOnly
 ```
 
+For a different site profile:
+
+```powershell
+.\deploy.ps1 -ConfigPath .\deploy.config.portfolio.ps1 -Mode pull-full -Confirm
+```
+
 ### Configuration validation
 
-`deploy.ps1` validates the complete configuration before creating temporary
+`deploy.ps1` validates the complete profile before creating temporary
 files or connecting over SSH. Unknown keys, missing values, unsupported
 environment names, mismatched target locks, unsafe `SyncPaths`, invalid ports,
 and malformed URLs stop the operation.
@@ -118,12 +136,11 @@ so the remote runner takes a backup first and can roll the database back.
 
 **Pull (`pull-db`, `pull-files`, `pull-full`) brings staging → local.** The
 download phase never replaces anything locally: it stores verified artifacts
-side-by-side under `.pull/<timestamp>/` and stops:
+side-by-side under `WorkRoot\.pull\<SiteId>\<timestamp>\` and stops:
 
-- the database arrives as a verified `database.sql`, which you import into
-  `LocalDatabaseTarget` yourself when you decide to. `LocalDatabaseTarget` must
-  be a different database from `LocalDbName`; the working local database is
-  never written by a pull;
+- the database arrives as a verified `database.sql`. Download does not touch the
+  local site; a separate `apply-pull -Confirm` first backs up and then replaces
+  the one working local database (`LocalDbName`) used by `LocalWpPath`;
 - files arrive extracted under `files/`, additively. No working file is
   replaced, moved, or deleted during download;
 - `apply-pull -PullWorkspace <workspace> -Confirm` is the separate activation
@@ -132,9 +149,16 @@ side-by-side under `.pull/<timestamp>/` and stops:
   database byte-for-byte through `mysql`, maps the remote URL to `LocalUrl`,
   then atomically replaces the configured files. A failed apply attempts local
   database and file restore, including when the import fails part-way through.
+  This is intentionally one local copy per site: it is both the test workspace
+  and the rollback target; there is no secondary local database to maintain.
 
 Every download run ends with `Pull artifacts prepared side-by-side; working
 local site was not replaced.` Activation is explicit and separate.
+
+Every download run also writes `manifest.json` with the selected profile, path
+classes, database expectations, and SHA-256 hashes for downloaded archives,
+extracted SQL, and the extracted files tree. Applying a workspace refuses a
+missing, foreign, or hash-mismatched manifest.
 
 Pull is off unless `PullEnabled = $true`, and it is **never** allowed when
 `Environment` is `production` — refused by configuration validation, by the
@@ -148,17 +172,21 @@ additive and does not. `-Mirror` — a files pull that would delete local files
 the remote no longer has — is part of the contract but **is not implemented**
 and refuses to run even with `AllowDestructiveLocalReplace = $true`.
 
-On the way in, a pulled database must match `ExpectedDbTableCount` and
+On the way in, a pulled database must match `ExpectedPullDbTableCount` (or
+`ExpectedDbTableCount`) and
 `ExpectedDbTablePrefix` exactly; a file archive is rejected whole if any entry
 escapes the allowed paths, is a symlink, or matches the permanent deny list
 (`wp-config*`, `.git`, `.ssh`, `.env`, key material, caches, backups).
-`ExcludedPullPaths` extends that deny list and can never shorten it. Remote
-backups are created but never rotated or deleted by a pull.
+`ExcludedPullPaths` extends that deny list and can never shorten it. Pull and
+push backups are retained according to `KeepBackups`; local apply backups use
+`KeepLocalBackups`, `KeepBackupDays`, and `MaxBackupSizeMB`.
 
-Status of this direction: the client, the module, and the runner code are
-implemented and covered by local mock tests. **The runner installed on staging
-has not been updated yet, and no real pull has ever been run.** See
-`docs/RISKS-RU.md` for the residual risks.
+The core/content/media contract is explicit: `CorePolicy = 'preserve-local-core'`
+means pull never downloads or replaces WordPress core; `PullContentPaths`
+controls code content, and `PullMediaPaths` controls uploads. The local
+installation must already be a working WordPress copy with a configured
+database before apply. The permanent deny list always wins. See
+`docs/RISKS-RU.md` for residual risks and the required live rollout gate.
 
 ### Internal structure
 
@@ -167,6 +195,11 @@ has not been updated yet, and no real pull has ever been run.** See
   shell quoting, remote-command construction, and checked process execution.
 - `deploy.config.ps1` contains private, site-specific values and is never
   committed.
+- `site-git.ps1` operates only on `CodeRepositoryPath`; it never commits the
+  deploy-tool repository.
+- `menu.ps1` provides guarded status, verify, Git, pull, apply, and preflight
+  actions. It intentionally does not expose `db` or `full` as one-click menu
+  actions.
 
 ## Usage
 
@@ -193,8 +226,15 @@ has not been updated yet, and no real pull has ever been run.** See
 .\deploy.ps1 -Mode pull-full -Confirm
 
 # Activate a verified pull workspace locally after reviewing its contents.
-.\deploy.ps1 -Mode apply-pull -PullWorkspace .\.pull\<timestamp> -DryRun
-.\deploy.ps1 -Mode apply-pull -PullWorkspace .\.pull\<timestamp> -Confirm
+.\deploy.ps1 -Mode apply-pull -PullWorkspace <WorkRoot>\.pull\<SiteId>\<timestamp> -DryRun
+.\deploy.ps1 -Mode apply-pull -PullWorkspace <WorkRoot>\.pull\<SiteId>\<timestamp> -Confirm
+
+# Use the site repository, not the deploy-tool repository, for Git operations.
+.\site-git.ps1 -Action status -ConfigPath .\deploy.config.portfolio.ps1
+.\site-git.ps1 -Action commit -ConfigPath .\deploy.config.portfolio.ps1 -Message 'Homepage update' -ConfirmCommit
+.\site-git.ps1 -Action push -ConfigPath .\deploy.config.portfolio.ps1 -ConfirmPush
+.\backup-cleanup.ps1 -ConfigPath .\deploy.config.portfolio.ps1
+.\menu.ps1
 ```
 
 Pull switches (`-DryRun`, `-Confirm`, `-Mirror`) are rejected for push modes,

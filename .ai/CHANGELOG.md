@@ -41,7 +41,7 @@ Approvals:
 2026-08-10 | LOCAL-WORDPRESS-FIXTURE-DB | CODEX | CHECKPOINT_COMPLETE
 
 Result:
-- Created only the new Laragon database `wordpress_staging_fixture` and WordPress fixture at `D:\laragon\www\wordpress-staging-fixture.local`; updated the ignored fixture client config to actual local paths.
+- Created only a new local fixture database and WordPress fixture at private local paths; updated the ignored fixture client configuration.
 
 Files:
 - Private fixture `deploy.config.ps1` and local fixture WordPress files outside the tracked repository.
@@ -256,7 +256,7 @@ Correction:
 
 Result:
 - Added the pull direction (staging -> local) as `pull-db`, `pull-files`, and `pull-full` with `-DryRun`, `-Confirm`, and `-Mirror`, alongside the unchanged `code`, `db`, and `full` push modes.
-- Pull is side-by-side by construction: it imports nothing, replaces no working file, and requires `LocalDatabaseTarget` to differ from `LocalDbName`, so a failed pull leaves the working local site untouched and needs no rollback.
+- Superseded by MULTISITE-FOUNDATION-REVIEW-FIXES: download remains side-by-side, while a separate confirmed apply backs up and replaces the one working local WordPress copy with rollback on failure.
 - Downloaded artifacts are verified before use: gzip integrity via the recorded ISIZE, SQL structure, exact table count, table prefix, and an archive listing checked for traversal, symlinks, and denied paths before a single byte is extracted.
 - `server-deploy.sh` gained `pull-db` and `pull-files` export modes that never import, never rotate backups, and never rewrite WordPress; production pull is refused there as well.
 - `-Mirror` is defined by the contract but fail-closed: it refuses both without and with `AllowDestructiveLocalReplace`.
@@ -309,6 +309,47 @@ Risk:
 Next:
 - Stop for independent read-only Claude review.
 
+2026-08-13 | MULTISITE-FOUNDATION-REVIEW-FIXES | CODEX | READY_FOR_REVIEW
+
+Result:
+- Reconciled `apply-pull` with one working local WordPress copy: `LocalDbName`, WP-CLI URL mapping, backup and rollback now target the same database.
+- Added manifest verification for extracted SQL and files, a shared backup-retention planner that retains the newest group, preserved-local-core checks, and guarded profile/menu/site-Git behavior.
+- Replaced tracked real infrastructure values in AI metadata with non-sensitive descriptions.
+
+Files:
+- `deploy.ps1`, `src/WordPressSshDeploy.psm1`, `backup-cleanup.ps1`, `site-git.ps1`, `menu.ps1`, `deploy.config.example.ps1`, `README.md`, `docs/RISKS-RU.md`, `tests/pull.Tests.ps1`, `.ai/STATE.md`, `.ai/CHANGELOG.md`.
+
+Checks:
+- Full Pester: 138 passed, 0 failed; PowerShell parser and `git diff --check` passed.
+
+Risks:
+- No live SSH, pull/apply, server change, database import/rollback, commit, push or merge was performed. Manual restoration after a later local change remains a follow-up command.
+
+Approvals:
+- PLAN_APPROVED (2026-08-13)
+- EXECUTION_APPROVED (2026-08-13, local implementation and tests only)
+
+2026-08-13 | MULTISITE-FOUNDATION-REVIEW-FIXES | CODEX | REVIEW_FOLLOWUP_COMPLETE
+
+Result:
+- Closed reviewer P2 sanitation and private-profile migration findings: public metadata was further redacted, and legacy `LocalDatabaseTarget` was removed from ignored private profiles.
+- Existing profiles now fail closed until their operator explicitly supplies `SiteId`, `CodeRepositoryPath` and `WorkRoot`; no paths or repositories were guessed.
+
+Checks:
+- Full Pester: 139 passed, 0 failed; PowerShell parser and `git diff --check` passed.
+
+Risk:
+- The removed historical values exist in the parent commit and are not rewritten without a separate history-rewrite decision. No new sensitive values are added by the current public diff.
+
+2026-08-13 | MULTISITE-FOUNDATION-COMMIT-PUSH | CODEX | APPROVED_FOR_EXECUTION
+
+Approvals:
+- PLAN_APPROVED (2026-08-13)
+- EXECUTION_APPROVED (2026-08-13)
+
+Scope:
+- Commit and push the reviewed multisite foundation and review-follow-up diff to `main`; no server, database or deploy action.
+
 2026-08-13 | DEPLOY-BIDIRECTIONAL-SYNC-COMMIT-PUSH | CODEX | COMMITTED_PUSHED
 
 Result:
@@ -352,6 +393,71 @@ Checks:
 
 Risk:
 - Commit, push, runner rollout, staging pull, and real local apply remain intentionally unexecuted.
+
+Next:
+- Stop for independent read-only Claude review.
+
+2026-08-13 | STAGING-PULL-LOCAL-APPLY-VISIBLE | CODEX | READY_FOR_REVIEW
+
+Result:
+- Fixed pull DB export to select only active prefix tables and added GNU tar long-name metadata handling.
+- Completed verified staging pull and local apply with local DB/files backup.
+- Local homepage marker `STAGING-PULL-FULL-VERIFY-20260813-01` is visible over HTTP 200; screenshot saved outside the repository.
+
+Checks:
+- Full Pester suite reached 127/127 before the final backup-path fix; pull suite passed 70/70 after the final fix.
+- SQL artifact: 14 active tables, no inactive `wp_*` tables; local prefix and URL verified.
+
+Risk:
+- Changes are uncommitted; independent Claude review is the next gate. No commit, push, merge, rollback, or production action was performed.
+
+Next:
+- Stop for independent read-only Claude review.
+
+2026-08-13 | PORTFOLIO-PRODUCTION-READONLY-PULL | CODEX | READY_FOR_REVIEW
+
+Result:
+- Added explicit two-factor production read-only pull gating and a separate portfolio production runner policy.
+- Pulled portfolio DB/files into `.pull\20260813-194801` without changing production or the working local site.
+- Fixed UTF-8 tar header decoding for Cyrillic media filenames.
+
+Checks:
+- The expected SQL table set and selected-file count matched between remote export and local workspace.
+- Full Pester: 133/133; shell syntax and `git diff --check` passed.
+- Remote runner/config backup retained in the private server runtime.
+
+Risk:
+- Artifacts are verified but not applied locally; no commit, push, merge, production deploy, rollback, or Claude review performed.
+
+Next:
+- Stop for independent read-only Claude review; local apply needs a separate approved task.
+
+2026-08-13 | PORTFOLIO-LOCAL-FULL-APPLY | CODEX | READY_FOR_REVIEW
+
+Result:
+- Applied the verified production pull to a private side-by-side local target with a separate local database and pre-apply database/files backups.
+- Local URL mapping completed; all 9,151 pulled files and uploads are present, with the required 16 standard WordPress root/core files restored from the local bootstrap template because the production sync paths omit them.
+
+Checks:
+- Local HTTP 200 and visible portfolio homepage; screenshot saved outside the repository.
+- Local `home/siteurl` pointed to the private local URL; active configured-prefix table count matched; this historical run used the superseded separate-target design.
+- Full Pester: 133/133; shell syntax and `git diff --check` passed.
+
+Risk:
+- Production was not modified. Repository changes remain uncommitted; no push, merge, or Claude review performed.
+
+Next:
+- Stop for independent read-only Claude review.
+2026-08-13 | MULTISITE-FOUNDATION-MVP | CODEX | READY_FOR_REVIEW
+
+Result:
+- Added multi-site profile isolation (`SiteId`, `CodeRepositoryPath`, `WorkRoot`), pull path classes, profile-bound manifests with SHA-256 verification, JSONL logs, and backup retention.
+- Added guarded site Git commands, read-only verify, backup cleanup preview, and a PowerShell management menu; deploy-tool Git is no longer the site code repository.
+- Updated example config, README, and pull regression tests.
+
+Checks:
+- Full Pester: 135/135; PowerShell parser/import passed; Git Bash `sh -n` passed; `git diff --check` passed.
+- No live pull/deploy, SSH, database import, commit, push, merge, or independent review performed.
 
 Next:
 - Stop for independent read-only Claude review.

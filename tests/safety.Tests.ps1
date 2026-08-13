@@ -58,7 +58,9 @@ Describe 'Secrets and cleanup guards' {
 	}
 
 	It 'does not contain private key material' {
-		$allSource = Get-ChildItem -LiteralPath $repoRoot -Recurse -File | Where-Object { $_.FullName -notmatch '[\\/]\.git[\\/]' } | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }
+		$allSource = Get-ChildItem -LiteralPath $repoRoot -Recurse -File |
+			Where-Object { $_.FullName -notmatch '[\\/]\.git[\\/]' -and $_.FullName -notmatch '[\\/](\.pull|\.deploy|\.codex-remote-attachments)[\\/]' } |
+			ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw }
 		($allSource -join "`n") | Should Not Match 'BEGIN [A-Z ]*PRIVATE KEY'
 	}
 }
