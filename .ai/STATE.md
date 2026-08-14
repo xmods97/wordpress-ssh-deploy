@@ -27,11 +27,164 @@ DEPLOYMENT_LEAD: INHERIT
 
 ## ACTIVE TASK INDEX
 
-ACTIVE_TASK_IDS: MULTISITE-FOUNDATION-REVIEW-FIXES
+ACTIVE_TASK_IDS: SDOUTDOORLIVING-ROOT-WRAPPER-LOCK-ORDER
 
 
 
 Перед работой агент обязан выбрать ровно один `TASK_ID` из списка и работать только в его блоке.
+
+## TASK: SDOUTDOORLIVING-ROOT-WRAPPER-LOCK-ORDER
+
+TASK_ID: SDOUTDOORLIVING-ROOT-WRAPPER-LOCK-ORDER
+TASK_NAME: Keep the deploy lock through root ownership restoration and release it reliably after failure
+DOMAIN: DEPLOYMENT
+TASK_LEAD: CODEX
+REVIEWER: CLAUDE
+STATUS: READY_FOR_REVIEW
+
+BRANCH: main
+WORKTREE: dedicated Codex worktree (local path intentionally omitted)
+BASE_COMMIT: 2a338f6
+WORK_LOCK: CODEX
+
+CRITICAL: YES
+PLAN_APPROVED: YES (2026-08-14)
+EXECUTION_APPROVED: YES (2026-08-14, local implementation and tests only)
+LIVE_ACTIONS: NOT_EXECUTED
+
+IN_SCOPE:
+- preserve the deploy lock through root ownership restoration
+- release the lock after both successful and failed ownership restoration
+- behaviorally verify lock ordering with the fake-root smoke
+
+OUT_OF_SCOPE:
+- VPS installation, SSH onboarding, deploy, pull, rollback, database mutation, commit, push, merge, or cleanup of remote backups
+
+RESULT:
+- Ownership restoration now runs while the deploy lock is still held.
+- Lock release runs after both successful and failed ownership restoration, before returning the final operation status.
+- The fake-root smoke rejects any ownership restore that begins after lock release and still verifies lock removal after a failed chown.
+
+CHECKS:
+- Full Pester: 145 passed, 0 failed.
+- Root ownership smoke and `git diff --check` passed.
+
+RISKS:
+- No VPS installation, SSH onboarding, deploy, pull, rollback, database mutation, commit, push, or merge was performed.
+
+NEXT_ACTION:
+- stop for independent read-only Claude review before commit/push or VPS rollout
+
+CONTEXT_STATUS: NORMAL
+LIMIT_STATUS: STOP_AFTER_CHECKPOINT
+STOP_AFTER_CHECKPOINT: YES
+
+## TASK: SDOUTDOORLIVING-ROOT-WRAPPER-REVIEW-ROUND2
+
+TASK_ID: SDOUTDOORLIVING-ROOT-WRAPPER-REVIEW-ROUND2
+TASK_NAME: Close round-two independent review findings for root UID detection, ownership cleanup, and behavioral tests
+DOMAIN: DEPLOYMENT
+TASK_LEAD: CODEX
+REVIEWER: CLAUDE
+STATUS: READY_FOR_REVIEW
+
+BRANCH: main
+WORKTREE: dedicated Codex worktree (local path intentionally omitted)
+BASE_COMMIT: 2a338f6
+WORK_LOCK: CODEX
+
+CRITICAL: YES
+PLAN_APPROVED: YES (2026-08-14)
+EXECUTION_APPROVED: YES (2026-08-14, local implementation and tests only)
+LIVE_ACTIONS: NOT_EXECUTED
+
+IN_SCOPE:
+- fail-closed root UID detection in wrapper and server runner
+- lock-safe ownership restoration including WordPress runtime files
+- behavioral fake-root tests for ownership and failed chown cleanup
+- directly related wrapper hardening and regression checks
+
+OUT_OF_SCOPE:
+- VPS installation, SSH onboarding, deploy, pull, rollback, database mutation, commit, push, merge, or cleanup of remote backups
+
+RESULT:
+- Root wrapper now sets a fixed system PATH before UID detection and rejects an unavailable or malformed UID.
+- Server runner validates its effective UID fail-closed, requires `getent` for root policy validation, and no longer inherits `SCP_BIN` from the SSH environment.
+- Lock cleanup runs before ownership restoration; completion output is emitted only after successful cleanup.
+- Ownership restoration now covers `.htaccess`, `wp-content/cache`, and `wp-content/upgrade` after WP-CLI cleanup.
+- Added behavioral fake-root smoke coverage for invalid UID, missing owner policy, runtime ownership restoration, failed `chown`, suppressed success output, and lock removal.
+
+CHECKS:
+- Full Pester: 145 passed, 0 failed.
+- Shell syntax checks passed for runner, wrapper, and root ownership smoke.
+- Server safety smoke, database rollback smoke, root wrapper smoke, root ownership smoke, and `git diff --check` passed.
+
+RISKS:
+- No VPS installation, SSH onboarding, deploy, pull, rollback, database mutation, commit, push, or merge was performed.
+- The generic root wrapper has not yet been installed or exercised against a real server.
+
+NEXT_ACTION:
+- stop for a new independent read-only Claude review before commit/push or VPS rollout
+
+CONTEXT_STATUS: NORMAL
+LIMIT_STATUS: STOP_AFTER_CHECKPOINT
+STOP_AFTER_CHECKPOINT: YES
+
+## TASK: SDOUTDOORLIVING-ROOT-WRAPPER-REVIEW-FIXES
+
+TASK_ID: SDOUTDOORLIVING-ROOT-WRAPPER-REVIEW-FIXES
+TASK_NAME: Close independent-review findings for the generic root SSH wrapper and server ownership restoration
+DOMAIN: DEPLOYMENT
+TASK_LEAD: CODEX
+REVIEWER: CLAUDE
+STATUS: READY_FOR_REVIEW
+
+BRANCH: main
+WORKTREE: dedicated Codex worktree (local path intentionally omitted)
+BASE_COMMIT: 2a338f6
+WORK_LOCK: CODEX
+
+CRITICAL: YES
+PLAN_APPROVED: YES (2026-08-14)
+EXECUTION_APPROVED: YES (2026-08-14, local implementation and tests only)
+LIVE_ACTIONS: NOT_EXECUTED
+
+RESULT:
+- Added the generic `root-ssh-wrapper.sh` with fixed runner/tmp protocol, strict command parsing, path containment, and no interactive shell.
+- Added profile-scoped `UseLegacyScp`; legacy `scp -O` is no longer global.
+- Added wrapper-safe configuration/path validation and root-runner owner/group policy with cleanup-time ownership restoration.
+- Added wrapper adversarial smoke coverage and updated generic documentation/examples.
+
+FILES_CHANGED:
+- README.md
+- deploy.config.example.ps1
+- deploy.ps1
+- root-ssh-wrapper.sh
+- server-deploy.sh
+- server.config.example.sh
+- src/WordPressSshDeploy.psm1
+- tests/configuration.Tests.ps1
+- tests/quoting.Tests.ps1
+- tests/root-ssh-wrapper.smoke.sh
+- tests/safety.Tests.ps1
+- tests/server.Tests.ps1
+
+CHECKS:
+- Full Pester: 144 passed, 0 failed.
+- Shell syntax checks passed for `server-deploy.sh`, `root-ssh-wrapper.sh`, and wrapper smoke.
+- Server safety smoke and root wrapper smoke passed.
+- `git diff --check` passed.
+
+RISKS:
+- No live VPS installation, SSH onboarding, deploy, pull, rollback, commit, push, or merge was performed.
+- Independent Claude review is required before any commit/push or live rollout.
+
+NEXT_ACTION:
+- Stop for independent read-only Claude review.
+
+CONTEXT_STATUS: NORMAL
+LIMIT_STATUS: STOP_AFTER_CHECKPOINT
+STOP_AFTER_CHECKPOINT: YES
 
 ## TASK: MULTISITE-FOUNDATION-REVIEW-FIXES
 

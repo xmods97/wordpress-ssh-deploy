@@ -3,10 +3,11 @@ Import-Module (Join-Path $repoRoot 'src\WordPressSshDeploy.psm1') -Force
 $gitPath = (Get-Command git -ErrorAction Stop).Source
 $gitRoot = Split-Path -Parent (Split-Path -Parent $gitPath)
 $shCandidates = @(
+	'D:\laragon\bin\git\bin\sh.exe',
 	(Join-Path $gitRoot 'usr\bin\sh.exe'),
 	(Join-Path $gitRoot 'bin\sh.exe'),
 	'C:\Users\xmods\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\git\usr\bin\sh.exe',
-	'D:\laragon\bin\git\bin\sh.exe'
+	'D:\laragon\bin\git\usr\bin\sh.exe'
 )
 $shPath = $shCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 
@@ -16,7 +17,7 @@ Describe 'Remote POSIX safety' {
 	}
 
 	It 'passes shell syntax checks' {
-		foreach ($file in @('server-deploy.sh', 'server.config.example.sh', 'tests/server-safety.smoke.sh', 'tests/database-rollback.smoke.sh', 'tests/fixtures/server.config.production.sh', 'tests/fixtures/server.config.staging.sh', 'tests/fixtures/fake-php.sh', 'tests/fixtures/fake-mysqldump.sh', 'tests/fixtures/fake-mysql.sh', 'tests/fixtures/fake-df.sh')) {
+		foreach ($file in @('server-deploy.sh', 'server.config.example.sh', 'root-ssh-wrapper.sh', 'tests/server-safety.smoke.sh', 'tests/database-rollback.smoke.sh', 'tests/root-ssh-wrapper.smoke.sh', 'tests/root-ownership.smoke.sh', 'tests/fixtures/server.config.production.sh', 'tests/fixtures/server.config.staging.sh', 'tests/fixtures/fake-php.sh', 'tests/fixtures/fake-mysqldump.sh', 'tests/fixtures/fake-mysql.sh', 'tests/fixtures/fake-df.sh')) {
 			& $shPath -n (Join-Path $repoRoot $file)
 			$LASTEXITCODE | Should Be 0
 		}
@@ -54,6 +55,28 @@ Describe 'Remote POSIX safety' {
 			$output = & $shPath -c 'PATH=/usr/bin:/bin; export PATH; sh ./tests/database-rollback.smoke.sh' 2>&1
 			$LASTEXITCODE | Should Be 0
 			$output -join "`n" | Should Match 'Database rollback after failed import: OK'
+		} finally {
+			Pop-Location
+		}
+	}
+
+	It 'restricts the root forced-command wrapper to the deploy protocol' {
+		Push-Location $repoRoot
+		try {
+			$output = & $shPath -c 'PATH=/usr/bin:/bin; export PATH; sh ./tests/root-ssh-wrapper.smoke.sh' 2>&1
+			$LASTEXITCODE | Should Be 0
+			$output -join "`n" | Should Match 'Root SSH wrapper smoke: OK'
+		} finally {
+			Pop-Location
+		}
+	}
+
+	It 'enforces root ownership policy and cleans its lock on restore failure' {
+		Push-Location $repoRoot
+		try {
+			$output = & $shPath -c 'PATH=/usr/bin:/bin; export PATH; sh ./tests/root-ownership.smoke.sh' 2>&1
+			$LASTEXITCODE | Should Be 0
+			$output -join "`n" | Should Match 'Root ownership policy and cleanup: OK'
 		} finally {
 			Pop-Location
 		}

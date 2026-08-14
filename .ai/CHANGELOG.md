@@ -309,6 +309,56 @@ Risk:
 Next:
 - Stop for independent read-only Claude review.
 
+2026-08-14 | SDOUTDOORLIVING-ROOT-WRAPPER-REVIEW-ROUND2 | CODEX | READY_FOR_REVIEW
+
+Result:
+- Made root UID detection fail closed in the wrapper and server runner; wrapper no longer inherits `SCP_BIN` from the SSH environment.
+- Released the deploy lock before ownership restoration, delayed successful completion output until cleanup succeeds, and restored ownership for WP-CLI runtime files.
+- Added a behavioral fake-root smoke test for root policy, runtime ownership, failed chown, and lock cleanup.
+
+Checks:
+- Full Pester: 145/145.
+- Shell syntax, server safety, database rollback, root wrapper, root ownership smoke, and `git diff --check` passed.
+
+Risk:
+- No live VPS action, commit, push, merge, deploy, pull, rollback, or cleanup was performed.
+
+Next:
+- Stop for independent read-only Claude review before commit/push or VPS rollout.
+
+2026-08-14 | SDOUTDOORLIVING-ROOT-WRAPPER-LOCK-ORDER | CODEX | READY_FOR_REVIEW
+
+Result:
+- Kept the deploy lock through root ownership restoration and released it after the restore attempt regardless of success.
+- Extended the fake-root smoke to fail if chown starts after lock release, while preserving failed-chown lock cleanup coverage.
+
+Checks:
+- Full Pester: 145/145.
+- Root ownership smoke and `git diff --check` passed.
+
+Risk:
+- No live VPS action, commit, push, merge, deploy, pull, rollback, or cleanup was performed.
+
+Next:
+- Stop for independent read-only Claude review before commit/push or VPS rollout.
+
+2026-08-14 | SDOUTDOORLIVING-ROOT-WRAPPER-REVIEW-FIXES | CODEX | READY_FOR_REVIEW
+
+Result:
+- Implemented the generic root SSH forced-command wrapper with fixed runner/tmp protocol, strict command parsing, scp containment, and no interactive shell.
+- Added profile-scoped legacy scp selection, wrapper-safe configuration validation, and root-runner owner/group restoration after replacement.
+- Added adversarial wrapper smoke coverage and generic documentation/examples.
+
+Checks:
+- Full Pester: 144/144.
+- Shell syntax, server safety smoke, root wrapper smoke, and `git diff --check` passed.
+
+Risk:
+- No live VPS action, commit, push, merge, deploy, pull, rollback, or cleanup was performed.
+
+Next:
+- Stop for independent read-only Claude review.
+
 2026-08-13 | MULTISITE-FOUNDATION-REVIEW-FIXES | CODEX | READY_FOR_REVIEW
 
 Result:

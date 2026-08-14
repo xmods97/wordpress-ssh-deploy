@@ -183,7 +183,13 @@ $remoteProtected = "$($DeployConfig.RemoteTmpPath)/protected-$stamp.zip"
 $target = "$($DeployConfig.SshUser)@$($DeployConfig.SshHost)"
 $remoteCleanupNeeded = $false
 $sshArgs = @('-p', [string]$DeployConfig.SshPort)
-$scpArgs = @('-P', [string]$DeployConfig.SshPort)
+# Forced-command wrappers need legacy SCP mode; OpenSSH 9 otherwise prefers
+# the SFTP subsystem, which cannot be constrained by the wrapper protocol.
+$scpArgs = if ($DeployConfig.Contains('UseLegacyScp') -and $DeployConfig.UseLegacyScp) {
+	@('-O', '-P', [string]$DeployConfig.SshPort)
+} else {
+	@('-P', [string]$DeployConfig.SshPort)
+}
 if ($DeployConfig.SshKeyPath) {
 	$sshArgs += @('-i', $DeployConfig.SshKeyPath, '-o', 'IdentitiesOnly=yes')
 	$scpArgs += @('-i', $DeployConfig.SshKeyPath, '-o', 'IdentitiesOnly=yes')

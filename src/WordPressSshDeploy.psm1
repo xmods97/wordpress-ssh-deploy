@@ -881,6 +881,13 @@ function Test-RemotePath {
 	return $true
 }
 
+function Test-WrapperSafeValue {
+	param([string] $Value)
+
+	if ([string]::IsNullOrEmpty($Value)) { return $true }
+	return $Value -match '^[A-Za-z0-9_.,:/@%+=?&#~-]+$'
+}
+
 function Test-SyncPath {
 	[CmdletBinding()]
 	param([string] $Value, [switch] $AllowProtected)
@@ -1211,7 +1218,7 @@ function Add-PullConfigurationErrors {
 		}
 		$seen = @{}
 		foreach ($value in $values) {
-			if ($value -isnot [string] -or -not (Test-SyncPath $value)) {
+			if ($value -isnot [string] -or -not (Test-SyncPath $value) -or -not (Test-WrapperSafeValue ([string] $value))) {
 				Add-ValidationError $Errors "Unsafe $key value: $value"
 				continue
 			}
@@ -1526,6 +1533,7 @@ function Get-DeployConfigurationErrors {
 		'ExpectedDbTablePrefix'
 	)
 	$optionalKeys = @('LocalDbPassword', 'SshKeyPath', 'DisplayName', 'GitRemoteName', 'GitBranch', 'ExpectedWordPressCoreVersion', 'CorePolicy')
+	$optionalBooleanKeys = @('UseLegacyScp')
 	$otherRequiredKeys = @('SshPort', 'KeepBackups', 'ExpectedDbTableCount', 'MinimumLocalFreeSpaceMB', 'MinimumRemoteFreeSpaceMB', 'SyncPaths')
 	$optionalPathKeys = @('FullSyncPaths', 'ProtectedSyncPaths')
 	# Pull keys are optional so that a push-only configuration stays valid unchanged.
@@ -1549,7 +1557,7 @@ function Get-DeployConfigurationErrors {
 		'LocalWpCliPath',
 		'MysqlPath'
 	)
-	$allowedKeys = $requiredStringKeys + $optionalKeys + $otherRequiredKeys + $optionalPathKeys + $pullKeys
+	$allowedKeys = $requiredStringKeys + $optionalKeys + $optionalBooleanKeys + $otherRequiredKeys + $optionalPathKeys + $pullKeys
 
 	foreach ($key in $Configuration.Keys) {
 		if ([string] $key -notin $allowedKeys) {
@@ -1580,6 +1588,11 @@ function Get-DeployConfigurationErrors {
 	foreach ($key in $optionalKeys) {
 		if ($Configuration.Contains($key) -and $null -ne $Configuration[$key] -and $Configuration[$key] -isnot [string]) {
 			Add-ValidationError $errors "Optional configuration value must be a string: $key"
+		}
+	}
+	foreach ($key in $optionalBooleanKeys) {
+		if ($Configuration.Contains($key) -and $Configuration[$key] -isnot [bool]) {
+			Add-ValidationError $errors "$key must be a boolean."
 		}
 	}
 
@@ -1641,6 +1654,17 @@ function Get-DeployConfigurationErrors {
 	foreach ($key in @('RemoteWpPath', 'RemoteRepoPath', 'RemoteRunnerPath', 'RemoteTmpPath', 'RemoteBackups', 'RemoteGitSshKey', 'RemotePhpPath', 'RemoteWpCliPath', 'ExpectedRemoteWpPath')) {
 		if (-not (Test-RemotePath $Configuration[$key])) {
 			Add-ValidationError $errors "$key must be a non-root absolute POSIX path without dot segments."
+		}
+		if ([string] $Configuration[$key] -match '/$') {
+			Add-ValidationError $errors "$key must not end with '/'."
+		}
+		if (-not (Test-WrapperSafeValue ([string] $Configuration[$key]))) {
+			Add-ValidationError $errors "$key contains characters unsupported by the forced-command wrapper."
+		}
+	}
+	foreach ($key in @('LocalUrl', 'RemoteUrl', 'ExpectedRemoteDomain', 'ExpectedRemoteDbName', 'ExpectedDbTablePrefix')) {
+		if (-not (Test-WrapperSafeValue ([string] $Configuration[$key]))) {
+			Add-ValidationError $errors "$key contains characters unsupported by the forced-command wrapper."
 		}
 	}
 	foreach ($key in @('RemoteRunnerPath', 'RemoteGitSshKey', 'RemotePhpPath', 'RemoteWpCliPath')) {
@@ -1711,7 +1735,7 @@ function Get-DeployConfigurationErrors {
 		}
 		$seen = @{}
 		foreach ($path in $syncPaths) {
-			if ($path -isnot [string] -or -not (Test-SyncPath $path)) {
+			if ($path -isnot [string] -or -not (Test-SyncPath $path) -or -not (Test-WrapperSafeValue ([string] $path))) {
 				Add-ValidationError $errors "Unsafe SyncPaths value: $path"
 				continue
 			}
@@ -1727,7 +1751,7 @@ function Get-DeployConfigurationErrors {
 		$seen = @{}
 		foreach ($path in @($Configuration[$key])) {
 			$allowProtected = $key -eq 'ProtectedSyncPaths'
-			if ($path -isnot [string] -or ($allowProtected -and $path.EndsWith('/')) -or ($allowProtected -and $path.EndsWith('\')) -or -not (Test-SyncPath $path -AllowProtected:$allowProtected)) {
+			if ($path -isnot [string] -or ($allowProtected -and $path.EndsWith('/')) -or ($allowProtected -and $path.EndsWith('\')) -or -not (Test-SyncPath $path -AllowProtected:$allowProtected) -or -not (Test-WrapperSafeValue ([string] $path))) {
 				Add-ValidationError $errors "Unsafe $key value: $path"
 				continue
 			}

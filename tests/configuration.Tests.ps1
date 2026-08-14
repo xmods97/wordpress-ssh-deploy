@@ -92,6 +92,23 @@ Describe 'Deploy configuration validation' {
 		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'RemoteRunnerPath must be outside'
 	}
 
+	It 'rejects wrapper-incompatible remote values and accepts the legacy scp switch' {
+		$config = $validConfiguration.Clone()
+		$config.RemoteWpPath = '/srv/www/my site'
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'RemoteWpPath contains characters unsupported'
+		$config = $validConfiguration.Clone()
+		$config.RemoteTmpPath = '/srv/tmp/example-deploy/'
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match "RemoteTmpPath must not end"
+		$config = $validConfiguration.Clone()
+		$config.SyncPaths = @('wp-content/themes/my theme')
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'Unsafe SyncPaths value'
+		$config = $validConfiguration.Clone()
+		$config.UseLegacyScp = 'true'
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'UseLegacyScp must be a boolean'
+		$config.UseLegacyScp = $true
+		@(Get-DeployConfigurationErrors $config).Count | Should Be 0
+	}
+
 	It 'rejects string values for integer fields' {
 		$config = $validConfiguration.Clone()
 		$config.SshPort = '22'

@@ -16,3 +16,7 @@ SERVER_SYNC_PATHS='wp-content/themes/example-theme,wp-content/plugins/example-pl
 SERVER_KEEP_BACKUPS='10'
 SERVER_MIN_FREE_SPACE_MB='1024'
 SERVER_LOCK_DIR='/srv/locks/example-site-deploy.lock'
+# Required when server-deploy.sh is invoked through a root forced-command key.
+# Set these to the real WordPress filesystem owner and group in the private file.
+# SERVER_FILE_OWNER='site-user'
+# SERVER_FILE_GROUP='site-group'

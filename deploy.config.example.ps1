@@ -31,6 +31,8 @@ $DeployConfig = @{
 	SshHost    = 'server.example.com'
 	SshPort    = 22
 	SshKeyPath = 'C:\Users\you\.ssh\id_ed25519'
+	# Set true only for a server-side forced-command wrapper that permits legacy SCP.
+	UseLegacyScp = $false
 
 	RemoteUrl       = 'https://staging.example.com'
 	RemoteWpPath    = '/var/www/staging.example.com'

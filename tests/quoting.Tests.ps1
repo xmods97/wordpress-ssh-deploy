@@ -53,6 +53,12 @@ Describe 'POSIX shell quoting' {
 }
 
 Describe 'External command handling' {
+	It 'uses legacy scp mode required by forced-command wrappers' {
+		$deploy = Get-Content -Raw (Join-Path $repoRoot 'deploy.ps1')
+		$deploy | Should Match "Contains\('UseLegacyScp'\)"
+		$deploy | Should Match "@\('-O', '-P'"
+	}
+
 	It 'reports a non-zero exit code without including command arguments' {
 		$message = ''
 		try {

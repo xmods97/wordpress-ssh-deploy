@@ -67,6 +67,11 @@ Remote Linux host:
 11. Keep the directory and both files administrator-owned. A typical setup is
     mode `0755` for the directory and runner, and `0640` for
     `server.config.sh` with read access for the deploy user's group.
+    If the runner is installed behind a root forced-command SSH key, set
+    `SERVER_FILE_OWNER` and `SERVER_FILE_GROUP` in the private server policy.
+    The runner then restores that owner/group on every path it replaces; the
+    root key must never be configured as an unrestricted shell. Set
+    `UseLegacyScp = $true` only for that wrapper profile.
 12. Set `WP_ENVIRONMENT_TYPE` in the target WordPress configuration to the same
     environment value.
 13. Run a preflight before the first deployment.
@@ -91,6 +96,9 @@ and malformed URLs stop the operation.
 `SyncPaths` accepts non-empty repository-relative paths written with `/`.
 Absolute paths, dot segments, `.`, `.git`, `.deploy`, `wp-config.php`, trailing
 slashes, backslashes, and duplicate entries are rejected.
+Forced-command wrapper profiles additionally reject whitespace, quotes, and
+other shell-unsafe characters in remote values and sync paths. This fail-closed
+restriction keeps the wrapper's token parser unambiguous.
 
 Existing private configurations must add:
 

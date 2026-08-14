@@ -32,6 +32,13 @@ Describe 'Production deployment policy' {
 		$moduleSource | Should Match 'RemoteRunnerPath'
 		$deploySource | Should Not Match 'RemoteRepoPath\)/server-deploy\.sh'
 	}
+
+	It 'requires private ownership policy when the runner is root' {
+		$serverSource | Should Match 'SERVER_FILE_OWNER is required for root execution'
+		$serverSource | Should Match 'SERVER_FILE_GROUP is required for root execution'
+		$serverSource | Should Match 'restore_site_ownership'
+		$serverSource | Should Match 'chown -R'
+	}
 }
 
 Describe 'Secrets and cleanup guards' {
@@ -55,6 +62,12 @@ Describe 'Secrets and cleanup guards' {
 	It 'removes the PID file before releasing the lock directory' {
 		$serverSource | Should Match 'rm -f "\$SERVER_LOCK_DIR/pid"'
 		$serverSource | Should Match 'rmdir "\$SERVER_LOCK_DIR"'
+	}
+
+	It 'keeps legacy scp opt-in per profile' {
+		$deploySource | Should Match "Contains\('UseLegacyScp'\)"
+		$deploySource | Should Match "@\('-O', '-P'"
+		$deploySource | Should Match '@\(''-P'', \[string\]\$DeployConfig\.SshPort\)'
 	}
 
 	It 'does not contain private key material' {

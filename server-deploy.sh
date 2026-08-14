@@ -3,6 +3,14 @@ set -eu
 
 fail() { echo "ERROR: $1" >&2; exit 1; }
 require_cmd() { command -v "$1" >/dev/null 2>&1 || fail "Required command is not available"; }
+require_effective_uid() {
+	if ! effective_uid="$(id -u 2>/dev/null)"; then
+		fail "Could not determine effective uid"
+	fi
+	case "$effective_uid" in
+		''|*[!0-9]*) fail "Could not determine effective uid" ;;
+	esac
+}
 
 SCRIPT_DIR="$(CDPATH= cd -P "$(dirname "$0")" && pwd)"
 SERVER_CONFIG="$SCRIPT_DIR/server.config.sh"
@@ -30,6 +38,8 @@ SERVER_CONFIG="$SCRIPT_DIR/server.config.sh"
 : "${SERVER_KEEP_BACKUPS:?SERVER_KEEP_BACKUPS is required in server.config.sh}"
 : "${SERVER_MIN_FREE_SPACE_MB:?SERVER_MIN_FREE_SPACE_MB is required in server.config.sh}"
 : "${SERVER_LOCK_DIR:?SERVER_LOCK_DIR is required in server.config.sh}"
+: "${SERVER_FILE_OWNER:=}"
+: "${SERVER_FILE_GROUP:=}"
 
 : "${ENVIRONMENT:?ENVIRONMENT is required}"
 : "${LOCAL_URL:?LOCAL_URL is required}"
@@ -67,6 +77,9 @@ TRANSIENT_OLD=''
 TRANSIENT_TARGET=''
 PROTECTED_STAGE=''
 protected_backup=''
+ownership_policy_ready=0
+ownership_dirty=0
+completion_message=''
 
 normalize_url() {
 	value="$1"
@@ -210,6 +223,19 @@ assert_server_policy() {
 	assert_temp_file "$UPLOADS_ZIP" UPLOADS_ZIP
 	assert_temp_file "$PROTECTED_ARCHIVE" PROTECTED_ARCHIVE
 	assert_temp_file "$PULL_ARTIFACT" PULL_ARTIFACT
+	require_effective_uid
+	if [ "$effective_uid" -eq 0 ]; then
+		[ -n "$SERVER_FILE_OWNER" ] || fail "SERVER_FILE_OWNER is required for root execution"
+		[ -n "$SERVER_FILE_GROUP" ] || fail "SERVER_FILE_GROUP is required for root execution"
+		case "$SERVER_FILE_OWNER:$SERVER_FILE_GROUP" in
+			-*|*[!A-Za-z0-9._:-]*) fail "Server file owner/group contains unsafe characters" ;;
+		esac
+		require_cmd chown
+		require_cmd getent
+		id -u "$SERVER_FILE_OWNER" >/dev/null 2>&1 || fail "Configured server file owner does not exist"
+		getent group "$SERVER_FILE_GROUP" >/dev/null 2>&1 || fail "Configured server file group does not exist"
+		ownership_policy_ready=1
+	fi
 }
 
 assert_wordpress_target() {
@@ -268,16 +294,26 @@ cleanup_exit() {
 	if [ -n "$PROTECTED_STAGE" ]; then
 		case "$PROTECTED_STAGE" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -rf "$PROTECTED_STAGE" ;; esac
 	fi
+	ownership_restore_failed=0
+	if ! restore_site_ownership; then
+		echo 'ERROR: Could not restore the configured WordPress file owner/group' >&2
+		ownership_restore_failed=1
+	fi
 	if [ "$lock_acquired" -eq 1 ]; then
 		rm -f "$SERVER_LOCK_DIR/pid"
 		rmdir "$SERVER_LOCK_DIR" 2>/dev/null || true
+	fi
+	if [ "$ownership_restore_failed" -eq 1 ]; then
+		status=1
+	fi
+	if [ "$status" -eq 0 ] && [ -n "$completion_message" ]; then
+		echo "$completion_message"
 	fi
 	exit "$status"
 }
 
 assert_temp_file "$SQL_FILE" SQL_FILE
 assert_temp_file "$UPLOADS_ZIP" UPLOADS_ZIP
-trap cleanup_exit 0 1 2 15
 
 acquire_lock() {
 	mkdir -p "$(dirname "$SERVER_LOCK_DIR")"
@@ -424,6 +460,7 @@ copy_code() {
 			[ ! -e "$TRANSIENT_OLD" ] || mv "$TRANSIENT_OLD" "$target_path"
 			fail "Atomic code replacement failed"
 		fi
+		ownership_dirty=1
 		rm -rf "$TRANSIENT_OLD"
 		TRANSIENT_NEW=''; TRANSIENT_OLD=''; TRANSIENT_TARGET=''
 		IFS=','
@@ -514,6 +551,7 @@ copy_protected_files() {
 			restore_protected_files
 			fail "Protected file replacement failed: $relative"
 		fi
+		ownership_dirty=1
 		rm -f "$old_path"
 		TRANSIENT_NEW=''; TRANSIENT_OLD=''; TRANSIENT_TARGET=''
 		IFS=','
@@ -533,6 +571,57 @@ restore_protected_files() {
 		IFS=','
 	done
 	IFS="$old_ifs"
+}
+
+restore_site_ownership() {
+	[ "$ownership_policy_ready" -eq 1 ] || return 0
+	[ "$ownership_dirty" -eq 1 ] || return 0
+	canonical_wp="$(CDPATH= cd -P "$WP_DIR" && pwd)"
+	chown_changed_path() {
+		relative="$1"
+		path="$canonical_wp/$relative"
+		case "$path" in "$canonical_wp"/*) ;; *) return 1 ;; esac
+		[ -e "$path" ] || return 0
+		current="$canonical_wp"
+		old_ifs="$IFS"
+		IFS='/'
+		for segment in $relative; do
+			IFS="$old_ifs"
+			current="$current/$segment"
+			[ ! -L "$current" ] || return 1
+			IFS='/'
+		done
+		IFS="$old_ifs"
+		chown -R -- "$SERVER_FILE_OWNER:$SERVER_FILE_GROUP" "$path"
+	}
+	case "$DEPLOY_MODE" in
+		code|full)
+			old_ifs="$IFS"
+			IFS=','
+			for relative in $ACTIVE_SYNC_PATHS; do
+				IFS="$old_ifs"
+				chown_changed_path "$relative" || return 1
+				IFS=','
+			done
+			IFS="$old_ifs"
+			;;
+	esac
+	if [ -n "$UPLOADS_ZIP" ]; then
+		chown_changed_path 'wp-content/uploads' || return 1
+	fi
+	if [ "$REPLACE_PROTECTED" = 1 ]; then
+		old_ifs="$IFS"
+		IFS=','
+		for relative in $PROTECTED_PATHS; do
+			IFS="$old_ifs"
+			chown_changed_path "$relative" || return 1
+			IFS=','
+		done
+		IFS="$old_ifs"
+	fi
+	for relative in '.htaccess' 'wp-content/cache' 'wp-content/upgrade'; do
+		chown_changed_path "$relative" || return 1
+	done
 }
 
 backup_database() {
@@ -684,6 +773,7 @@ sync_uploads() {
 		[ ! -d "$old" ] || mv "$old" "$current"
 		fail "Atomic uploads replacement failed"
 	fi
+	ownership_dirty=1
 	rm -rf "$old"
 	TRANSIENT_NEW=''; TRANSIENT_OLD=''; TRANSIENT_TARGET=''
 }
@@ -695,6 +785,7 @@ cleanup_wordpress() {
 	wp_cli cache flush || true
 	wp_cli transient delete --all || true
 	wp_cli rewrite flush --hard || true
+	ownership_dirty=1
 }
 
 cleanup_backups() {
@@ -705,6 +796,8 @@ cleanup_backups() {
 		[ -z "$backup_dir" ] || rm -rf -- "$backup_dir"
 	done
 }
+
+trap cleanup_exit 0 1 2 15
 
 assert_mode
 assert_server_policy
@@ -754,6 +847,6 @@ case "$DEPLOY_MODE" in
 esac
 
 case "$DEPLOY_MODE" in
-	pull-db|pull-files) echo "WordPress pull export completed ($DEPLOY_MODE)" ;;
-	*) echo "WordPress deployment completed ($DEPLOY_MODE)" ;;
+	pull-db|pull-files) completion_message="WordPress pull export completed ($DEPLOY_MODE)" ;;
+	*) completion_message="WordPress deployment completed ($DEPLOY_MODE)" ;;
 esac
