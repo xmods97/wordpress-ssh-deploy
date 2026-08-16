@@ -10,15 +10,18 @@ $deploy = Join-Path $toolRoot 'deploy.ps1'
 $siteGit = Join-Path $toolRoot 'site-git.ps1'
 $verify = Join-Path $toolRoot 'verify.ps1'
 $backupCleanup = Join-Path $toolRoot 'backup-cleanup.ps1'
+$onboard = Join-Path $toolRoot 'onboard-site.ps1'
 $modulePath = Join-Path $toolRoot 'src\WordPressSshDeploy.psm1'
-if ([string]::IsNullOrWhiteSpace($ProfilesDirectory)) { $ProfilesDirectory = Join-Path $env:USERPROFILE '.wordpress-ssh-deploy\profiles' }
+if ([string]::IsNullOrWhiteSpace($ProfilesDirectory)) { $ProfilesDirectory = [Environment]::GetEnvironmentVariable('WORDPRESS_SSH_DEPLOY_PROFILES_DIRECTORY') }
+if ([string]::IsNullOrWhiteSpace($ConfigPath) -and [string]::IsNullOrWhiteSpace($ProfilesDirectory)) {
+	throw 'Pass -ProfilesDirectory or set WORDPRESS_SSH_DEPLOY_PROFILES_DIRECTORY before opening the profile menu.'
+}
 
 function Resolve-Profile {
     if (-not [string]::IsNullOrWhiteSpace($ConfigPath)) { return [IO.Path]::GetFullPath($ConfigPath) }
-    $default = Join-Path $toolRoot 'deploy.config.ps1'
-    if (Test-Path -LiteralPath $default -PathType Leaf) { return $default }
-    $profiles = @(Get-ChildItem -LiteralPath $ProfilesDirectory -Filter '*.ps1' -File -ErrorAction SilentlyContinue | Sort-Object Name)
-    if ($profiles.Count -eq 0) { throw "No profile found. Create deploy.config.ps1 or put profiles in $ProfilesDirectory" }
+    $profiles = @(Get-ChildItem -LiteralPath $ProfilesDirectory -Filter '*.ps1' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notmatch '\.example\.ps1$' } | Sort-Object Name)
+    if ($profiles.Count -eq 0) { throw "No site profile found in $ProfilesDirectory. Copy a private deploy.config.<site>.ps1 there first." }
     Write-Host "Profiles:"
     for ($i = 0; $i -lt $profiles.Count; $i++) { Write-Host "[$($i + 1)] $($profiles[$i].BaseName)" }
     $choice = [int](Read-Host 'Choose profile') - 1
@@ -27,9 +30,11 @@ function Resolve-Profile {
 }
 
 $profilePath = Resolve-Profile
+$canonicalProfilesDirectory = if ([string]::IsNullOrWhiteSpace($ProfilesDirectory)) { Split-Path -Parent $profilePath } else { [IO.Path]::GetFullPath($ProfilesDirectory) }
 Import-Module $modulePath -Force
 . $profilePath
 Assert-DeployConfiguration $DeployConfig
+Assert-ProfileIsolation -Configuration $DeployConfig -ProfilePath $profilePath -ProfilesDirectory (Split-Path -Parent $profilePath) -CanonicalProfilesDirectory $canonicalProfilesDirectory
 while ($true) {
     Clear-Host
     Write-Host "WordPress SSH Deploy: $($DeployConfig.SiteId)" -ForegroundColor Cyan
@@ -45,18 +50,22 @@ while ($true) {
     Write-Host '[7] Apply pulled workspace'
     Write-Host '[8] SSH preflight'
     Write-Host '[9] Local backup cleanup preview'
+    Write-Host '[10] Onboarding preflight (read-only)'
+    Write-Host '[11] Revalidate selected profile and all D: profiles'
     Write-Host '[0] Exit'
     $choice = Read-Host 'Select action'
     switch ($choice) {
-        '1' { try { & $verify -ConfigPath $profilePath } catch { Write-Warning $_.Exception.Message } }
-        '2' { try { & $siteGit -Action status -ConfigPath $profilePath } catch { Write-Warning $_.Exception.Message } }
-        '3' { $m = Read-Host 'Commit message'; if ((Read-Host "Type $($DeployConfig.SiteId):COMMIT to confirm") -eq "$($DeployConfig.SiteId):COMMIT") { try { & $siteGit -Action commit -ConfigPath $profilePath -Message $m -ConfirmCommit } catch { Write-Warning $_.Exception.Message } } }
-        '4' { if ((Read-Host "Type $($DeployConfig.SiteId):PUSH to confirm") -eq "$($DeployConfig.SiteId):PUSH") { try { & $siteGit -Action push -ConfigPath $profilePath -ConfirmPush } catch { Write-Warning $_.Exception.Message } } }
-        '5' { try { & $deploy -ConfigPath $profilePath -Mode pull-full -DryRun } catch { Write-Warning $_.Exception.Message } }
-        '6' { if ((Read-Host "Type $($DeployConfig.SiteId):PULL:$($DeployConfig.RemoteUrl) to confirm") -eq "$($DeployConfig.SiteId):PULL:$($DeployConfig.RemoteUrl)") { try { & $deploy -ConfigPath $profilePath -Mode pull-full -Confirm } catch { Write-Warning $_.Exception.Message } } }
-        '7' { $workspace = Read-Host 'Paste verified pull workspace'; if ((Read-Host "Type $($DeployConfig.SiteId):APPLY:$($DeployConfig.LocalDbName) to confirm") -eq "$($DeployConfig.SiteId):APPLY:$($DeployConfig.LocalDbName)") { try { & $deploy -ConfigPath $profilePath -Mode apply-pull -PullWorkspace $workspace -Confirm } catch { Write-Warning $_.Exception.Message } } }
-        '8' { try { & $deploy -ConfigPath $profilePath -PreflightOnly } catch { Write-Warning $_.Exception.Message } }
-        '9' { try { & $backupCleanup -ConfigPath $profilePath; if ((Read-Host "Type $($DeployConfig.SiteId):CLEAN to delete the listed entries, or press Enter") -eq "$($DeployConfig.SiteId):CLEAN") { & $backupCleanup -ConfigPath $profilePath -ConfirmDelete } } catch { Write-Warning $_.Exception.Message } }
+        '1' { try { & $verify -ConfigPath $profilePath -ProfilesDirectory $canonicalProfilesDirectory } catch { Write-Warning $_.Exception.Message } }
+        '2' { try { & $siteGit -Action status -ConfigPath $profilePath -ProfilesDirectory $canonicalProfilesDirectory } catch { Write-Warning $_.Exception.Message } }
+        '3' { $m = Read-Host 'Commit message'; if ((Read-Host "Type $($DeployConfig.SiteId):COMMIT to confirm") -eq "$($DeployConfig.SiteId):COMMIT") { try { & $siteGit -Action commit -ConfigPath $profilePath -ProfilesDirectory $canonicalProfilesDirectory -Message $m -ConfirmCommit } catch { Write-Warning $_.Exception.Message } } }
+        '4' { if ((Read-Host "Type $($DeployConfig.SiteId):PUSH to confirm") -eq "$($DeployConfig.SiteId):PUSH") { try { & $siteGit -Action push -ConfigPath $profilePath -ProfilesDirectory $canonicalProfilesDirectory -ConfirmPush } catch { Write-Warning $_.Exception.Message } } }
+        '5' { try { & $deploy -ConfigPath $profilePath -ProfilesDirectory $canonicalProfilesDirectory -Mode pull-full -DryRun } catch { Write-Warning $_.Exception.Message } }
+        '6' { if ((Read-Host "Type $($DeployConfig.SiteId):PULL:$($DeployConfig.RemoteUrl) to confirm") -eq "$($DeployConfig.SiteId):PULL:$($DeployConfig.RemoteUrl)") { try { & $deploy -ConfigPath $profilePath -ProfilesDirectory $canonicalProfilesDirectory -Mode pull-full -Confirm } catch { Write-Warning $_.Exception.Message } } }
+        '7' { $workspace = Read-Host 'Paste verified pull workspace'; if ((Read-Host "Type $($DeployConfig.SiteId):APPLY:$($DeployConfig.LocalDbName) to confirm") -eq "$($DeployConfig.SiteId):APPLY:$($DeployConfig.LocalDbName)") { try { & $deploy -ConfigPath $profilePath -ProfilesDirectory $canonicalProfilesDirectory -Mode apply-pull -PullWorkspace $workspace -Confirm } catch { Write-Warning $_.Exception.Message } } }
+        '8' { try { & $deploy -ConfigPath $profilePath -ProfilesDirectory $canonicalProfilesDirectory -PreflightOnly } catch { Write-Warning $_.Exception.Message } }
+        '9' { try { & $backupCleanup -ConfigPath $profilePath -ProfilesDirectory $canonicalProfilesDirectory; if ((Read-Host "Type $($DeployConfig.SiteId):CLEAN to delete the listed entries, or press Enter") -eq "$($DeployConfig.SiteId):CLEAN") { & $backupCleanup -ConfigPath $profilePath -ProfilesDirectory $canonicalProfilesDirectory -ConfirmDelete } } catch { Write-Warning $_.Exception.Message } }
+        '10' { try { & $onboard -ConfigPath $profilePath -ProfilesDirectory $ProfilesDirectory } catch { Write-Warning $_.Exception.Message } }
+        '11' { try { Assert-DeployConfiguration $DeployConfig; Assert-ProfileIsolation -Configuration $DeployConfig -ProfilePath $profilePath -ProfilesDirectory (Split-Path -Parent $profilePath) -CanonicalProfilesDirectory $canonicalProfilesDirectory; Write-Host "OK Profile isolation: $($DeployConfig.SiteId)" -ForegroundColor Green } catch { Write-Warning $_.Exception.Message } }
         '0' { return }
         default { Write-Warning 'Unknown action.' }
     }

@@ -498,6 +498,23 @@ Risk:
 
 Next:
 - Stop for independent read-only Claude review.
+
+2026-08-15 | SITE-A-PULL-DB-WPCLI-FIX | CODEX | CHECKPOINT_COMPLETE
+
+Result:
+- Switched the production pull backup path to WP-CLI db export after mysqldump authentication failed on the host.
+- Updated and installed the runner, completed a verified full pull, and applied the database plus themes/plugins/uploads to the single local test copy.
+- Local prefix and home/siteurl were verified; the production site remained read-only.
+
+Checks:
+- Full Pester: 146/146; direct pull-db smoke and git diff --check passed.
+- 18 active tables verified, HTTP 200, 892 uploads present, and the local homepage was captured in a browser screenshot.
+
+Risk:
+- Code and metadata are uncommitted. No commit, push, merge, remote cleanup, rollback, or Claude review performed.
+
+Next:
+- Stop for independent read-only Claude review before commit/push.
 2026-08-13 | MULTISITE-FOUNDATION-MVP | CODEX | READY_FOR_REVIEW
 
 Result:
@@ -511,3 +528,251 @@ Checks:
 
 Next:
 - Stop for independent read-only Claude review.
+
+2026-08-15 | MULTISITE-PROFILE-ISOLATION-ONBOARDING | CODEX | CHECKPOINT_COMPLETE | Добавлены явный выбор профиля, межпрофильная изоляция SiteId/путей/БД, D:-ориентированный private runtime, read-only onboarding preflight и pull sanity-порог таблиц; 149/149 тестов.
+
+2026-08-15 | MULTISITE-PROFILE-ISOLATION-P3-FIXES | CODEX | HANDOFF_READY
+
+Result:
+- Создан компактный handoff с полным контекстом ROUND4 и всеми оставшимися P2/P3 пунктами review.
+
+Files:
+- `.ai/HANDOFF.md`
+- `.ai/STATE.md`
+
+Checks:
+- Безопасная загрузка профилей ранее подтверждена WinPS 5.1: 154/154 и configuration 35/35.
+
+Risks:
+- Новая critical-задача ожидала отдельные двойные подтверждения; commit/push и live-действия не выполнялись.
+
+2026-08-15 | MULTISITE-PROFILE-ISOLATION-REVIEW-FIXES-ROUND4 | CODEX | CHECKPOINT_COMPLETE
+
+Result:
+- Исправлена совместимость безопасной загрузки профилей с Windows PowerShell 5.1: удалён PowerShell 7-only аргумент у `SafeGetValue()`.
+- Диагностика ошибок безопасного чтения больше не маскируется под dynamic expressions.
+- Добавлен regression-тест для строк, массивов, bool и вложенной hashtable.
+
+Files:
+- `src/WordPressSshDeploy.psm1`
+- `tests/configuration.Tests.ps1`
+- `.ai/STATE.md`
+- `.ai/CHANGELOG.md`
+
+Checks:
+- Pester 154/154; configuration 35/35; parser, `sh -n`, `git diff --check` — PASS.
+
+Risks:
+- Старые root-профили не удалялись; commit/push и live-действия не выполнялись.
+
+2026-08-15 18:46 | MULTISITE-PROFILE-ISOLATION-REVIEW-FIXES-ROUND3 | CODEX | CHECKPOINT_COMPLETE
+
+Result:
+- Убран dot-sourcing обнаруженных профилей: изоляция читает только безопасное значение `HashtableAst.SafeGetValue()` после статической проверки единственного присваивания `$DeployConfig`.
+- Добавлены regression-тесты против редиректа в файл и изменения `$env`.
+
+Files:
+- `src/WordPressSshDeploy.psm1`
+- `tests/configuration.Tests.ps1`
+- `.ai/STATE.md`
+- `.ai/CHANGELOG.md`
+
+Checks:
+- Pester 153/153; configuration 34/34; parser, `sh -n`, `git diff --check` — PASS.
+
+Risks:
+- Старые root-профили намеренно не удалялись; commit/push и live-действия не выполнялись.
+
+Approvals:
+- Plan and execution approved by user.
+- PLAN_APPROVED
+- EXECUTION_APPROVED
+
+2026-08-15 | MULTISITE-PROFILE-ISOLATION-REVIEW-FIXES | CODEX | CHECKPOINT_COMPLETE
+
+Result:
+- Closed the P1 profile-isolation gap by making canonical scope explicit and checking the selected catalog, tool-root private profiles, and D:\wordpress-ssh-deploy\profiles together.
+- Added split-catalog collision coverage, filtered non-profile tool scripts, ignored local .claude settings, and raised the pull sanity floor to 12 WordPress core tables.
+
+Checks:
+- Full Pester 150/150; configuration tests 31/31; PowerShell parser clean; Git Bash shell syntax clean; git diff --check clean.
+- Read-only D onboarding fails closed on the two stale root duplicates; no server or database was contacted.
+
+Next:
+- Stop for independent read-only Claude review; do not commit/push or run live actions.
+
+2026-08-15 | MULTISITE-PROFILE-ISOLATION-REVIEW-FIXES-ROUND2 | CODEX | CHECKPOINT_COMPLETE
+
+Result:
+- Sanitized the current metadata additions to generic site labels and verification values.
+- Added static data-only validation before profile dot-sourcing; arbitrary command- or method-bearing `.ps1` files are rejected.
+- Added a regression test proving command output cannot pollute isolation errors.
+
+Checks:
+- Full Pester 151/151; configuration tests 32/32; PowerShell parser clean; Git Bash shell syntax clean; git diff --check clean.
+- No server, database, commit, push, or live action performed.
+
+Next:
+- Stop for independent read-only Claude review.
+
+2026-08-15 | SITE-A-LOCAL-WORDPRESS-BOOTSTRAP | CODEX | CHECKPOINT_COMPLETE
+
+Result:
+- Created one empty local site database and a clean local WordPress core target in the separate site Git repository.
+- Created a private local `wp-config.php`, separate work root, and profile mapping for `SiteId`, code repository, local target, and backups.
+- Added the site-repository ignore policy so core, runtime content, secrets, and deployment artifacts cannot be committed as site code.
+
+Checks:
+- Private profile validation passed; local database table count is 0.
+- Generated `wp-config.php` passed PHP syntax validation; Laragon returned the expected WordPress-install redirect.
+- Git-ignore verification passed; only the intentional baseline `.gitignore` is uncommitted in the separate site repository.
+
+Risk:
+- No VPS, SSH, remote runner, pull, deploy, SQL import, rollback, commit, or push action was performed.
+
+Next:
+- Resume the separately approved root-wrapper VPS rollout; do not run pull or deploy.
+
+2026-08-15 | MULTISITE-PROFILE-ISOLATION-P3-FIXES | CODEX | READY_FOR_REVIEW
+
+Result:
+- Closed the remaining metadata and P3 findings: append-only metadata repair, null `EndBlock` handling, literal-only AST validation, explicit profile-directory wiring, exact pull table-count plans, variable rename, README contract, and regression coverage.
+
+Files:
+- `src/WordPressSshDeploy.psm1`, entry-point `.ps1` files, `README.md`, `deploy.config.example.ps1`, `tests/configuration.Tests.ps1`, `tests/pull.Tests.ps1`, `.ai/STATE.md`, `.ai/CHANGELOG.md`, `.ai/HANDOFF.md`
+
+Checks:
+- WinPS 5.1 Pester: 159/159; PowerShell parser, Git Bash `sh -n`, and `git diff --check` passed.
+
+Risks:
+- Changes remain uncommitted in a detached worktree; old root profiles remain intentionally untouched. No live action was performed.
+
+Next:
+- Stop for fresh independent read-only Claude review before commit/push or any VPS/DB action.
+
+2026-08-15 | MULTISITE-PROFILE-ISOLATION-P3-FOLLOWUP | CODEX | READY_FOR_REVIEW
+
+Result:
+- Удалён мёртвый `MinimumPullDbTableCount` из схемы; pull-enabled профили используют только обязательный exact `ExpectedPullDbTableCount`.
+- README дополнен миграцией существующих private-профилей; fail-closed validation теперь явно отклоняет устаревший ключ.
+
+Files:
+- `src/WordPressSshDeploy.psm1`
+- `tests/pull.Tests.ps1`
+- `README.md`
+- `.ai/STATE.md`
+- `.ai/HANDOFF.md`
+- `.ai/CHANGELOG.md`
+
+Checks:
+- WinPS 5.1 Pester: 160/160; obsolete-key regression, parser, Git Bash `sh -n`, and `git diff --check` passed.
+
+Risks:
+- Existing private profiles were not edited; they require a separate local migration of `ExpectedPullDbTableCount` before pull use. No live action, commit, push, or merge was performed.
+
+Next:
+- Stop for fresh independent read-only Claude review.
+
+2026-08-15 | MULTISITE-PROFILE-ISOLATION-P3-FOLLOWUP-FIX | CLAUDE | READY_FOR_REVIEW
+
+Result:
+- Устранена вырожденность regression-теста exact `ExpectedPullDbTableCount`: фикстура pull-профиля теперь использует 17 таблиц против push-значения 12, поэтому подмена источника количества больше не проходит незамеченной.
+- Добавлены сценарии на мутацию только exact-count и только внутреннего `MinimumTableCount`, на отказ при 16 и 18 таблицах и на раздельность push- и pull-значений.
+- Runtime-код и схема не изменялись: exact-проверка не ослаблена, `MinimumPullDbTableCount` в схему не возвращён.
+
+Files:
+- `tests/pull.Tests.ps1`
+- `.ai/STATE.md`
+- `.ai/HANDOFF.md`
+- `.ai/CHANGELOG.md`
+
+Checks:
+- WinPS 5.1 full Pester: 164/164; pull 87/87; configuration 39/39; parser, `git diff --check` — PASS.
+- Mutation-proof: подмена плана на push-count даёт 3 падения, hardcode внутреннего минимума — 1, отключение exact-проверки — 4, возврат устаревшего ключа в схему — 1. До правки первые две мутации не выявлялись.
+
+Risks:
+- Приватные профили не редактировались и по-прежнему требуют отдельной локальной миграции. Live-действий, commit, push и merge не выполнялось.
+
+Approvals:
+- Узкая правка только тестов, явно назначенная пользователем CLAUDE; CODEX сохраняет PROJECT_LEAD, TASK_LEAD и WORK_LOCK.
+
+Next:
+- Передать результат CODEX для нового review.
+
+2026-08-16 | MULTISITE-PROFILE-ISOLATION-P3-FOLLOWUP-APPLY-TEST-FIX | CODEX | READY_FOR_REVIEW
+
+Result:
+- Добавлен regression-тест для `New-ApplyPullPlan`: exact `ExpectedTableCount` и `MinimumTableCount` проверяются отдельно и используются в реальной table-set validation.
+- Mutation-probe на временной копии подтверждает, что подмена каждого из apply-план полей приводит к отказу тестов.
+
+Files:
+- `tests/pull.Tests.ps1`
+- `.ai/STATE.md`
+- `.ai/HANDOFF.md`
+- `.ai/CHANGELOG.md`
+
+Checks:
+- WinPS 5.1 full Pester: 165/165; pull: 88/88.
+- Parser, Git Bash `sh -n`, and `git diff --check`: PASS.
+- No runtime code, private profiles, server, database, deploy, rollback, commit, push, or merge was changed or executed.
+
+Next:
+- Independent read-only review before commit/push.
+
+2026-08-16 | MULTISITE-PROFILE-ISOLATION-P3-FOLLOWUP-METADATA-CORRECTION | CODEX | READY_FOR_COMMIT
+
+Result:
+- Corrected the current STATE wording: each of the two apply-plan mutation probes produced one failing test in its temporary copy.
+- Preserved the existing CHANGELOG history and append-only order; no earlier entry was moved, rewritten, or deleted. This correction is appended at EOF.
+
+Checks:
+- Metadata-only correction; no runtime code, private profiles, server, database, deploy, rollback, or live action changed.
+
+2026-08-16 | MULTISITE-PROFILE-ISOLATION-P3-FOLLOWUP-COMMITTED-PUSHED | CODEX | COMMITTED_PUSHED
+
+Result:
+- Независимый read-only review завершён с вердиктом PASS; два некритичных metadata-замечания исправлены.
+- Reviewed implementation committed as `0ff764b` and pushed to `origin/codex/multisite-profile-isolation-p3-followup`.
+
+Checks:
+- Pull Pester: 88 passed, 0 failed; `git diff --check` passed before commit.
+- No merge, VPS, database, deploy, rollback, or private-profile edit was performed.
+
+Next:
+- Review the published branch and merge only with separate authorization.
+
+2026-08-16 | MULTISITE-PROFILE-ISOLATION-PR-FIXES | CODEX | READY_FOR_COMMIT
+
+Result:
+- Closed the PR review findings for local backup-directory isolation, drive-independent onboarding preflight, and exact pull-manifest mutation coverage.
+- Documented that remote pull DB export uses WP-CLI, local push-side export/backups use mysqldump, and an updated server runner must be reinstalled.
+
+Files:
+- `src/WordPressSshDeploy.psm1`
+- `onboard-site.ps1`
+- `tests/configuration.Tests.ps1`
+- `tests/pull.Tests.ps1`
+- `README.md`
+- `.ai/STATE.md`
+
+Checks:
+- Targeted configuration and pull tests: 128/128.
+- Full Pester: 166/166; parser and git diff --check passed.
+- No server, database, deploy, rollback, merge, or private-profile edit was performed.
+
+Next:
+- Commit and push the branch, update PR documentation, then stop for independent read-only review.
+
+2026-08-16 | MULTISITE-PROFILE-ISOLATION-PR-FIXES-COMMITTED-PUSHED | CODEX | COMMITTED_PUSHED
+
+Result:
+- Committed and pushed the PR review fixes as `d9b6815`.
+- Updated PR #2 description with the corrected validation totals and the remote WP-CLI/local mysqldump runner note; PR remains draft.
+
+Checks:
+- Targeted configuration and pull tests: 128/128.
+- Full Pester: 166/166; parser, shell checks, and git diff --check passed.
+- No server, SSH, database, deploy, rollback, merge, or private-profile edit was performed.
+
+Next:
+- Stop for independent read-only review; merge and live actions require separate authorization.

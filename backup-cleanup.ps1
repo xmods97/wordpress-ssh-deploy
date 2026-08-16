@@ -1,17 +1,21 @@
 [CmdletBinding()]
 param(
     [string] $ConfigPath = '',
-    [switch] $ConfirmDelete
+    [switch] $ConfirmDelete,
+    [string] $ProfilesDirectory = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $toolRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $modulePath = Join-Path $toolRoot 'src\WordPressSshDeploy.psm1'
-$configFile = if ([string]::IsNullOrWhiteSpace($ConfigPath)) { Join-Path $toolRoot 'deploy.config.ps1' } elseif ([IO.Path]::IsPathRooted($ConfigPath)) { [IO.Path]::GetFullPath($ConfigPath) } else { [IO.Path]::GetFullPath((Join-Path $toolRoot $ConfigPath)) }
+$configFile = if ([string]::IsNullOrWhiteSpace($ConfigPath)) { throw 'Explicit -ConfigPath is required. Select a site profile through menu.ps1 or pass the profile path directly.' } elseif ([IO.Path]::IsPathRooted($ConfigPath)) { [IO.Path]::GetFullPath($ConfigPath) } else { [IO.Path]::GetFullPath((Join-Path $toolRoot $ConfigPath)) }
 Import-Module $modulePath -Force
 if (-not (Test-Path -LiteralPath $configFile -PathType Leaf)) { throw "Configuration file was not found: $configFile" }
 . $configFile
 Assert-DeployConfiguration $DeployConfig
+$profileDirectory = Split-Path -Parent $configFile
+$canonicalProfilesDirectory = if ([string]::IsNullOrWhiteSpace($ProfilesDirectory)) { $profileDirectory } else { [IO.Path]::GetFullPath($ProfilesDirectory) }
+Assert-ProfileIsolation -Configuration $DeployConfig -ProfilePath $configFile -ProfilesDirectory $profileDirectory -CanonicalProfilesDirectory $canonicalProfilesDirectory
 if (-not $DeployConfig.Contains('LocalBackupDirectory')) { throw 'LocalBackupDirectory is required for backup cleanup.' }
 $root = [IO.Path]::GetFullPath([string] $DeployConfig.LocalBackupDirectory)
 if (-not (Test-Path -LiteralPath $root -PathType Container)) { Write-Host "No local backup directory: $root"; return }

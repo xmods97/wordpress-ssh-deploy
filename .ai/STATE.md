@@ -27,11 +27,498 @@ DEPLOYMENT_LEAD: INHERIT
 
 ## ACTIVE TASK INDEX
 
-ACTIVE_TASK_IDS: SDOUTDOORLIVING-ROOT-WRAPPER-LOCK-ORDER
+ACTIVE_TASK_IDS: MULTISITE-PROFILE-ISOLATION-PR-FIXES
 
 
 
 Перед работой агент обязан выбрать ровно один `TASK_ID` из списка и работать только в его блоке.
+
+## TASK: MULTISITE-PROFILE-ISOLATION-PR-FIXES
+
+TASK_ID: MULTISITE-PROFILE-ISOLATION-PR-FIXES
+TASK_NAME: Close PR review findings for backup isolation, onboarding portability, and pull manifest mutation coverage
+DOMAIN: DEPLOYMENT
+TASK_LEAD: CODEX
+IMPLEMENTER: CODEX
+REVIEWER: CLAUDE
+STATUS: COMMITTED_PUSHED
+
+BRANCH: codex/multisite-profile-isolation-p3-followup
+WORKTREE: dedicated Codex worktree (local path intentionally omitted)
+BASE_COMMIT: 09054c5
+LAST_SYNC_COMMIT: 5af268b
+WORK_LOCK: CODEX
+
+CRITICAL: YES
+PLAN_APPROVED: YES (2026-08-16)
+EXECUTION_APPROVED: YES (2026-08-16)
+LIVE_ACTIONS: NONE
+
+IN_SCOPE:
+- include LocalBackupDirectory in profile-isolation identity checks
+- make onboarding preflight drive-independent while requiring absolute existing paths
+- add exact pull-manifest mutation regression coverage
+- document local mysqldump versus remote WP-CLI pull export and runner reinstallation
+
+OUT_OF_SCOPE:
+- merge, VPS/production, SSH, database, pull/apply, deploy, rollback, profile migration, and profile deletion
+
+RESULT:
+- Shared local backup directories now cause profile-isolation collisions before backup cleanup can run.
+- Onboarding no longer hardcodes D:; it reports absolute-path and existence checks while preserving read-only behavior.
+- Pull manifest mutations of ExpectedDbTableCount and MinimumDbTableCount are rejected by real Assert-PullManifest tests.
+- README documents the server WP-CLI pull export and the need to reinstall an updated runner.
+
+CHECKS:
+- Targeted configuration and pull tests: 128 passed, 0 failed.
+- Full Pester: 166 passed, 0 failed.
+- PowerShell parser: PASS; Git Bash shell checks covered by full Pester; git diff --check: PASS.
+- No server, database, deploy, rollback, merge, or private-profile edit was performed.
+
+NEXT_ACTION:
+- Independent read-only review of PR #2; merge and live actions require separate authorization.
+
+CONTEXT_STATUS: NORMAL
+STOP_AFTER_CHECKPOINT: YES
+
+## TASK: MULTISITE-PROFILE-ISOLATION-P3-FOLLOWUP
+
+TASK_ID: MULTISITE-PROFILE-ISOLATION-P3-FOLLOWUP
+TASK_NAME: Remove obsolete pull-count configuration and prove exact-count regression coverage
+DOMAIN: DEPLOYMENT
+TASK_LEAD: CODEX
+IMPLEMENTER: CLAUDE (previously assigned narrow test fix)
+REVIEWER: CODEX
+STATUS: COMMITTED_PUSHED
+
+BRANCH: codex/multisite-profile-isolation-p3-followup
+WORKTREE: dedicated Codex worktree 9963
+BASE_COMMIT: 4ae5be7
+LAST_SYNC_COMMIT: 0ff764b
+WORK_LOCK: CODEX
+
+CRITICAL: YES
+PLAN_APPROVED: YES (2026-08-15)
+EXECUTION_APPROVED: YES (2026-08-15)
+LIVE_ACTIONS: LOCAL_ONLY
+
+IN_SCOPE:
+- remove obsolete `MinimumPullDbTableCount` from the runtime schema
+- require exact `ExpectedPullDbTableCount` for pull-enabled profiles
+- make exact-count regression coverage mutation-proof and non-degenerate
+- sanitize current HANDOFF metadata without changing code or private profiles
+
+OUT_OF_SCOPE:
+- private profile migration, merge, VPS/production, SSH, database, pull/apply, deploy, rollback, and profile deletion
+
+RESULT:
+- `MinimumPullDbTableCount` is rejected as an unknown configuration key; it is not present in the runtime schema.
+- Pull validation keeps exact `ExpectedPullDbTableCount`; push and pull counts are intentionally different in the fixture (17 versus 12).
+- Regression coverage includes mutations of the exact count and internal minimum, wrong table counts, push/pull separation, and obsolete-key rejection.
+- `New-ApplyPullPlan` now has direct exact-count assertions for both `ExpectedTableCount` and `MinimumTableCount`; its values are used in a real table-set validation.
+- `.ai/HANDOFF.md` no longer contains a machine-specific local path; this task is now recorded separately from its parent task.
+
+CHECKS:
+- WinPS 5.1 full Pester: 165 passed, 0 failed; pull tests: 88 passed, 0 failed.
+- PowerShell parser: PASS; Git Bash `sh -n`: PASS; `git diff --check`: PASS.
+- Mutation probes confirm each apply-plan mutation now fails (one failure per mutation in temporary copies).
+- Commit `0ff764b` was pushed to `origin/codex/multisite-profile-isolation-p3-followup`.
+- No server, database, deploy, rollback, merge, or private-profile edit was performed.
+
+RISKS:
+- Existing private pull profiles still require a separate approved local migration to add exact `ExpectedPullDbTableCount` and remove the obsolete key.
+
+NEXT_ACTION:
+- Review the published branch and open or merge a PR only with separate authorization; do not run live actions.
+
+CONTEXT_STATUS: NORMAL
+STOP_AFTER_CHECKPOINT: YES
+
+## TASK: MULTISITE-PROFILE-ISOLATION-P3-FIXES
+
+TASK_ID: MULTISITE-PROFILE-ISOLATION-P3-FIXES
+TASK_NAME: Close all remaining metadata and P3 findings from the ROUND4 review
+DOMAIN: DEPLOYMENT
+TASK_LEAD: CODEX
+IMPLEMENTER: CODEX
+REVIEWER: CLAUDE
+STATUS: CHECKPOINT_COMPLETE
+
+BRANCH: detached HEAD 4ae5be7
+WORKTREE: dedicated Codex worktree 9963
+BASE_COMMIT: 4ae5be7
+WORK_LOCK: CODEX
+
+CRITICAL: YES
+PLAN_APPROVED: YES (2026-08-15)
+EXECUTION_APPROVED: YES (2026-08-15)
+LIVE_ACTIONS: LOCAL_ONLY
+
+IN_SCOPE:
+- repair append-only metadata and synchronize STATE/CHANGELOG without history rewrite
+- handle null EndBlock explicitly in profile AST loading
+- remove machine-specific canonical profile path coupling
+- document the complete data-only profile contract
+- restore or explicitly enforce exact pull DB table-count validation
+- rename shadowing `$profile` variables
+- add parse, dynamic-expression, and method-invocation regression tests
+
+OUT_OF_SCOPE:
+- commit, push, merge, VPS/production, live pull/apply, deploy, rollback, SQL mutation, and deleting or moving old profiles
+
+CHECKPOINT:
+- ROUND4 code review PASS; WinPS 5.1 full Pester 154/154 and configuration 35/35.
+- P3 implementation checkpoint: safe literal AST allowlist, explicit profile-directory wiring, exact pull table-count plans, and regression tests are in the uncommitted worktree.
+
+RESULT:
+- Handled null `EndBlock`; rejected dynamic/type/method-bearing profile values before safe evaluation; renamed profile loop variables.
+- Removed runtime hardcoded canonical profile paths; callers now pass `ProfilesDirectory` or use the environment variable for the menu.
+- Pull plans now require and enforce `ExpectedPullDbTableCount`; README documents the complete data-only profile contract.
+- Restored append-only CHANGELOG structure and synchronized metadata without rewriting committed history.
+- Removed obsolete `MinimumPullDbTableCount`; existing pull-enabled private profiles must add their exact `ExpectedPullDbTableCount` and remove the obsolete key before use.
+- Follow-up fix (CLAUDE as assigned implementer, tests only): the exact pull table-count regression no longer relies on the example profile's identical push/pull value of 12; it pins the pull count to 17 and fails when either the exact count or the internal minimum is mutated.
+
+CHECKS:
+- WinPS 5.1 full Pester: 164 passed, 0 failed.
+- WinPS 5.1 parser: PASS; Git Bash `sh -n` for runner and wrapper: PASS; `git diff --check`: PASS.
+- No server, database, deploy, rollback, commit, push, merge, or profile deletion was performed.
+
+RISKS:
+- Worktree remains detached and changes are uncommitted; old root profiles remain intentionally untouched and require a separate approved migration/cleanup task.
+- Existing private profiles were not edited; until their pull settings are migrated, fail-closed validation will block them.
+
+NEXT_ACTION:
+- Request fresh independent read-only Claude review; do not commit, push, merge, or run live actions before review.
+
+CONTEXT_STATUS: NORMAL
+STOP_AFTER_CHECKPOINT: YES
+
+## TASK: MULTISITE-PROFILE-ISOLATION-REVIEW-FIXES-ROUND4
+
+TASK_ID: MULTISITE-PROFILE-ISOLATION-REVIEW-FIXES-ROUND4
+TASK_NAME: Restore Windows PowerShell 5.1 compatibility for safe profile loading
+DOMAIN: DEPLOYMENT
+TASK_LEAD: CODEX
+IMPLEMENTER: CODEX
+REVIEWER: CLAUDE
+STATUS: CHECKPOINT_COMPLETE
+
+BRANCH: detached HEAD 4ae5be7
+WORKTREE: dedicated Codex worktree 9963
+BASE_COMMIT: 4ae5be7
+WORK_LOCK: CODEX
+
+CRITICAL: YES
+PLAN_APPROVED: YES (2026-08-15)
+EXECUTION_APPROVED: YES (2026-08-15)
+LIVE_ACTIONS: LOCAL_ONLY
+
+IN_SCOPE:
+- use the Windows PowerShell 5.1-compatible zero-argument `SafeGetValue()` overload
+- improve safe-evaluation error diagnostics
+- add a regression test for literal strings, arrays, booleans, and nested hashtables
+- correct ROUND4 verification metadata
+
+OUT_OF_SCOPE:
+- deleting or moving old private profiles, VPS/production changes, live pull/apply, deploy, rollback, SQL mutation, commit, push, or merge
+
+RESULT:
+- Safe profile loading now uses `HashtableAst.SafeGetValue()` without the PowerShell 7-only boolean overload.
+- Valid data-only profiles load again; command, redirection, environment, method, parse, and dynamic-expression cases remain fail-closed.
+
+CHECKS:
+- Full Pester: 154 passed, 0 failed.
+- Configuration tests: 35 passed, 0 failed.
+- PowerShell 5.1 parser: pass.
+- Git Bash `sh -n` for `server-deploy.sh` and `root-ssh-wrapper.sh`: passed.
+- `git diff --check`: passed.
+- No server or database was contacted.
+
+RISKS:
+- Old root private profiles remain intentionally untouched and require a separate approved local migration or cleanup step.
+- Worktree is detached and all project changes remain uncommitted; independent review is required before commit/push.
+
+NEXT_ACTION:
+- Independent read-only Claude review of the WinPS 5.1-compatible AST loader and updated tests. Do not commit/push or run live actions before review.
+
+CONTEXT_STATUS: OVERLOADED
+LIMIT_STATUS: STOP_AFTER_CHECKPOINT
+STOP_AFTER_CHECKPOINT: YES
+
+## TASK: MULTISITE-PROFILE-ISOLATION-REVIEW-FIXES-ROUND3
+
+TASK_ID: MULTISITE-PROFILE-ISOLATION-REVIEW-FIXES-ROUND3
+TASK_NAME: Close AST profile-loading bypasses found in the second independent review
+DOMAIN: DEPLOYMENT
+TASK_LEAD: CODEX
+IMPLEMENTER: CODEX
+REVIEWER: CLAUDE
+STATUS: CHECKPOINT_COMPLETE
+
+BRANCH: main
+WORKTREE: dedicated Codex worktree f6a5
+BASE_COMMIT: 4ae5be7
+WORK_LOCK: CODEX
+
+CRITICAL: YES
+PLAN_APPROVED: YES (2026-08-15)
+EXECUTION_APPROVED: YES (2026-08-15)
+LIVE_ACTIONS: LOCAL_ONLY
+
+IN_SCOPE:
+- remove dot-sourcing of discovered profile candidates from the isolation scan
+- require one direct data-only `$DeployConfig` hashtable assignment
+- add mutation coverage for redirection and environment-assignment side effects
+- keep the current metadata diff free of real site-specific values
+
+OUT_OF_SCOPE:
+- deleting or moving old private profiles, VPS/production changes, live pull/apply, deploy, rollback, SQL mutation, commit, push, or merge
+
+RESULT:
+- Discovered profile candidates are parsed and loaded through `HashtableAst.SafeGetValue()`; profile code is never executed by the isolation scan.
+- Profiles with commands, methods, multiple statements, redirections, environment assignments, parse errors, or dynamic values fail closed.
+- Added regression tests proving redirection does not create a file and environment assignment does not change the process environment.
+
+CHECKS:
+- Full Pester: 153 passed, 0 failed.
+- Configuration tests: 34 passed, 0 failed.
+- PowerShell parser: pass for all `.ps1` files and `src/WordPressSshDeploy.psm1`.
+- Git Bash `sh -n` for `server-deploy.sh` and `root-ssh-wrapper.sh`: passed.
+- `git diff --check`: passed.
+- Public example profile loaded through the safe AST path; no server or database was contacted.
+
+RISKS:
+- Old root private profiles remain intentionally untouched; they still require a separate approved local migration or cleanup step before D profiles can pass onboarding.
+- Code and metadata remain uncommitted; independent review is required before commit/push.
+
+NEXT_ACTION:
+- Independent read-only Claude review of the AST-only profile loading, mutation tests, metadata sanitization, and complete regression results. Do not commit/push or run live actions before review.
+
+CONTEXT_STATUS: OVERLOADED
+LIMIT_STATUS: STOP_AFTER_CHECKPOINT
+STOP_AFTER_CHECKPOINT: YES
+
+## TASK: MULTISITE-PROFILE-ISOLATION-REVIEW-FIXES
+
+TASK_ID: MULTISITE-PROFILE-ISOLATION-REVIEW-FIXES
+TASK_NAME: Close second-round review findings in profile isolation and profile loading safety
+DOMAIN: DEPLOYMENT
+TASK_LEAD: CODEX
+IMPLEMENTER: CODEX
+REVIEWER: CLAUDE
+STATUS: CHECKPOINT_COMPLETE
+
+BRANCH: main
+WORKTREE: dedicated Codex worktree f6a5
+BASE_COMMIT: 4ae5be7
+WORK_LOCK: CODEX
+
+CRITICAL: YES
+PLAN_APPROVED: YES (2026-08-15)
+EXECUTION_APPROVED: YES (2026-08-15)
+LIVE_ACTIONS: LOCAL_ONLY
+
+IN_SCOPE:
+- make profile isolation compare the selected catalog, tool-root private profiles, and canonical D: profiles
+- add regression coverage for profiles split across separate catalogs
+- raise the automatic pull table sanity floor to 12 standard WordPress core tables
+- keep private local agent settings out of Git
+- keep the current metadata diff free of real site-specific values
+
+OUT_OF_SCOPE:
+- deleting or moving old private profiles, VPS/production changes, live pull/apply, deploy, rollback, SQL mutation, commit, push, or merge
+
+RESULT:
+- Profile isolation now has an explicit canonical-scope switch used by every entry point; it scans the selected profile directory plus root `deploy.config*.ps1` and `D:\wordpress-ssh-deploy\profiles`.
+- Duplicate profile files are detected across catalogs with fail-closed identity collisions; non-profile tool scripts are not loaded as profiles.
+- Profile candidates are statically parsed as data-only files before any dot-sourcing; command- or method-bearing `.ps1` files are rejected.
+- Added split-catalog and unsafe-script mutation tests and ignored `.claude/` local settings.
+- Raised the fallback and example/private profile pull sanity floor from 5 to 12 tables.
+- Sanitized current STATE/CHANGELOG additions to neutral site labels and generic verification values.
+
+CHECKS:
+- Full Pester: 151 passed, 0 failed.
+- Configuration tests: 32 passed, 0 failed.
+- PowerShell parser: clean for changed scripts/module.
+- Git Bash `sh -n` for `server-deploy.sh` and `root-ssh-wrapper.sh`: passed.
+- `git diff --check`: clean.
+- Read-only D onboarding correctly fails closed on two stale root profile duplicates; no server or database was contacted.
+
+RISKS:
+- Old root private profiles remain intentionally untouched; they must be migrated or removed under a separate approved local cleanup step before D profiles can pass onboarding.
+- Code and metadata remain uncommitted; independent review is still required before commit/push.
+
+NEXT_ACTION:
+- Independent read-only Claude review of canonical profile scope, safe profile loading, metadata sanitization, threshold change, and regression coverage. Do not commit/push or run live actions before review.
+
+CONTEXT_STATUS: OVERLOADED
+LIMIT_STATUS: STOP_AFTER_CHECKPOINT
+STOP_AFTER_CHECKPOINT: YES
+
+## TASK: MULTISITE-PROFILE-ISOLATION-ONBOARDING
+
+TASK_ID: MULTISITE-PROFILE-ISOLATION-ONBOARDING
+TASK_NAME: Isolate site profiles and prepare D:-based local onboarding
+DOMAIN: DEPLOYMENT
+TASK_LEAD: CODEX
+IMPLEMENTER: CODEX
+REVIEWER: CLAUDE
+STATUS: CHECKPOINT_COMPLETE
+
+BRANCH: main
+WORKTREE: dedicated Codex worktree f6a5
+BASE_COMMIT: 4ae5be7
+WORK_LOCK: CODEX
+
+CRITICAL: YES
+PLAN_APPROVED: YES (2026-08-15)
+EXECUTION_APPROVED: YES (2026-08-15)
+LIVE_ACTIONS: LOCAL_ONLY
+
+IN_SCOPE:
+- require explicit profile selection for deploy, site Git, verify, and backup cleanup
+- validate SiteId and local/remote path/database/runtime isolation across profiles
+- use D:\wordpress-ssh-deploy for private profiles, workspaces, logs, backups, and WP-CLI
+- add read-only onboarding preflight and automatic pull table sanity validation
+- split the local staging fixture profile from the production profile
+
+OUT_OF_SCOPE:
+- VPS/production changes, live pull/apply, deploy, rollback, SQL mutation, cleanup, commit, push, merge, or Claude review
+
+RESULT:
+- Added profile collision detection for SiteId, code repository, WorkRoot, local site/DB, and remote runtime identities.
+- Removed implicit deploy.config.ps1 fallback; menu now selects only explicit profiles from D:\wordpress-ssh-deploy\profiles.
+- Added read-only onboard-site.ps1 and menu onboarding/revalidation actions.
+- Pull validation now accepts automatic server table discovery with a configurable minimum sanity floor when no exact pull count is set.
+- Updated private local profiles no longer share local paths, DB, SiteId, or WorkRoot.
+- Created D:\wordpress-ssh-deploy\profiles, tools, and per-site sites/backups/logs directories; copied the local WP-CLI and profiles there.
+
+CHECKS:
+- Full Pester: 149 passed, 0 failed.
+- Configuration tests: 30 passed; pull tests: 81 passed.
+- PowerShell parser: clean for changed scripts/module.
+- git diff --check: clean.
+- Both D: profile onboarding preflights: READY; no server or database was contacted.
+
+RISKS:
+- Code and metadata remain uncommitted; commit/push and independent review are still pending.
+- Existing old C: pull workspaces are preserved and not deleted; new runs use D: and new SiteIds.
+- Existing remote runners/profiles were not changed, so live use of the renamed profiles requires a separate rollout plan.
+
+NEXT_ACTION:
+- Independent read-only Claude review of profile isolation, explicit selection, D: path policy, and pull table validation; do not commit/push or run live actions before review.
+
+CONTEXT_STATUS: OVERLOADED
+LIMIT_STATUS: STOP_AFTER_CHECKPOINT
+STOP_AFTER_CHECKPOINT: YES
+
+## TASK: SITE-A-LOCAL-WORDPRESS-BOOTSTRAP
+
+TASK_ID: SITE-A-LOCAL-WORDPRESS-BOOTSTRAP
+TASK_NAME: Bootstrap one clean local WordPress target and private site profile for site-a.example
+DOMAIN: DEPLOYMENT
+TASK_LEAD: CODEX
+REVIEWER: CLAUDE
+STATUS: CHECKPOINT_COMPLETE
+
+BRANCH: main
+WORKTREE: dedicated Codex worktree (local path intentionally omitted)
+BASE_COMMIT: 4ae5be7
+WORK_LOCK: CODEX
+
+CRITICAL: YES
+PLAN_APPROVED: YES (2026-08-15)
+EXECUTION_APPROVED: YES (2026-08-15)
+LIVE_ACTIONS: LOCAL_ONLY
+
+IN_SCOPE:
+- create one new local database and a clean local WordPress core target
+- bind the private multisite profile to the new local site code repository and work root
+- create a Git ignore boundary for core, runtime files, backups, and secrets
+
+OUT_OF_SCOPE:
+- VPS changes, SSH onboarding, remote runner installation, pull, deploy, SQL import, rollback, commit, or push
+
+RESULT:
+- Created the empty local site database with utf8mb4 encoding.
+- Bootstrapped a clean WordPress core and private local `wp-config.php` in the separate site repository; runtime salts are newly generated and not tracked.
+- Created the private work root and updated the ignored profile with `SiteId`, `CodeRepositoryPath`, and the new local target values.
+- Local Laragon URL returned the expected WordPress-install redirect; the database intentionally contains zero tables until a separately approved verified pull/apply.
+
+CHECKS:
+- Private profile validation passed.
+- Local database table count: 0.
+- PHP syntax check passed for generated `wp-config.php`.
+- Local HTTP returned 302 for the WordPress install flow.
+- Git-ignore policy excludes WordPress core, runtime files, and `wp-config.php`; only the new `.gitignore` is uncommitted in the separate site repository.
+
+RISKS:
+- No VPS, SSH, remote runner, pull, deploy, SQL import, rollback, commit, or push action was performed.
+- The private site repository contains only its baseline `.gitignore`; it must receive site code only after a separately approved pull/apply or local implementation task.
+
+NEXT_ACTION:
+- Resume the already approved root-wrapper VPS rollout; do not run pull or deploy.
+
+CONTEXT_STATUS: NORMAL
+LIMIT_STATUS: STOP_AFTER_CHECKPOINT
+STOP_AFTER_CHECKPOINT: YES
+
+## TASK: SITE-A-PULL-DB-WPCLI-FIX
+
+TASK_ID: SITE-A-PULL-DB-WPCLI-FIX
+TASK_NAME: Use WP-CLI for production pull exports and verify the full local apply
+DOMAIN: DEPLOYMENT
+TASK_LEAD: CODEX
+IMPLEMENTER: CODEX
+REVIEWER: CLAUDE
+STATUS: CHECKPOINT_COMPLETE
+
+BRANCH: main
+WORKTREE: dedicated Codex worktree f6a5
+BASE_COMMIT: 4ae5be7
+WORK_LOCK: CODEX
+
+CRITICAL: YES
+PLAN_APPROVED: YES (2026-08-15)
+EXECUTION_APPROVED: YES (2026-08-15)
+LIVE_ACTIONS: PRODUCTION_READ_ONLY_PULL_AND_LOCAL_APPLY
+
+IN_SCOPE:
+- use WP-CLI db export for the production pull backup path where mysqldump failed
+- add pull-db regression coverage and update the production runner
+- pull the production site into a verified workspace and apply it to the one local test copy
+- verify active table prefix, local URL, uploads, and visible homepage
+
+OUT_OF_SCOPE:
+- production database/site writes beyond temporary pull artifacts and server backup creation
+- deleting inactive wp_* tables, remote cleanup, rollback, commit, push, merge, or Claude review
+
+RESULT:
+- Updated server-deploy.sh pull backup to export the active configured tables through WP-CLI.
+- Installed the updated runner on the target VPS.
+- Completed pull-full into the verified workspace 20260815-131419; the remote production site remained read-only.
+- Applied the verified database and themes/plugins/uploads to the single local test copy after creating local backups.
+- Changed the local private wp-config.php prefix to the configured local prefix and bootstrapped an empty local database so the apply backup guard could operate.
+- Removed only the absent optional wp-content/mu-plugins path from the ignored site profile.
+
+CHECKS:
+- Full Pester: 146 passed, 0 failed.
+- Direct pull-db smoke and git diff --check passed.
+- Pull workspace SQL verified: 18 tables with the configured prefix; file archive verified and applied.
+- Local verification: 18 tables, configured local home/siteurl, HTTP 200, and upload files present.
+- Browser screenshot captured showing the pulled local homepage and media.
+
+RISKS:
+- Code, tests, and project metadata are uncommitted; no push or merge was performed.
+- Independent Claude review remains required before commit/push.
+- Production wp-content/mu-plugins does not exist and is intentionally not included in this site profile.
+
+NEXT_ACTION:
+- Stop for independent read-only Claude review; do not commit/push or deploy without a separate approval.
+
+CONTEXT_STATUS: NORMAL
+LIMIT_STATUS: STOP_AFTER_CHECKPOINT
+STOP_AFTER_CHECKPOINT: YES
 
 ## TASK: SDOUTDOORLIVING-ROOT-WRAPPER-LOCK-ORDER
 
@@ -40,11 +527,12 @@ TASK_NAME: Keep the deploy lock through root ownership restoration and release i
 DOMAIN: DEPLOYMENT
 TASK_LEAD: CODEX
 REVIEWER: CLAUDE
-STATUS: READY_FOR_REVIEW
+STATUS: COMMITTED_PUSHED
 
 BRANCH: main
 WORKTREE: dedicated Codex worktree (local path intentionally omitted)
 BASE_COMMIT: 2a338f6
+LAST_SYNC_COMMIT: 4ae5be7
 WORK_LOCK: CODEX
 
 CRITICAL: YES
@@ -73,7 +561,7 @@ RISKS:
 - No VPS installation, SSH onboarding, deploy, pull, rollback, database mutation, commit, push, or merge was performed.
 
 NEXT_ACTION:
-- stop for independent read-only Claude review before commit/push or VPS rollout
+- resume the separately approved VPS wrapper rollout; do not deploy, pull, or mutate the remote database
 
 CONTEXT_STATUS: NORMAL
 LIMIT_STATUS: STOP_AFTER_CHECKPOINT
