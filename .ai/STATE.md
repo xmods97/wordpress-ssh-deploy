@@ -41,11 +41,12 @@ DOMAIN: DEPLOYMENT
 TASK_LEAD: CODEX
 IMPLEMENTER: CODEX
 REVIEWER: CLAUDE
-STATUS: READY_FOR_COMMIT
+STATUS: COMMITTED_PUSHED
 
 BRANCH: codex/multisite-profile-isolation-p3-followup
 WORKTREE: dedicated Codex worktree (local path intentionally omitted)
 BASE_COMMIT: 09054c5
+LAST_SYNC_COMMIT: d9b6815
 WORK_LOCK: CODEX
 
 CRITICAL: YES
@@ -75,7 +76,7 @@ CHECKS:
 - No server, database, deploy, rollback, merge, or private-profile edit was performed.
 
 NEXT_ACTION:
-- Commit and push this branch, update PR documentation, then stop for independent read-only review.
+- Independent read-only review of PR #2; merge and live actions require separate authorization.
 
 CONTEXT_STATUS: NORMAL
 STOP_AFTER_CHECKPOINT: YES

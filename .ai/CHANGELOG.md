@@ -762,3 +762,17 @@ Checks:
 
 Next:
 - Commit and push the branch, update PR documentation, then stop for independent read-only review.
+
+2026-08-16 | MULTISITE-PROFILE-ISOLATION-PR-FIXES-COMMITTED-PUSHED | CODEX | COMMITTED_PUSHED
+
+Result:
+- Committed and pushed the PR review fixes as `d9b6815`.
+- Updated PR #2 description with the corrected validation totals and the remote WP-CLI/local mysqldump runner note; PR remains draft.
+
+Checks:
+- Targeted configuration and pull tests: 128/128.
+- Full Pester: 166/166; parser, shell checks, and git diff --check passed.
+- No server, SSH, database, deploy, rollback, merge, or private-profile edit was performed.
+
+Next:
+- Stop for independent read-only review; merge and live actions require separate authorization.
