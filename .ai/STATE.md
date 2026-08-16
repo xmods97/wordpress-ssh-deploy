@@ -27,11 +27,58 @@ DEPLOYMENT_LEAD: INHERIT
 
 ## ACTIVE TASK INDEX
 
-ACTIVE_TASK_IDS: MULTISITE-PROFILE-ISOLATION-P3-FOLLOWUP
+ACTIVE_TASK_IDS: MULTISITE-PROFILE-ISOLATION-PR-FIXES
 
 
 
 Перед работой агент обязан выбрать ровно один `TASK_ID` из списка и работать только в его блоке.
+
+## TASK: MULTISITE-PROFILE-ISOLATION-PR-FIXES
+
+TASK_ID: MULTISITE-PROFILE-ISOLATION-PR-FIXES
+TASK_NAME: Close PR review findings for backup isolation, onboarding portability, and pull manifest mutation coverage
+DOMAIN: DEPLOYMENT
+TASK_LEAD: CODEX
+IMPLEMENTER: CODEX
+REVIEWER: CLAUDE
+STATUS: READY_FOR_COMMIT
+
+BRANCH: codex/multisite-profile-isolation-p3-followup
+WORKTREE: dedicated Codex worktree (local path intentionally omitted)
+BASE_COMMIT: 09054c5
+WORK_LOCK: CODEX
+
+CRITICAL: YES
+PLAN_APPROVED: YES (2026-08-16)
+EXECUTION_APPROVED: YES (2026-08-16)
+LIVE_ACTIONS: NONE
+
+IN_SCOPE:
+- include LocalBackupDirectory in profile-isolation identity checks
+- make onboarding preflight drive-independent while requiring absolute existing paths
+- add exact pull-manifest mutation regression coverage
+- document local mysqldump versus remote WP-CLI pull export and runner reinstallation
+
+OUT_OF_SCOPE:
+- merge, VPS/production, SSH, database, pull/apply, deploy, rollback, profile migration, and profile deletion
+
+RESULT:
+- Shared local backup directories now cause profile-isolation collisions before backup cleanup can run.
+- Onboarding no longer hardcodes D:; it reports absolute-path and existence checks while preserving read-only behavior.
+- Pull manifest mutations of ExpectedDbTableCount and MinimumDbTableCount are rejected by real Assert-PullManifest tests.
+- README documents the server WP-CLI pull export and the need to reinstall an updated runner.
+
+CHECKS:
+- Targeted configuration and pull tests: 128 passed, 0 failed.
+- Full Pester: 166 passed, 0 failed.
+- PowerShell parser: PASS; Git Bash shell checks covered by full Pester; git diff --check: PASS.
+- No server, database, deploy, rollback, merge, or private-profile edit was performed.
+
+NEXT_ACTION:
+- Commit and push this branch, update PR documentation, then stop for independent read-only review.
+
+CONTEXT_STATUS: NORMAL
+STOP_AFTER_CHECKPOINT: YES
 
 ## TASK: MULTISITE-PROFILE-ISOLATION-P3-FOLLOWUP
 

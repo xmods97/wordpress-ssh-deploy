@@ -150,10 +150,11 @@ Describe 'Deploy configuration validation' {
 		New-Item -ItemType Directory -Path $root | Out-Null
 		$other = Join-Path $root 'other.ps1'
 		try {
-			Set-Content -LiteralPath $other -Encoding UTF8 -Value '$DeployConfig = @{ SiteId = ''example-site''; CodeRepositoryPath = ''D:\\sites\\example''; WorkRoot = ''D:\\wordpress-ssh-deploy\\sites\\example''; LocalWpPath = ''D:\\laragon\\www\\example''; LocalDbName = ''wordpress''; RemoteWpPath = ''/srv/www/example''; ExpectedRemoteDbName = ''db_example''; RemoteRepoPath = ''/srv/repo/example''; RemoteTmpPath = ''/srv/tmp/example''; RemoteBackups = ''/srv/backups/example''; RemoteRunnerPath = ''/usr/local/libexec/example.sh'' }'
+			Set-Content -LiteralPath $other -Encoding UTF8 -Value '$DeployConfig = @{ SiteId = ''example-site''; CodeRepositoryPath = ''D:\\sites\\example''; WorkRoot = ''D:\\wordpress-ssh-deploy\\sites\\example''; LocalWpPath = ''D:\\laragon\\www\\example''; LocalBackupDirectory = ''D:\\wordpress-ssh-deploy\\sites\\example-site\\backups''; LocalDbName = ''wordpress''; RemoteWpPath = ''/srv/www/example''; ExpectedRemoteDbName = ''db_example''; RemoteRepoPath = ''/srv/repo/example''; RemoteTmpPath = ''/srv/tmp/example''; RemoteBackups = ''/srv/backups/example''; RemoteRunnerPath = ''/usr/local/libexec/example.sh'' }'
 			$errors = @(Get-ProfileIsolationErrors $validConfiguration $null $root)
 			($errors -join "`n") | Should Match 'Profile isolation collision: SiteId'
 			($errors -join "`n") | Should Match 'Profile isolation collision: LocalDbName'
+			($errors -join "`n") | Should Match 'Profile isolation collision: LocalBackupDirectory'
 		} finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
 	}
 

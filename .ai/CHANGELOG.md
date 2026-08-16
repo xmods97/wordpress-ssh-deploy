@@ -740,3 +740,25 @@ Checks:
 
 Next:
 - Review the published branch and merge only with separate authorization.
+
+2026-08-16 | MULTISITE-PROFILE-ISOLATION-PR-FIXES | CODEX | READY_FOR_COMMIT
+
+Result:
+- Closed the PR review findings for local backup-directory isolation, drive-independent onboarding preflight, and exact pull-manifest mutation coverage.
+- Documented that remote pull DB export uses WP-CLI, local push-side export/backups use mysqldump, and an updated server runner must be reinstalled.
+
+Files:
+- `src/WordPressSshDeploy.psm1`
+- `onboard-site.ps1`
+- `tests/configuration.Tests.ps1`
+- `tests/pull.Tests.ps1`
+- `README.md`
+- `.ai/STATE.md`
+
+Checks:
+- Targeted configuration and pull tests: 128/128.
+- Full Pester: 166/166; parser and git diff --check passed.
+- No server, database, deploy, rollback, merge, or private-profile edit was performed.
+
+Next:
+- Commit and push the branch, update PR documentation, then stop for independent read-only review.

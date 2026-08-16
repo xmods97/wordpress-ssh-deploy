@@ -1114,6 +1114,7 @@ function Get-ProfileIsolationErrors {
 		@{ Name = 'CodeRepositoryPath'; Kind = 'local-path' },
 		@{ Name = 'WorkRoot'; Kind = 'local-path' },
 		@{ Name = 'LocalWpPath'; Kind = 'local-path' },
+		@{ Name = 'LocalBackupDirectory'; Kind = 'local-path' },
 		@{ Name = 'LocalDbName'; Kind = 'value' },
 		@{ Name = 'RemoteWpPath'; Kind = 'remote-path' },
 		@{ Name = 'ExpectedRemoteDbName'; Kind = 'value' },

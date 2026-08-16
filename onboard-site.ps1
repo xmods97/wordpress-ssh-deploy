@@ -30,9 +30,9 @@ $checks = foreach ($name in $localPaths) {
 	$value = [string] $DeployConfig[$name]
 	[pscustomobject] @{
 		Check = $name
-		Value = $value
-		OnD = $value -match '^D:\\'
+		Absolute = [IO.Path]::IsPathRooted($value)
 		Exists = Test-Path -LiteralPath $value
+		Value = $value
 	}
 }
 
@@ -41,13 +41,13 @@ Write-Host "Profile: $configFile"
 Write-Host "Environment: $($DeployConfig.Environment) | Remote: $($DeployConfig.RemoteUrl)"
 Write-Host "Local URL: $($DeployConfig.LocalUrl) | Local DB: $($DeployConfig.LocalDbName)"
 Write-Host ""
-$checks | Format-Table Check, OnD, Exists, Value -AutoSize
-$badDrive = @($checks | Where-Object { -not $_.OnD })
+$checks | Format-Table Check, Absolute, Exists, Value -AutoSize
+$badPaths = @($checks | Where-Object { -not $_.Absolute })
 $missing = @($checks | Where-Object { -not $_.Exists })
-if ($badDrive.Count -gt 0) { Write-Warning "These local operational paths are not on D: $($badDrive.Check -join ', ')" }
+if ($badPaths.Count -gt 0) { Write-Warning "These local operational paths are not absolute: $($badPaths.Check -join ', ')" }
 if ($missing.Count -gt 0) { Write-Warning "These paths are not created yet: $($missing.Check -join ', ')" }
-if ($badDrive.Count -eq 0 -and $missing.Count -eq 0) {
-	Write-Host 'ONBOARDING PREFLIGHT: READY (local paths isolated on D:).' -ForegroundColor Green
+if ($badPaths.Count -eq 0 -and $missing.Count -eq 0) {
+	Write-Host 'ONBOARDING PREFLIGHT: READY (local paths are absolute and present).' -ForegroundColor Green
 } else {
 	Write-Host 'ONBOARDING PREFLIGHT: ACTION REQUIRED (no server or database changes were made).' -ForegroundColor Yellow
 }

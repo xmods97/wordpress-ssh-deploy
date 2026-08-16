@@ -335,6 +335,33 @@ Describe 'Pull mode gating' {
 		}
 	}
 
+	It 'refuses a manifest whose exact table-count fields were mutated' {
+		$config = New-PullExactCountConfiguration
+		$root = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+		$plan = New-PullPlan $config 'pull-full' '20260812-000000' $root -DryRun -Confirmed
+		try {
+			New-Item -ItemType Directory -Force -Path $plan.Workspace, (Join-Path $plan.FilesStagingDirectory 'wp-content/uploads') | Out-Null
+			New-GzipFile $plan.LocalDbArchive ([Text.Encoding]::UTF8.GetBytes('database-archive'))
+			New-GzipFile $plan.LocalFilesArchive ([Text.Encoding]::UTF8.GetBytes('files-archive'))
+			Set-Content -LiteralPath $plan.LocalDbSql -Value 'CREATE TABLE `wp_posts` (id int);' -NoNewline
+			Set-Content -LiteralPath (Join-Path $plan.FilesStagingDirectory 'wp-content/uploads/marker.txt') -Value 'original' -NoNewline
+			$manifest = New-PullManifest $config $plan $plan.ManifestPath
+
+			$manifest.ExpectedDbTableCount = $config.ExpectedDbTableCount
+			$manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $plan.ManifestPath -Encoding UTF8
+			(Get-ErrorMessage { Assert-PullManifest $config $plan.ManifestPath $plan }) |
+				Should Match 'database table count does not match'
+
+			$manifest.ExpectedDbTableCount = $plan.ExpectedTableCount
+			$manifest.MinimumDbTableCount = $config.ExpectedDbTableCount
+			$manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $plan.ManifestPath -Encoding UTF8
+			(Get-ErrorMessage { Assert-PullManifest $config $plan.ManifestPath $plan }) |
+				Should Match 'database sanity threshold does not match'
+		} finally {
+			if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+		}
+	}
+
 	It 'accepts only the exact pulled table count and refuses one table less or more' {
 		$config = New-PullExactCountConfiguration
 		$plan = New-ExactCountPullPlan $config

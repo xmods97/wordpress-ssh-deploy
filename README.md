@@ -31,7 +31,7 @@ Local Windows machine:
 - PowerShell 5.1 or newer
 - OpenSSH client (`ssh` and `scp`)
 - Git
-- `mysqldump`
+- `mysqldump` for local push-side database exports and backups
 - a local WordPress installation
 
 Remote Linux host:
@@ -164,6 +164,12 @@ so the remote runner takes a backup first and can roll the database back.
 download phase never replaces anything locally: it stores verified artifacts
 side-by-side under `WorkRoot\.pull\<SiteId>\<timestamp>\` and stops:
 
+The remote pull database export uses WP-CLI to enumerate the active WordPress
+tables and export that exact set. `mysqldump` remains a local push-side
+requirement for database exports and backups. After updating the runner,
+reinstall the runner on each server before using pull modes; the installed
+runner is not updated by the Git repository checkout itself.
+
 - the database arrives as a verified `database.sql`. Download does not touch the
   local site; a separate `apply-pull -Confirm` first backs up and then replaces
   the one working local database (`LocalDbName`) used by `LocalWpPath`;
@@ -226,8 +232,9 @@ database before apply. The permanent deny list always wins. See
   actions. It intentionally does not expose `db` or `full` as one-click menu
   actions.
 - `onboard-site.ps1` performs a read-only local onboarding preflight. It checks
-  profile isolation and reports which operational paths are missing or still
-  outside `D:`; it never connects to a server or changes a database.
+  profile isolation and reports which operational paths are not absolute or are
+  missing; the profile chooses the local drive, and the tool never connects to a
+  server or changes a database.
 
 ## Usage
 
