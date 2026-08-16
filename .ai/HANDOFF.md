@@ -9,11 +9,12 @@ PROJECT_LEAD: CODEX
 TASK_LEAD: CODEX
 WORK_LOCK: CODEX
 WORKTREE: dedicated Codex worktree (local path intentionally omitted)
-BRANCH: detached HEAD 4ae5be7
+BRANCH: codex/multisite-profile-isolation-p3-followup
+COMMIT: 0ff764b (pushed)
 
 ## Цель
 
-Закрыть follow-up после ROUND4: устранить вырожденность exact pull-table regression-теста и привести metadata в безопасное, актуальное состояние. Не выполнять commit, push, merge, VPS, DB, deploy, rollback или удаление профилей.
+Закрыть follow-up после ROUND4: устранить вырожденность exact pull-table regression-теста и привести metadata в безопасное, актуальное состояние. Реализация опубликована отдельной веткой; merge и live-действия не выполнялись.
 
 ## Контекст и checkpoint
 
@@ -33,4 +34,4 @@ BRANCH: detached HEAD 4ae5be7
 
 ## Следующий шаг
 
-Локальная реализация и проверки follow-up завершены. Нужен свежий независимый read-only review Codex; до его результата не выполнять commit, push, merge, VPS, DB, deploy, rollback или редактирование private-профилей.
+Проверить опубликованную ветку и при необходимости открыть PR. Merge, VPS, DB, deploy, rollback и редактирование private-профилей требуют отдельного плана и подтверждений.

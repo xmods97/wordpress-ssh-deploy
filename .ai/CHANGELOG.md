@@ -727,3 +727,16 @@ Result:
 
 Checks:
 - Metadata-only correction; no runtime code, private profiles, server, database, deploy, rollback, or live action changed.
+
+2026-08-16 | MULTISITE-PROFILE-ISOLATION-P3-FOLLOWUP-COMMITTED-PUSHED | CODEX | COMMITTED_PUSHED
+
+Result:
+- Независимый read-only review завершён с вердиктом PASS; два некритичных metadata-замечания исправлены.
+- Reviewed implementation committed as `0ff764b` and pushed to `origin/codex/multisite-profile-isolation-p3-followup`.
+
+Checks:
+- Pull Pester: 88 passed, 0 failed; `git diff --check` passed before commit.
+- No merge, VPS, database, deploy, rollback, or private-profile edit was performed.
+
+Next:
+- Review the published branch and merge only with separate authorization.

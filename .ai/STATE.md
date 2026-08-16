@@ -41,11 +41,12 @@ DOMAIN: DEPLOYMENT
 TASK_LEAD: CODEX
 IMPLEMENTER: CLAUDE (previously assigned narrow test fix)
 REVIEWER: CODEX
-STATUS: READY_FOR_REVIEW
+STATUS: COMMITTED_PUSHED
 
-BRANCH: detached HEAD 4ae5be7
+BRANCH: codex/multisite-profile-isolation-p3-followup
 WORKTREE: dedicated Codex worktree 9963
 BASE_COMMIT: 4ae5be7
+LAST_SYNC_COMMIT: 0ff764b
 WORK_LOCK: CODEX
 
 CRITICAL: YES
@@ -60,7 +61,7 @@ IN_SCOPE:
 - sanitize current HANDOFF metadata without changing code or private profiles
 
 OUT_OF_SCOPE:
-- private profile migration, commit, push, merge, VPS/production, SSH, database, pull/apply, deploy, rollback, and profile deletion
+- private profile migration, merge, VPS/production, SSH, database, pull/apply, deploy, rollback, and profile deletion
 
 RESULT:
 - `MinimumPullDbTableCount` is rejected as an unknown configuration key; it is not present in the runtime schema.
@@ -73,14 +74,14 @@ CHECKS:
 - WinPS 5.1 full Pester: 165 passed, 0 failed; pull tests: 88 passed, 0 failed.
 - PowerShell parser: PASS; Git Bash `sh -n`: PASS; `git diff --check`: PASS.
 - Mutation probes confirm each apply-plan mutation now fails (one failure per mutation in temporary copies).
-- No server, database, deploy, rollback, commit, push, merge, or private-profile edit was performed.
+- Commit `0ff764b` was pushed to `origin/codex/multisite-profile-isolation-p3-followup`.
+- No server, database, deploy, rollback, merge, or private-profile edit was performed.
 
 RISKS:
-- Worktree remains detached and changes are uncommitted.
 - Existing private pull profiles still require a separate approved local migration to add exact `ExpectedPullDbTableCount` and remove the obsolete key.
 
 NEXT_ACTION:
-- Independent read-only Codex review; do not commit, push, merge, or run live actions before review.
+- Review the published branch and open or merge a PR only with separate authorization; do not run live actions.
 
 CONTEXT_STATUS: NORMAL
 STOP_AFTER_CHECKPOINT: YES
