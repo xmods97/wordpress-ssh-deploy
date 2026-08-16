@@ -10,7 +10,7 @@ TASK_LEAD: CODEX
 WORK_LOCK: CODEX
 WORKTREE: dedicated Codex worktree (local path intentionally omitted)
 BRANCH: codex/multisite-profile-isolation-p3-followup
-COMMIT: d9b6815 (pushed)
+COMMIT: 5af268b (pushed; code fixes in d9b6815)
 
 ## Цель
 

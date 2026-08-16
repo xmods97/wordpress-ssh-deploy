@@ -46,7 +46,7 @@ STATUS: COMMITTED_PUSHED
 BRANCH: codex/multisite-profile-isolation-p3-followup
 WORKTREE: dedicated Codex worktree (local path intentionally omitted)
 BASE_COMMIT: 09054c5
-LAST_SYNC_COMMIT: d9b6815
+LAST_SYNC_COMMIT: 5af268b
 WORK_LOCK: CODEX
 
 CRITICAL: YES
