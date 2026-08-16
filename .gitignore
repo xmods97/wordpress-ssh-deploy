@@ -4,6 +4,7 @@ server.config.sh
 .deploy/
 .pull/
 .codex-remote-attachments/
+.claude/
 .tools/
 *.local.ps1
 .DS_Store

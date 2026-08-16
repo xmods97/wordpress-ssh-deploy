@@ -9,6 +9,18 @@ function New-PullConfiguration {
 	return $config
 }
 
+# The public example uses the same table count for push and pull. Exact-count regressions
+# stay invisible on identical numbers, so these helpers force the pull count apart from it.
+function New-PullExactCountConfiguration {
+	$config = New-PullConfiguration
+	$config.ExpectedPullDbTableCount = 17
+	return $config
+}
+
+function New-ExactCountPullPlan([System.Collections.IDictionary] $Configuration) {
+	return New-PullPlan $Configuration 'pull-db' '20260812-000000' (Join-Path ([IO.Path]::GetTempPath()) 'pull-plan-root') -Confirmed
+}
+
 function Get-ErrorMessage([scriptblock] $Action) {
 	try { & $Action; return '' } catch { return $_.Exception.Message }
 }
@@ -91,6 +103,12 @@ Describe 'Pull configuration schema' {
 
 	It 'accepts the example once pull is enabled' {
 		@(Get-DeployConfigurationErrors (New-PullConfiguration)).Count | Should Be 0
+	}
+
+	It 'rejects the obsolete minimum pull table count setting' {
+		$config = New-PullConfiguration
+		$config.MinimumPullDbTableCount = 12
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'Unknown configuration key: MinimumPullDbTableCount'
 	}
 
 	It 'uses the dedicated full pull path list for pull-full' {
@@ -274,6 +292,99 @@ Describe 'Pull mode gating' {
 		$config.PullEnabled = $false
 		$message = Get-ErrorMessage { Assert-PullAllowed -Configuration $config -Mode 'pull-db' }
 		$message | Should Match 'Pull is disabled'
+	}
+
+	It 'requires an exact remote pull table count' {
+		$config = New-PullConfiguration
+		$config.Remove('ExpectedPullDbTableCount')
+		(Get-DeployConfigurationErrors $config) -join "`n" |
+			Should Match 'Missing configuration value while PullEnabled is true: ExpectedPullDbTableCount'
+	}
+
+	It 'carries the exact pull table count into the plan instead of the push count' {
+		$config = New-PullExactCountConfiguration
+		# The two counts must stay different, otherwise a swapped source is undetectable.
+		$config.ExpectedDbTableCount | Should Be 12
+		$config.ExpectedPullDbTableCount | Should Be 17
+		@(Get-DeployConfigurationErrors $config).Count | Should Be 0
+
+		$plan = New-ExactCountPullPlan $config
+		$plan.ExpectedTableCount | Should Be 17
+		$plan.MinimumTableCount | Should Be 17
+		$plan.ExpectedTableCount | Should Not Be $config.ExpectedDbTableCount
+		$plan.MinimumTableCount | Should Not Be $config.ExpectedDbTableCount
+	}
+
+	It 'carries the exact pull table count into the apply-pull plan' {
+		$config = New-PullExactCountConfiguration
+		$workspaceRoot = Join-Path ([IO.Path]::GetTempPath()) ("apply-plan-root-" + [Guid]::NewGuid().ToString('N'))
+		$workspace = Join-Path $workspaceRoot ".pull\$($config.SiteId)\20260812-000000"
+		$applyPlan = New-ApplyPullPlan $config $workspace $workspaceRoot -DryRun
+		$applyPlan.ExpectedTableCount | Should Be 17
+		$applyPlan.MinimumTableCount | Should Be 17
+		$applyPlan.ExpectedTableCount | Should Not Be $config.ExpectedDbTableCount
+		$applyPlan.MinimumTableCount | Should Not Be $config.ExpectedDbTableCount
+
+		$file = [IO.Path]::GetTempFileName()
+		try {
+			New-SqlDumpFile $file $applyPlan.ExpectedTablePrefix 17 @()
+			@(Assert-SqlDumpTableSet $file $applyPlan.ExpectedTablePrefix $applyPlan.ExpectedTableCount -MinimumTableCount $applyPlan.MinimumTableCount).Count |
+				Should Be 17
+		} finally {
+			Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+		}
+	}
+
+	It 'accepts only the exact pulled table count and refuses one table less or more' {
+		$config = New-PullExactCountConfiguration
+		$plan = New-ExactCountPullPlan $config
+		$file = [IO.Path]::GetTempFileName()
+		try {
+			New-SqlDumpFile $file $plan.ExpectedTablePrefix 17 @()
+			@(Assert-SqlDumpTableSet $file $plan.ExpectedTablePrefix $plan.ExpectedTableCount -MinimumTableCount $plan.MinimumTableCount).Count |
+				Should Be 17
+
+			New-SqlDumpFile $file $plan.ExpectedTablePrefix 16 @()
+			(Get-ErrorMessage { Assert-SqlDumpTableSet $file $plan.ExpectedTablePrefix $plan.ExpectedTableCount -MinimumTableCount $plan.MinimumTableCount }) |
+				Should Match 'expected 17, found 16'
+
+			New-SqlDumpFile $file $plan.ExpectedTablePrefix 18 @()
+			(Get-ErrorMessage { Assert-SqlDumpTableSet $file $plan.ExpectedTablePrefix $plan.ExpectedTableCount -MinimumTableCount $plan.MinimumTableCount }) |
+				Should Match 'expected 17, found 18'
+		} finally { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
+	}
+
+	It 'refuses a pulled dump when only the exact count or only the internal minimum is mutated' {
+		$config = New-PullExactCountConfiguration
+		$plan = New-ExactCountPullPlan $config
+		$file = [IO.Path]::GetTempFileName()
+		try {
+			# Mutation A: only ExpectedTableCount falls back to the push count. A correct pull must be refused.
+			New-SqlDumpFile $file $plan.ExpectedTablePrefix 17 @()
+			(Get-ErrorMessage { Assert-SqlDumpTableSet $file $plan.ExpectedTablePrefix $config.ExpectedDbTableCount -MinimumTableCount $plan.MinimumTableCount }) |
+				Should Match 'expected 12, found 17'
+
+			# Mutation B: only MinimumTableCount drops to the removed floor. It must not rescue a short dump.
+			New-SqlDumpFile $file $plan.ExpectedTablePrefix 16 @()
+			(Get-ErrorMessage { Assert-SqlDumpTableSet $file $plan.ExpectedTablePrefix $plan.ExpectedTableCount -MinimumTableCount 12 }) |
+				Should Match 'expected 17, found 16'
+		} finally { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
+	}
+
+	It 'keeps the push export count separate from the pull table count' {
+		$config = New-PullExactCountConfiguration
+		$file = [IO.Path]::GetTempFileName()
+		try {
+			# A pull-sized dump must not satisfy the push-side exact count.
+			New-SqlDumpFile $file $config.ExpectedDbTablePrefix 17 @()
+			(Get-ErrorMessage { Normalize-SqlDumpTablePrefix $file $config.ExpectedDbTablePrefix $config.ExpectedDbTableCount }) |
+				Should Match 'expected 12, found 17'
+
+			# A push-sized dump must not satisfy the pull-side exact count.
+			New-SqlDumpFile $file $config.ExpectedDbTablePrefix 12 @()
+			(Get-ErrorMessage { Assert-SqlDumpTableSet $file $config.ExpectedDbTablePrefix $config.ExpectedPullDbTableCount -MinimumTableCount $config.ExpectedPullDbTableCount }) |
+				Should Match 'expected 17, found 12'
+		} finally { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
 	}
 
 	It 'refuses pull-db and pull-full without confirmation' {
@@ -630,8 +741,8 @@ Describe 'deploy.ps1 pull wiring' {
 		}
 	}
 
-	It 'keeps the default config and supports a separate site config path' {
-		$deploy | Should Match "\$ConfigPath = ''"
+	It 'requires an explicit config and supports a separate site config path' {
+		$deploy | Should Match 'Explicit -ConfigPath is required'
 		$deploy | Should Match 'Join-Path'
 		$deploy | Should Match 'IsPathRooted'
 		$deploy | Should Match 'Configuration file was not found'
@@ -875,8 +986,9 @@ Describe 'Remote runner pull safety' {
 		$pullBackup = [regex]::Match($runner, '(?s)backup_database_for_pull\(\).*?\n\}').Value
 		$pullBackup | Should Match 'db tables --all-tables-with-prefix --format=csv'
 		$pullBackup | Should Match 'SERVER_EXPECTED_DB_TABLE_PREFIX'
-		$pullBackup | Should Match 'mysqldump.*"\$@"'
-		$pullBackup | Should Not Match 'mysqldump.*"\$name" >'
+		$pullBackup | Should Match 'wp_cli db export'
+		$pullBackup | Should Match '--tables="\$table_list"'
+		$pullBackup | Should Not Match 'mysqldump'
 		$pullBackup | Should Match 'unsafe identifier'
 	}
 

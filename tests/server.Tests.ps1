@@ -17,7 +17,7 @@ Describe 'Remote POSIX safety' {
 	}
 
 	It 'passes shell syntax checks' {
-		foreach ($file in @('server-deploy.sh', 'server.config.example.sh', 'root-ssh-wrapper.sh', 'tests/server-safety.smoke.sh', 'tests/database-rollback.smoke.sh', 'tests/root-ssh-wrapper.smoke.sh', 'tests/root-ownership.smoke.sh', 'tests/fixtures/server.config.production.sh', 'tests/fixtures/server.config.staging.sh', 'tests/fixtures/fake-php.sh', 'tests/fixtures/fake-mysqldump.sh', 'tests/fixtures/fake-mysql.sh', 'tests/fixtures/fake-df.sh')) {
+		foreach ($file in @('server-deploy.sh', 'server.config.example.sh', 'root-ssh-wrapper.sh', 'tests/server-safety.smoke.sh', 'tests/database-rollback.smoke.sh', 'tests/pull-db.smoke.sh', 'tests/root-ssh-wrapper.smoke.sh', 'tests/root-ownership.smoke.sh', 'tests/fixtures/server.config.production.sh', 'tests/fixtures/server.config.staging.sh', 'tests/fixtures/fake-php.sh', 'tests/fixtures/fake-mysqldump.sh', 'tests/fixtures/fake-mysql.sh', 'tests/fixtures/fake-df.sh')) {
 			& $shPath -n (Join-Path $repoRoot $file)
 			$LASTEXITCODE | Should Be 0
 		}
@@ -55,6 +55,17 @@ Describe 'Remote POSIX safety' {
 			$output = & $shPath -c 'PATH=/usr/bin:/bin; export PATH; sh ./tests/database-rollback.smoke.sh' 2>&1
 			$LASTEXITCODE | Should Be 0
 			$output -join "`n" | Should Match 'Database rollback after failed import: OK'
+		} finally {
+			Pop-Location
+		}
+	}
+
+	It 'exports the active pull database through WP-CLI' {
+		Push-Location $repoRoot
+		try {
+			$output = & $shPath -c 'PATH=/usr/bin:/bin; export PATH; sh ./tests/pull-db.smoke.sh' 2>&1
+			$LASTEXITCODE | Should Be 0
+			$output -join "`n" | Should Match 'Pull DB export through WP-CLI: OK'
 		} finally {
 			Pop-Location
 		}

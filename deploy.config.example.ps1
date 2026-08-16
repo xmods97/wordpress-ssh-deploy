@@ -10,14 +10,14 @@ $DeployConfig = @{
 
 	# The deploy tool lives in its own repository. Site code and runtime artifacts are
 	# isolated per profile and never stored in this repository.
-	CodeRepositoryPath = 'C:\Sites\example-site-code'
-	WorkRoot           = 'C:\Users\you\AppData\Local\wordpress-ssh-deploy\example-site'
+	CodeRepositoryPath = 'D:\wordpress-sites\example-site-code'
+	WorkRoot           = 'D:\wordpress-ssh-deploy\sites\example-site'
 	GitRemoteName      = 'origin'
 	GitBranch          = 'main'
 
-	LocalWpPath      = 'C:\Sites\example.test'
+	LocalWpPath      = 'D:\laragon\www\example.test'
 	LocalUrl         = 'http://example.test'
-	LocalUploadsPath = 'C:\Sites\example.test\wp-content\uploads'
+	LocalUploadsPath = 'D:\laragon\www\example.test\wp-content\uploads'
 
 	LocalDbName     = 'wordpress'
 	LocalDbUser     = 'root'
@@ -84,7 +84,7 @@ $DeployConfig = @{
 # Pull downloads to a workspace first. A separately confirmed apply backs up and
 # replaces this profile's one working local database (LocalDbName) and paths.
 # Local backups must be outside LocalWpPath.
-LocalBackupDirectory = 'C:\Sites\backups\example.test'
+	LocalBackupDirectory = 'D:\wordpress-ssh-deploy\sites\example-site\backups'
 
 	# WordPress-relative paths that pull-files may bring down. Everything else is refused.
 	AllowedPullPaths = @(
@@ -110,6 +110,7 @@ CorePolicy = 'preserve-local-core'
 
 	# Keep true. When true, pull-db and pull-full refuse to run without -Confirm.
 	RequirePullConfirmation = $true
+	# Exact number of active tables expected from the remote pull.
 	ExpectedPullDbTableCount = 12
 	KeepLocalBackups = 5
 	KeepBackupDays = 30
@@ -121,7 +122,7 @@ CorePolicy = 'preserve-local-core'
 
 	# Local tools used to verify and import a pulled database.
 	LocalPhpPath   = 'C:\path\to\php.exe'
-	LocalWpCliPath = 'C:\path\to\wp-cli.phar'
+	LocalWpCliPath = 'D:\wordpress-ssh-deploy\tools\wp-cli.phar'
 	MysqlPath      = 'C:\path\to\mysql.exe'
 }
 

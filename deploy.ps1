@@ -12,7 +12,8 @@ param(
 	[switch] $ConfirmProtected,
 	[switch] $AllowProductionPull,
 	[string] $PullWorkspace = '',
-	[string] $ConfigPath = ''
+	[string] $ConfigPath = '',
+	[string] $ProfilesDirectory = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -116,7 +117,7 @@ function Assert-PreservedLocalCore {
 $toolRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $modulePath = Join-Path $toolRoot 'src\WordPressSshDeploy.psm1'
 $configPath = if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
-	Join-Path $toolRoot 'deploy.config.ps1'
+	throw 'Explicit -ConfigPath is required. Select a site profile through menu.ps1 or pass the profile path directly.'
 } elseif ([IO.Path]::IsPathRooted($ConfigPath)) {
 	[IO.Path]::GetFullPath($ConfigPath)
 } else {
@@ -132,6 +133,9 @@ Import-Module $modulePath -Force
 . $configPath
 if (-not $DeployConfig) { throw 'deploy.config.ps1 must define $DeployConfig.' }
 Assert-DeployConfiguration -Configuration $DeployConfig
+$profileDirectory = Split-Path -Parent $configPath
+$canonicalProfilesDirectory = if ([string]::IsNullOrWhiteSpace($ProfilesDirectory)) { $profileDirectory } else { [IO.Path]::GetFullPath($ProfilesDirectory) }
+Assert-ProfileIsolation -Configuration $DeployConfig -ProfilePath $configPath -ProfilesDirectory $profileDirectory -CanonicalProfilesDirectory $canonicalProfilesDirectory
 $codeRepositoryRoot = [IO.Path]::GetFullPath([string] $DeployConfig.CodeRepositoryPath).TrimEnd('\', '/')
 $workRoot = [IO.Path]::GetFullPath([string] $DeployConfig.WorkRoot).TrimEnd('\', '/')
 $siteId = Get-ProfileSiteId $DeployConfig
@@ -234,7 +238,7 @@ if ($isPull) {
 			$null = Assert-GzipFile $plan.LocalDbArchive
 			Expand-GzipFile $plan.LocalDbArchive $plan.LocalDbSql
 			Assert-SqlDumpFile $plan.LocalDbSql
-			$null = Assert-SqlDumpTableSet $plan.LocalDbSql $plan.ExpectedTablePrefix $plan.ExpectedTableCount
+		$null = Assert-SqlDumpTableSet $plan.LocalDbSql $plan.ExpectedTablePrefix $plan.ExpectedTableCount -MinimumTableCount $plan.MinimumTableCount
 			Write-Ok "Database export verified: $($plan.LocalDbSql)"
 		}
 
@@ -331,7 +335,7 @@ if ($isApplyPull) {
 		}
 
 		Assert-SqlDumpFile $plan.DatabaseSql
-		$null = Assert-SqlDumpTableSet $plan.DatabaseSql $plan.ExpectedTablePrefix $plan.ExpectedTableCount
+		$null = Assert-SqlDumpTableSet $plan.DatabaseSql $plan.ExpectedTablePrefix $plan.ExpectedTableCount -MinimumTableCount $plan.MinimumTableCount
 		$localPrefix = ([string] (Invoke-LocalWpCli @('config', 'get', 'table_prefix', '--type=variable'))).Trim()
 		if (-not [string]::Equals($localPrefix, [string] $DeployConfig.ExpectedDbTablePrefix, [StringComparison]::Ordinal)) {
 			throw "Local WordPress table prefix does not match ExpectedDbTablePrefix: $localPrefix"

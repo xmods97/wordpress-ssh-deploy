@@ -2,6 +2,9 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Import-Module (Join-Path $repoRoot 'src\WordPressSshDeploy.psm1') -Force
 . (Join-Path $repoRoot 'deploy.config.example.ps1')
 $validConfiguration = $DeployConfig
+function Get-ErrorMessage([scriptblock] $Action) {
+	try { & $Action; return '' } catch { return $_.Exception.Message }
+}
 
 Describe 'Deploy configuration validation' {
 	It 'accepts the public example' {
@@ -141,9 +144,160 @@ Describe 'Deploy configuration validation' {
 				Should Match 'ExpectedDbTableCount must be an integer greater than or equal to 1'
 		}
 	}
+
+	It 'detects collisions across private site profiles' {
+		$root = Join-Path ([IO.Path]::GetTempPath()) ('profile-isolation-' + [guid]::NewGuid().ToString('N'))
+		New-Item -ItemType Directory -Path $root | Out-Null
+		$other = Join-Path $root 'other.ps1'
+		try {
+			Set-Content -LiteralPath $other -Encoding UTF8 -Value '$DeployConfig = @{ SiteId = ''example-site''; CodeRepositoryPath = ''D:\\sites\\example''; WorkRoot = ''D:\\wordpress-ssh-deploy\\sites\\example''; LocalWpPath = ''D:\\laragon\\www\\example''; LocalDbName = ''wordpress''; RemoteWpPath = ''/srv/www/example''; ExpectedRemoteDbName = ''db_example''; RemoteRepoPath = ''/srv/repo/example''; RemoteTmpPath = ''/srv/tmp/example''; RemoteBackups = ''/srv/backups/example''; RemoteRunnerPath = ''/usr/local/libexec/example.sh'' }'
+			$errors = @(Get-ProfileIsolationErrors $validConfiguration $null $root)
+			($errors -join "`n") | Should Match 'Profile isolation collision: SiteId'
+			($errors -join "`n") | Should Match 'Profile isolation collision: LocalDbName'
+		} finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+	}
+
+	It 'accepts a distinct private site profile' {
+		$root = Join-Path ([IO.Path]::GetTempPath()) ('profile-isolation-' + [guid]::NewGuid().ToString('N'))
+		New-Item -ItemType Directory -Path $root | Out-Null
+		$other = Join-Path $root 'other.ps1'
+		try {
+			Set-Content -LiteralPath $other -Encoding UTF8 -Value '$DeployConfig = @{ SiteId = ''other-site''; CodeRepositoryPath = ''D:\\sites\\other''; WorkRoot = ''D:\\wordpress-ssh-deploy\\sites\\other''; LocalWpPath = ''D:\\laragon\\www\\other''; LocalDbName = ''wordpress_other''; RemoteWpPath = ''/srv/www/other''; ExpectedRemoteDbName = ''db_other''; RemoteRepoPath = ''/srv/repo/other''; RemoteTmpPath = ''/srv/tmp/other''; RemoteBackups = ''/srv/backups/other''; RemoteRunnerPath = ''/usr/local/libexec/other.sh'' }'
+			@(Get-ProfileIsolationErrors $validConfiguration $null $root).Count | Should Be 0
+		} finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+	}
+
+	It 'detects collisions when profiles are split across separate catalogs' {
+		$root = Join-Path ([IO.Path]::GetTempPath()) ('profile-isolation-split-' + [guid]::NewGuid().ToString('N'))
+		$selectedDirectory = Join-Path $root 'selected'
+		$otherDirectory = Join-Path $root 'other'
+		New-Item -ItemType Directory -Path $selectedDirectory, $otherDirectory | Out-Null
+		$selectedPath = Join-Path $selectedDirectory 'selected.ps1'
+		$otherPath = Join-Path $otherDirectory 'other.ps1'
+		try {
+			Set-Content -LiteralPath $selectedPath -Encoding UTF8 -Value '$DeployConfig = @{}'
+			Set-Content -LiteralPath $otherPath -Encoding UTF8 -Value '$DeployConfig = @{ SiteId = ''example-site''; CodeRepositoryPath = ''D:\\sites\\other''; WorkRoot = ''D:\\wordpress-ssh-deploy\\sites\\other''; LocalWpPath = ''D:\\laragon\\www\\other''; LocalDbName = ''wordpress_other''; RemoteWpPath = ''/srv/www/other''; ExpectedRemoteDbName = ''db_other''; RemoteRepoPath = ''/srv/repo/other''; RemoteTmpPath = ''/srv/tmp/other''; RemoteBackups = ''/srv/backups/other''; RemoteRunnerPath = ''/usr/local/libexec/other.sh'' }'
+			$selected = $validConfiguration.Clone()
+			$selected.SiteId = 'example-site'
+			$selected.WorkRoot = 'D:\wordpress-ssh-deploy\sites\other'
+			$errors = @(Get-ProfileIsolationErrors -Configuration $selected -ProfilePath $selectedPath -ProfilesDirectory $selectedDirectory -AdditionalProfilesDirectories @($otherDirectory))
+			($errors -join "`n") | Should Match 'Profile isolation collision: SiteId'
+			($errors -join "`n") | Should Match 'Profile isolation collision: WorkRoot'
+		} finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+	}
+
+	It 'rejects command-bearing files in a profile catalog without dot-sourcing them' {
+		$root = Join-Path ([IO.Path]::GetTempPath()) ('profile-script-safety-' + [guid]::NewGuid().ToString('N'))
+		New-Item -ItemType Directory -Path $root | Out-Null
+		$unsafe = Join-Path $root 'notes.ps1'
+		try {
+			Set-Content -LiteralPath $unsafe -Encoding UTF8 -Value 'Write-Output ''unexpected profile output''; $DeployConfig = @{ SiteId = ''unsafe'' }'
+			$errors = @(Get-ProfileIsolationErrors -Configuration $validConfiguration -ProfilesDirectory $root)
+			($errors -join "`n") | Should Match 'profile (?:must be data-only|must contain exactly one data-only)'
+			($errors -join "`n") | Should Not Match 'unexpected profile output'
+		} finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+	}
+
+	It 'does not execute redirections in profile files' {
+		$root = Join-Path ([IO.Path]::GetTempPath()) ('profile-redirection-safety-' + [guid]::NewGuid().ToString('N'))
+		New-Item -ItemType Directory -Path $root | Out-Null
+		$unsafe = Join-Path $root 'notes.ps1'
+		$sideEffect = Join-Path $root 'profile-side-effect.txt'
+		try {
+			Set-Content -LiteralPath $unsafe -Encoding UTF8 -Value "('unexpected profile output' > '$sideEffect'); `$DeployConfig = @{ SiteId = 'unsafe-redirection' }"
+			$errors = @(Get-ProfileIsolationErrors -Configuration $validConfiguration -ProfilesDirectory $root)
+			($errors -join "`n") | Should Match 'exactly one data-only'
+			Test-Path -LiteralPath $sideEffect | Should Be $false
+		} finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+	}
+
+	It 'does not execute environment assignments in profile files' {
+		$root = Join-Path ([IO.Path]::GetTempPath()) ('profile-environment-safety-' + [guid]::NewGuid().ToString('N'))
+		New-Item -ItemType Directory -Path $root | Out-Null
+		$unsafe = Join-Path $root 'notes.ps1'
+		$variableName = 'WORDPRESS_SSH_DEPLOY_PROFILE_GUARD_MUTATION'
+		$previous = [Environment]::GetEnvironmentVariable($variableName, 'Process')
+		try {
+			[Environment]::SetEnvironmentVariable($variableName, $null, 'Process')
+			Set-Content -LiteralPath $unsafe -Encoding UTF8 -Value "`$env:$variableName = 'changed'; `$DeployConfig = @{ SiteId = 'unsafe-environment' }"
+			$errors = @(Get-ProfileIsolationErrors -Configuration $validConfiguration -ProfilesDirectory $root)
+			($errors -join "`n") | Should Match 'exactly one data-only'
+			[Environment]::GetEnvironmentVariable($variableName, 'Process') | Should BeNullOrEmpty
+		} finally {
+			[Environment]::SetEnvironmentVariable($variableName, $previous, 'Process')
+			Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+		}
+	}
+
+	It 'loads literal profile values supported by Windows PowerShell 5.1' {
+		$root = Join-Path ([IO.Path]::GetTempPath()) ('profile-safe-values-' + [guid]::NewGuid().ToString('N'))
+		New-Item -ItemType Directory -Path $root | Out-Null
+		$profilePath = Join-Path $root 'literal.ps1'
+		try {
+			Set-Content -LiteralPath $profilePath -Encoding UTF8 -Value @'
+$DeployConfig = @{
+		SiteId = 'safe-literal'
+		Flags = @($true, $false)
+		Nested = @{ Key = 'value' }
+		TableCount = 12
+}
+'@
+		@(Get-ProfileIsolationErrors -Configuration $validConfiguration -ProfilesDirectory $root) | Should BeNullOrEmpty
+		} finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+	}
+
+	It 'rejects a profile with no executable end block' {
+		$root = Join-Path ([IO.Path]::GetTempPath()) ('profile-no-end-block-' + [guid]::NewGuid().ToString('N'))
+		New-Item -ItemType Directory -Path $root | Out-Null
+		try {
+			Set-Content -LiteralPath (Join-Path $root 'begin-only.ps1') -Encoding UTF8 -Value 'begin { $DeployConfig = @{} }'
+			$errors = @(Get-ProfileIsolationErrors -Configuration $validConfiguration -ProfilesDirectory $root)
+			($errors -join "`n") | Should Match 'no executable end block'
+		} finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+	}
+
+	It 'rejects dynamic profile expressions before safe evaluation' {
+		$root = Join-Path ([IO.Path]::GetTempPath()) ('profile-dynamic-expression-' + [guid]::NewGuid().ToString('N'))
+		New-Item -ItemType Directory -Path $root | Out-Null
+		try {
+			Set-Content -LiteralPath (Join-Path $root 'dynamic.ps1') -Encoding UTF8 -Value "$`DeployConfig = @{ SiteId = 'a' + 'b' }"
+			$errors = @(Get-ProfileIsolationErrors -Configuration $validConfiguration -ProfilesDirectory $root)
+			($errors -join "`n") | Should Match 'only literal data values'
+		} finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+	}
+
+	It 'rejects type conversions in profile values' {
+		$root = Join-Path ([IO.Path]::GetTempPath()) ('profile-type-expression-' + [guid]::NewGuid().ToString('N'))
+		New-Item -ItemType Directory -Path $root | Out-Null
+		try {
+			Set-Content -LiteralPath (Join-Path $root 'type.ps1') -Encoding UTF8 -Value "$`DeployConfig = @{ SiteId = [string]'value' }"
+			$errors = @(Get-ProfileIsolationErrors -Configuration $validConfiguration -ProfilesDirectory $root)
+			($errors -join "`n") | Should Match 'only literal data values'
+		} finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+	}
+
+	It 'rejects method invocations in profile values' {
+		$root = Join-Path ([IO.Path]::GetTempPath()) ('profile-method-expression-' + [guid]::NewGuid().ToString('N'))
+		New-Item -ItemType Directory -Path $root | Out-Null
+		try {
+			Set-Content -LiteralPath (Join-Path $root 'method.ps1') -Encoding UTF8 -Value "$`DeployConfig = @{ SiteId = 'value'.ToUpper() }"
+			$errors = @(Get-ProfileIsolationErrors -Configuration $validConfiguration -ProfilesDirectory $root)
+			($errors -join "`n") | Should Match 'no method invocations'
+		} finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+	}
 }
 
 Describe 'SQL table-prefix validation' {
+	It 'allows pull validation to use a minimum sanity threshold without a fixed count' {
+		$file = [IO.Path]::GetTempFileName()
+		try {
+			$sql = @('-- MySQL dump 10.13') + (1..6 | ForEach-Object { "CREATE TABLE ``wp_table$_`` (id int);" })
+			$sql = $sql -join "`n"
+			[IO.File]::WriteAllText($file, $sql, (New-Object Text.UTF8Encoding($false)))
+			{ Assert-SqlDumpTableSet $file 'wp_' 0 -MinimumTableCount 5 } | Should Not Throw
+			(Get-ErrorMessage { Assert-SqlDumpTableSet $file 'wp_' 0 -MinimumTableCount 7 }) | Should Match 'too few tables'
+		} finally { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
+	}
 	It 'accepts SQL that creates only the expected prefix' {
 		$file = [IO.Path]::GetTempFileName()
 		try {

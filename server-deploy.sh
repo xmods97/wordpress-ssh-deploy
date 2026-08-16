@@ -641,12 +641,7 @@ backup_database() {
 }
 
 backup_database_for_pull() {
-	require_cmd mysqldump
 	require_cmd awk
-	name="$(wp_config_value DB_NAME)"
-	user="$(wp_config_value DB_USER)"
-	pass="$(wp_config_value DB_PASSWORD)"
-	database_connection "$(wp_config_value DB_HOST)"
 	active_tables_raw="$(wp_cli db tables --all-tables-with-prefix --format=csv)" || fail "Could not determine active WordPress tables"
 	active_tables="$(printf '%s\n' "$active_tables_raw" | awk -F',' '{ for (i = 1; i <= NF; i++) { gsub(/\r/, "", $i); if ($i != "" && $i != "table" && $i != "name" && $i != "table_name") print $i } }')"
 	[ -n "$active_tables" ] || fail "Active WordPress table list is empty"
@@ -665,13 +660,14 @@ backup_database_for_pull() {
 			*) fail "Active table list contains a table outside server policy" ;;
 		esac
 	done
+	table_list=''
+	for table in "$@"; do
+		if [ -n "$table_list" ]; then table_list="$table_list,"; fi
+		table_list="$table_list$table"
+	done
 	mkdir -p "$BACKUP_DIR"
 	BACKUP_FILE="$BACKUP_DIR/db-$timestamp.sql"
-	if [ -n "$DB_PORT_VALUE" ]; then
-		MYSQL_PWD="$pass" mysqldump --host="$DB_HOST_VALUE" --port="$DB_PORT_VALUE" --user="$user" --single-transaction --quick --no-tablespaces --default-character-set=utf8mb4 "$name" "$@" > "$BACKUP_FILE"
-	else
-		MYSQL_PWD="$pass" mysqldump --host="$DB_HOST_VALUE" --user="$user" --single-transaction --quick --no-tablespaces --default-character-set=utf8mb4 "$name" "$@" > "$BACKUP_FILE"
-	fi
+	wp_cli db export "$BACKUP_FILE" --add-drop-table --tables="$table_list" || fail "Could not export active WordPress tables"
 	assert_sql_dump "$BACKUP_FILE"
 }
 

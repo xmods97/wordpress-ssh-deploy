@@ -469,14 +469,18 @@ function Assert-SqlDumpTableSet {
 	param(
 		[Parameter(Mandatory = $true)] [string] $Path,
 		[Parameter(Mandatory = $true)] [string] $ExpectedPrefix,
-		[Parameter(Mandatory = $true)] [int] $ExpectedTableCount
+		[int] $ExpectedTableCount = 0,
+		[ValidateRange(1, 1048576)] [int] $MinimumTableCount = 1
 	)
 
 	if ($ExpectedPrefix -notmatch '^[A-Za-z0-9_]+$') {
 		throw 'Expected SQL table prefix contains unsupported characters.'
 	}
-	if ($ExpectedTableCount -lt 1) {
-		throw 'Expected SQL table count must be positive.'
+	if ($ExpectedTableCount -lt 0) {
+		throw 'Expected SQL table count cannot be negative.'
+	}
+	if ($ExpectedTableCount -eq 0 -and $MinimumTableCount -lt 1) {
+		throw 'Minimum SQL table count must be positive when no exact count is configured.'
 	}
 
 	Assert-SqlDumpFile $Path
@@ -484,8 +488,11 @@ function Assert-SqlDumpTableSet {
 	if ($names.Count -eq 0) {
 		throw 'SQL dump contains no CREATE TABLE statements for table-set validation.'
 	}
-	if ($names.Count -ne $ExpectedTableCount) {
+	if ($ExpectedTableCount -gt 0 -and $names.Count -ne $ExpectedTableCount) {
 		throw "SQL dump table count mismatch: expected $ExpectedTableCount, found $($names.Count)."
+	}
+	if ($ExpectedTableCount -eq 0 -and $names.Count -lt $MinimumTableCount) {
+		throw "SQL dump contains too few tables: minimum $MinimumTableCount, found $($names.Count)."
 	}
 	# Ordinal comparison rejects a foreign prefix and a case-mismatched one alike, so a
 	# mixed dump can never reach the import step.
@@ -970,6 +977,185 @@ function Get-ProfileSiteId {
 	return 'default-site'
 }
 
+function Get-ProfileScriptLoadResult {
+	[CmdletBinding()]
+	param([Parameter(Mandatory = $true)] [string] $ProfilePath)
+
+	$result = [pscustomobject] @{ Configuration = $null; Error = '' }
+	$tokens = $null
+	$parseErrors = $null
+	$ast = [System.Management.Automation.Language.Parser]::ParseFile($ProfilePath, [ref] $tokens, [ref] $parseErrors)
+	if ($parseErrors.Count -gt 0) {
+		$result.Error = 'profile has PowerShell parse errors and was not loaded'
+		return $result
+	}
+	if ($null -eq $ast.EndBlock) {
+		$result.Error = 'profile has no executable end block and was not loaded'
+		return $result
+	}
+	$statements = @($ast.EndBlock.Statements)
+	if ($statements.Count -ne 1 -or $statements[0] -isnot [System.Management.Automation.Language.AssignmentStatementAst]) {
+		$result.Error = 'profile must contain exactly one data-only $DeployConfig assignment'
+		return $result
+	}
+	$commands = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true))
+	if ($commands.Count -gt 0) {
+		$result.Error = 'profile must be data-only and contain no command invocations'
+		return $result
+	}
+	$methodCalls = @($ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true))
+	if ($methodCalls.Count -gt 0) {
+		$result.Error = 'profile must be data-only and contain no method invocations'
+		return $result
+	}
+	$assignment = $statements[0]
+	if ($assignment.Left -isnot [System.Management.Automation.Language.VariableExpressionAst] -or
+		$assignment.Left.VariablePath.UserPath -ine 'DeployConfig') {
+		$result.Error = 'profile must assign a $DeployConfig dictionary'
+		return $result
+	}
+	if ($assignment.Right -isnot [System.Management.Automation.Language.CommandExpressionAst] -or
+		$assignment.Right.Expression -isnot [System.Management.Automation.Language.HashtableAst]) {
+		$result.Error = 'profile must assign $DeployConfig directly from a hashtable literal'
+		return $result
+	}
+	$unsupportedExpressions = @($assignment.Right.Expression.FindAll({
+		param($node)
+		if ($node -is [System.Management.Automation.Language.VariableExpressionAst]) {
+			return $node.VariablePath.UserPath -notin @('true', 'false', 'null')
+		}
+		return $node -isnot [System.Management.Automation.Language.HashtableAst] -and
+			$node -isnot [System.Management.Automation.Language.ArrayExpressionAst] -and
+			$node -isnot [System.Management.Automation.Language.ArrayLiteralAst] -and
+			$node -isnot [System.Management.Automation.Language.StatementBlockAst] -and
+			$node -isnot [System.Management.Automation.Language.PipelineAst] -and
+			$node -isnot [System.Management.Automation.Language.CommandExpressionAst] -and
+			$node -isnot [System.Management.Automation.Language.StringConstantExpressionAst] -and
+			$node -isnot [System.Management.Automation.Language.ConstantExpressionAst]
+	}, $true))
+	if ($unsupportedExpressions.Count -gt 0) {
+		$result.Error = 'profile must contain only literal data values (variables, expressions, casts, and subexpressions are not allowed)'
+		return $result
+	}
+	try {
+		$loaded = $assignment.Right.Expression.SafeGetValue()
+	} catch {
+		$result.Error = "profile value could not be safely evaluated ($($_.Exception.GetType().Name))"
+		return $result
+	}
+	if ($loaded -isnot [System.Collections.IDictionary]) {
+		$result.Error = 'profile must assign a $DeployConfig dictionary'
+		return $result
+	}
+	$result.Configuration = $loaded
+	return $result
+}
+
+function Get-ProfileIsolationErrors {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory = $true)] [System.Collections.IDictionary] $Configuration,
+		[string] $ProfilePath = '',
+		[string] $ProfilesDirectory = '',
+		[string[]] $AdditionalProfilesDirectories = @(),
+		[string] $CanonicalProfilesDirectory = ''
+	)
+
+	$errors = New-Object 'System.Collections.Generic.List[string]'
+	$profiles = New-Object 'System.Collections.Generic.List[object]'
+	$profiles.Add([pscustomobject] @{ Path = $ProfilePath; Configuration = $Configuration })
+	$profileDirectories = New-Object 'System.Collections.Generic.List[string]'
+	$profileDirectoryCandidates = New-Object 'System.Collections.Generic.List[object]'
+	$profileDirectoryCandidates.Add($ProfilesDirectory)
+	foreach ($directory in @($AdditionalProfilesDirectories)) { $profileDirectoryCandidates.Add($directory) }
+	if (-not [string]::IsNullOrWhiteSpace($ProfilePath)) {
+		$profileDirectoryCandidates.Add((Split-Path -Parent ([IO.Path]::GetFullPath($ProfilePath))))
+	}
+	$toolRootDirectory = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+	if (-not [string]::IsNullOrWhiteSpace($CanonicalProfilesDirectory)) {
+		$profileDirectoryCandidates.Add($toolRootDirectory)
+		$profileDirectoryCandidates.Add($CanonicalProfilesDirectory)
+	}
+	foreach ($directory in $profileDirectoryCandidates) {
+		if ([string]::IsNullOrWhiteSpace([string] $directory)) { continue }
+		$fullDirectory = [IO.Path]::GetFullPath([string] $directory)
+		if (-not ($profileDirectories | Where-Object { $_.Equals($fullDirectory, [StringComparison]::OrdinalIgnoreCase) })) {
+			$profileDirectories.Add($fullDirectory)
+		}
+	}
+	$seenProfilePaths = @{}
+	foreach ($directory in $profileDirectories) {
+		if (-not (Test-Path -LiteralPath $directory -PathType Container)) { continue }
+		foreach ($file in @(Get-ChildItem -LiteralPath $directory -Filter '*.ps1' -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch '\.example\.ps1$' })) {
+			$filePath = [IO.Path]::GetFullPath($file.FullName)
+			if ($directory.Equals($toolRootDirectory, [StringComparison]::OrdinalIgnoreCase) -and $file.Name -notmatch '^deploy\.config(?:\..+)?\.ps1$') { continue }
+			if ($seenProfilePaths.ContainsKey($filePath)) { continue }
+			$seenProfilePaths[$filePath] = $true
+			if (-not [string]::IsNullOrWhiteSpace($ProfilePath) -and
+				$filePath.Equals([IO.Path]::GetFullPath($ProfilePath), [StringComparison]::OrdinalIgnoreCase)) { continue }
+			try {
+				$profileResult = Get-ProfileScriptLoadResult -ProfilePath $filePath
+				if (-not [string]::IsNullOrWhiteSpace([string] $profileResult.Error)) {
+					$errors.Add("Could not load profile '$filePath': $($profileResult.Error)")
+					continue
+				}
+				$loaded = $profileResult.Configuration
+				if ($loaded -is [System.Collections.IDictionary]) {
+					$profiles.Add([pscustomobject] @{ Path = $filePath; Configuration = $loaded })
+				}
+			} catch {
+				$errors.Add("Could not load profile '$filePath': $($_.Exception.Message)")
+			}
+		}
+	}
+
+	$identityFields = @(
+		@{ Name = 'SiteId'; Kind = 'value' },
+		@{ Name = 'CodeRepositoryPath'; Kind = 'local-path' },
+		@{ Name = 'WorkRoot'; Kind = 'local-path' },
+		@{ Name = 'LocalWpPath'; Kind = 'local-path' },
+		@{ Name = 'LocalDbName'; Kind = 'value' },
+		@{ Name = 'RemoteWpPath'; Kind = 'remote-path' },
+		@{ Name = 'ExpectedRemoteDbName'; Kind = 'value' },
+		@{ Name = 'RemoteRepoPath'; Kind = 'remote-path' },
+		@{ Name = 'RemoteTmpPath'; Kind = 'remote-path' },
+		@{ Name = 'RemoteBackups'; Kind = 'remote-path' },
+		@{ Name = 'RemoteRunnerPath'; Kind = 'remote-path' }
+	)
+	$seen = @{}
+	foreach ($profileRecord in $profiles) {
+		$config = $profileRecord.Configuration
+		$profileName = if ([string]::IsNullOrWhiteSpace([string] $profileRecord.Path)) { '<selected profile>' } else { [IO.Path]::GetFileName($profileRecord.Path) }
+		foreach ($field in $identityFields) {
+			if (-not $config.Contains($field.Name) -or [string]::IsNullOrWhiteSpace([string] $config[$field.Name])) { continue }
+			$value = [string] $config[$field.Name]
+			if ($field.Kind -eq 'local-path') { $value = [IO.Path]::GetFullPath($value).TrimEnd([char]'\', [char]'/') }
+			elseif ($field.Kind -eq 'remote-path') { $value = $value.TrimEnd([char]'/') }
+			$key = "$($field.Name)|$($value.ToLowerInvariant())"
+			if ($seen.ContainsKey($key) -and $seen[$key].Path -ne $profileRecord.Path) {
+				$other = $seen[$key]
+				$errors.Add("Profile isolation collision: $($field.Name) '$value' is shared by '$($other.Name)' and '$profileName'.")
+			} else {
+				$seen[$key] = [pscustomobject] @{ Name = $profileName; Path = $profileRecord.Path }
+			}
+		}
+	}
+	return $errors.ToArray()
+}
+
+function Assert-ProfileIsolation {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory = $true)] [System.Collections.IDictionary] $Configuration,
+		[string] $ProfilePath = '',
+		[string] $ProfilesDirectory = '',
+		[string[]] $AdditionalProfilesDirectories = @(),
+		[string] $CanonicalProfilesDirectory = ''
+	)
+	$errors = @(Get-ProfileIsolationErrors -Configuration $Configuration -ProfilePath $ProfilePath -ProfilesDirectory $ProfilesDirectory -AdditionalProfilesDirectories $AdditionalProfilesDirectories -CanonicalProfilesDirectory $CanonicalProfilesDirectory)
+	if ($errors.Count -gt 0) { throw ($errors -join "`n") }
+}
+
 function Get-PullPathSelection {
 	[CmdletBinding()]
 	param(
@@ -1096,6 +1282,7 @@ function New-PullManifest {
 		Stamp                 = [string] $Plan.Stamp
 		ExpectedDbTablePrefix = [string] $Plan.ExpectedTablePrefix
 		ExpectedDbTableCount  = [int] $Plan.ExpectedTableCount
+		MinimumDbTableCount   = [int] $Plan.MinimumTableCount
 		WordPressCoreVersion  = if ($Configuration.Contains('ExpectedWordPressCoreVersion')) { [string] $Configuration.ExpectedWordPressCoreVersion } else { '' }
 		PathClasses           = [ordered] @{
 			core    = if ($Configuration.Contains('CorePolicy')) { [string] $Configuration.CorePolicy } else { 'preserve-local-core' }
@@ -1128,6 +1315,7 @@ function Assert-PullManifest {
 	if ([string] $manifest.RemoteUrl -ne [string] $Configuration.RemoteUrl) { throw 'Pull manifest remote URL does not match the selected profile.' }
 	if ([string] $manifest.ExpectedDbTablePrefix -ne [string] $Configuration.ExpectedDbTablePrefix) { throw 'Pull manifest database prefix does not match the selected profile.' }
 	if ([int] $manifest.ExpectedDbTableCount -ne [int] $Plan.ExpectedTableCount) { throw 'Pull manifest database table count does not match the selected profile.' }
+	if ([int] $manifest.MinimumDbTableCount -ne [int] $Plan.MinimumTableCount) { throw 'Pull manifest database sanity threshold does not match the selected profile.' }
 	if ([string] $manifest.Mode -ne [string] $Plan.Mode -and [string] $Plan.Mode -ne 'apply-pull') { throw 'Pull manifest mode does not match the selected operation.' }
 	$manifestPaths = @($manifest.PullPaths | ForEach-Object { [string] $_ })
 	if (($manifestPaths -join "`n") -ne (@($Plan.PullPaths) -join "`n")) { throw 'Pull manifest path list does not match the selected profile.' }
@@ -1238,7 +1426,9 @@ function Add-PullConfigurationErrors {
 	if ($allowDestructive -and -not $requireConfirmation) {
 		Add-ValidationError $Errors 'AllowDestructiveLocalReplace requires RequirePullConfirmation to stay true.'
 	}
-	if ($Configuration.Contains('ExpectedPullDbTableCount') -and ($Configuration.ExpectedPullDbTableCount -isnot [int] -or $Configuration.ExpectedPullDbTableCount -lt 1)) {
+	if (-not $Configuration.Contains('ExpectedPullDbTableCount')) {
+		Add-ValidationError $Errors 'Missing configuration value while PullEnabled is true: ExpectedPullDbTableCount'
+	} elseif ($Configuration.ExpectedPullDbTableCount -isnot [int] -or $Configuration.ExpectedPullDbTableCount -lt 1) {
 		Add-ValidationError $Errors 'ExpectedPullDbTableCount must be an integer greater than or equal to 1.'
 	}
 	$corePolicy = if ($Configuration.Contains('CorePolicy')) { [string] $Configuration.CorePolicy } else { 'preserve-local-core' }
@@ -1351,7 +1541,8 @@ function New-PullPlan {
 		PullPathSource        = $pathSelection.Source
 		ExcludedPaths         = $excluded
 		ExpectedTablePrefix   = [string] $Configuration.ExpectedDbTablePrefix
-        ExpectedTableCount    = if ($Configuration.Contains('ExpectedPullDbTableCount')) { [int] $Configuration.ExpectedPullDbTableCount } else { [int] $Configuration.ExpectedDbTableCount }
+		ExpectedTableCount    = [int] $Configuration.ExpectedPullDbTableCount
+		MinimumTableCount     = [int] $Configuration.ExpectedPullDbTableCount
 	}
 }
 
@@ -1433,7 +1624,8 @@ function New-ApplyPullPlan {
 		LocalUrl         = [string] $Configuration.LocalUrl
 		PullPaths        = $applyPullPaths
 		ExpectedTablePrefix = [string] $Configuration.ExpectedDbTablePrefix
-		ExpectedTableCount  = if ($Configuration.Contains('ExpectedPullDbTableCount')) { [int] $Configuration.ExpectedPullDbTableCount } else { [int] $Configuration.ExpectedDbTableCount }
+		ExpectedTableCount  = [int] $Configuration.ExpectedPullDbTableCount
+		MinimumTableCount   = [int] $Configuration.ExpectedPullDbTableCount
 	}
 }
 
@@ -1821,4 +2013,4 @@ function Assert-DeployModeAllowed {
 	}
 }
 
-Export-ModuleMember -Function Get-DeployConfigurationErrors, Assert-DeployConfiguration, Assert-DeployModeAllowed, ConvertTo-ShSingleQuotedString, New-RemoteDeployCommand, Invoke-CheckedCommand, Invoke-CommandOutput, ConvertTo-WindowsProcessArgument, Invoke-NativeProcessWithFileInput, Restore-FileSwaps, Get-DirectoryContentSizeBytes, Assert-AvailableDiskSpace, Assert-SqlDumpFile, Assert-SqlDumpTablePrefix, Normalize-SqlDumpTablePrefix, Assert-ZipArchiveFile, Get-PullModeNames, Get-PullDenyList, Test-PullPathAllowed, Assert-PullAllowed, Assert-GzipFile, Expand-GzipFile, Get-SqlDumpTableNames, Assert-SqlDumpTableSet, Get-TarEntryList, Assert-PullArchiveEntries, New-RemotePullCommand, New-PullPlan, Get-PullSummaryLines, New-ApplyPullPlan, Assert-ApplyPullWorkspace, Get-ApplyPullSummaryLines, Expand-TarArchive, Get-ProfileSiteId, Get-PullPathSelection, Get-FileSha256Hex, Get-DirectorySha256Hex, Get-LocalBackupRetentionPlan, New-PullManifest, Assert-PullManifest
+Export-ModuleMember -Function Get-DeployConfigurationErrors, Assert-DeployConfiguration, Assert-DeployModeAllowed, ConvertTo-ShSingleQuotedString, New-RemoteDeployCommand, Invoke-CheckedCommand, Invoke-CommandOutput, ConvertTo-WindowsProcessArgument, Invoke-NativeProcessWithFileInput, Restore-FileSwaps, Get-DirectoryContentSizeBytes, Assert-AvailableDiskSpace, Assert-SqlDumpFile, Assert-SqlDumpTablePrefix, Normalize-SqlDumpTablePrefix, Assert-ZipArchiveFile, Get-PullModeNames, Get-PullDenyList, Test-PullPathAllowed, Assert-PullAllowed, Assert-GzipFile, Expand-GzipFile, Get-SqlDumpTableNames, Assert-SqlDumpTableSet, Get-TarEntryList, Assert-PullArchiveEntries, New-RemotePullCommand, New-PullPlan, Get-PullSummaryLines, New-ApplyPullPlan, Assert-ApplyPullWorkspace, Get-ApplyPullSummaryLines, Expand-TarArchive, Get-ProfileSiteId, Get-ProfileIsolationErrors, Assert-ProfileIsolation, Get-PullPathSelection, Get-FileSha256Hex, Get-DirectorySha256Hex, Get-LocalBackupRetentionPlan, New-PullManifest, Assert-PullManifest

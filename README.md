@@ -43,8 +43,8 @@ Remote Linux host:
 ## Setup
 
 1. Keep this tool in its own repository; do not copy it into a site's code repository.
-2. Copy `deploy.config.example.ps1` to a private site profile such as
-   `deploy.config.ps1` or `deploy.config.portfolio.ps1`.
+2. Copy `deploy.config.example.ps1` to a private site profile under
+   `<ProfilesDirectory>\` (for example, a private directory on the D: drive).
 3. Set a unique lowercase `SiteId`, `CodeRepositoryPath`, and `WorkRoot`.
    `CodeRepositoryPath` is the private Git repository for this site; `WorkRoot`
    stores pull workspaces, logs, and local deployment artifacts outside both repos.
@@ -57,8 +57,17 @@ Remote Linux host:
    `ExpectedRemoteDbName`, and `ExpectedDbTablePrefix` to the exact expected
    target values.
 7. Keep all private `deploy.config*.ps1` profiles private. They are excluded by
-   `.gitignore`. Select a profile with `-ConfigPath`; without it the script uses
-   `deploy.config.ps1`.
+   `.gitignore`. Select a profile explicitly with `-ConfigPath` or choose it in
+   `menu.ps1`; there is no implicit default profile. Pass the shared profile
+   catalog explicitly with `-ProfilesDirectory`, or set
+   `WORDPRESS_SSH_DEPLOY_PROFILES_DIRECTORY` for the menu. Isolation validation
+   scans that catalog and the tool root's `deploy.config*.ps1` files, so stale
+   copies cannot silently coexist with an active profile.
+   Profile files are strict data-only PowerShell files: they must contain exactly
+   one direct `$DeployConfig = @{ ... }` assignment. Values may only be literal
+   strings, numbers, booleans, null, arrays, or nested hashtables; variables,
+   expandable strings, casts, operators, subexpressions, commands, methods,
+   redirections, and multiple statements are rejected before evaluation.
 8. Clone the site's private code repository on the remote host.
 9. Create a protected runner directory outside the Git checkout, for example
    `/usr/local/libexec/wordpress-ssh-deploy/example-site/`.
@@ -77,7 +86,7 @@ Remote Linux host:
 13. Run a preflight before the first deployment.
 
 ```powershell
-.\deploy.ps1 -PreflightOnly
+.\deploy.ps1 -ConfigPath <ProfilesDirectory>\example-site.ps1 -PreflightOnly
 ```
 
 For a different site profile:
@@ -111,9 +120,18 @@ MinimumLocalFreeSpaceMB = 1024
 MinimumRemoteFreeSpaceMB = 1024
 ```
 
-`ExpectedDbTableCount` is the exact number of tables the local export must
-contain. It must be an integer of at least 1 and has no default: set it to the
-table count of the site being deployed.
+`ExpectedDbTableCount` is the exact number of tables for a push export.
+Pull-enabled profiles must also set `ExpectedPullDbTableCount` to the exact
+number of active tables expected from the remote site. A pull with any other
+count is rejected; a minimum table floor is never used as a substitute for the
+exact profile value.
+
+When upgrading an existing private profile, add the exact site-specific value
+`ExpectedPullDbTableCount` before setting `PullEnabled = $true`. The former
+`MinimumPullDbTableCount` setting is obsolete and is rejected; remove it rather
+than using it as a fallback. Run `onboard-site.ps1` after the edit to verify the
+profile before any pull. Private profiles are local-only and are never stored
+in this repository.
 
 The private server policy independently verifies the environment, URL,
 WordPress path, repository path, temporary path, backup path, database name,
@@ -180,8 +198,7 @@ additive and does not. `-Mirror` — a files pull that would delete local files
 the remote no longer has — is part of the contract but **is not implemented**
 and refuses to run even with `AllowDestructiveLocalReplace = $true`.
 
-On the way in, a pulled database must match `ExpectedPullDbTableCount` (or
-`ExpectedDbTableCount`) and
+On the way in, a pulled database must match `ExpectedPullDbTableCount` and
 `ExpectedDbTablePrefix` exactly; a file archive is rejected whole if any entry
 escapes the allowed paths, is a symlink, or matches the permanent deny list
 (`wp-config*`, `.git`, `.ssh`, `.env`, key material, caches, backups).
@@ -208,40 +225,44 @@ database before apply. The permanent deny list always wins. See
 - `menu.ps1` provides guarded status, verify, Git, pull, apply, and preflight
   actions. It intentionally does not expose `db` or `full` as one-click menu
   actions.
+- `onboard-site.ps1` performs a read-only local onboarding preflight. It checks
+  profile isolation and reports which operational paths are missing or still
+  outside `D:`; it never connects to a server or changes a database.
 
 ## Usage
 
 ```powershell
 # Default and safest operation: code only
-.\deploy.ps1
-.\deploy.ps1 -Mode code
+.\deploy.ps1 -ConfigPath <ProfilesDirectory>\example-site.ps1
+.\deploy.ps1 -ConfigPath <ProfilesDirectory>\example-site.ps1 -Mode code
 
 # Database and uploads on development/staging only
-.\deploy.ps1 -Mode db -SkipGit
+.\deploy.ps1 -ConfigPath <ProfilesDirectory>\example-site.ps1 -Mode db -SkipGit
 
 # Code and database on development/staging only, without uploads
-.\deploy.ps1 -Mode full -SkipUploads
+.\deploy.ps1 -ConfigPath <ProfilesDirectory>\example-site.ps1 -Mode full -SkipUploads
 
 # Pull staging -> local. Always start with a dry run: it changes nothing.
-.\deploy.ps1 -Mode pull-db -DryRun
-.\deploy.ps1 -Mode pull-files -DryRun
+.\deploy.ps1 -ConfigPath <ProfilesDirectory>\example-site.ps1 -Mode pull-db -DryRun
+.\deploy.ps1 -ConfigPath <ProfilesDirectory>\example-site.ps1 -Mode pull-files -DryRun
 
 # Additive files pull; working files are never replaced or deleted
-.\deploy.ps1 -Mode pull-files
+.\deploy.ps1 -ConfigPath <ProfilesDirectory>\example-site.ps1 -Mode pull-files
 
 # Database and full pull require an explicit confirmation
-.\deploy.ps1 -Mode pull-db -Confirm
-.\deploy.ps1 -Mode pull-full -Confirm
+.\deploy.ps1 -ConfigPath <ProfilesDirectory>\example-site.ps1 -Mode pull-db -Confirm
+.\deploy.ps1 -ConfigPath <ProfilesDirectory>\example-site.ps1 -Mode pull-full -Confirm
 
 # Activate a verified pull workspace locally after reviewing its contents.
-.\deploy.ps1 -Mode apply-pull -PullWorkspace <WorkRoot>\.pull\<SiteId>\<timestamp> -DryRun
-.\deploy.ps1 -Mode apply-pull -PullWorkspace <WorkRoot>\.pull\<SiteId>\<timestamp> -Confirm
+.\deploy.ps1 -ConfigPath D:\wordpress-ssh-deploy\profiles\example-site.ps1 -Mode apply-pull -PullWorkspace <WorkRoot>\.pull\<SiteId>\<timestamp> -DryRun
+.\deploy.ps1 -ConfigPath D:\wordpress-ssh-deploy\profiles\example-site.ps1 -Mode apply-pull -PullWorkspace <WorkRoot>\.pull\<SiteId>\<timestamp> -Confirm
 
 # Use the site repository, not the deploy-tool repository, for Git operations.
 .\site-git.ps1 -Action status -ConfigPath .\deploy.config.portfolio.ps1
 .\site-git.ps1 -Action commit -ConfigPath .\deploy.config.portfolio.ps1 -Message 'Homepage update' -ConfirmCommit
 .\site-git.ps1 -Action push -ConfigPath .\deploy.config.portfolio.ps1 -ConfirmPush
 .\backup-cleanup.ps1 -ConfigPath .\deploy.config.portfolio.ps1
+.\onboard-site.ps1 -ConfigPath <ProfilesDirectory>\example-site.ps1
 .\menu.ps1
 ```
 

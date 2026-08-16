@@ -5,17 +5,21 @@ param(
     [string] $ConfigPath = '',
     [string] $Message = '',
     [switch] $ConfirmCommit,
-    [switch] $ConfirmPush
+    [switch] $ConfirmPush,
+    [string] $ProfilesDirectory = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $toolRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $modulePath = Join-Path $toolRoot 'src\WordPressSshDeploy.psm1'
-$configFile = if ([string]::IsNullOrWhiteSpace($ConfigPath)) { Join-Path $toolRoot 'deploy.config.ps1' } elseif ([IO.Path]::IsPathRooted($ConfigPath)) { [IO.Path]::GetFullPath($ConfigPath) } else { [IO.Path]::GetFullPath((Join-Path $toolRoot $ConfigPath)) }
+$configFile = if ([string]::IsNullOrWhiteSpace($ConfigPath)) { throw 'Explicit -ConfigPath is required. Select a site profile through menu.ps1 or pass the profile path directly.' } elseif ([IO.Path]::IsPathRooted($ConfigPath)) { [IO.Path]::GetFullPath($ConfigPath) } else { [IO.Path]::GetFullPath((Join-Path $toolRoot $ConfigPath)) }
 Import-Module $modulePath -Force
 if (-not (Test-Path -LiteralPath $configFile -PathType Leaf)) { throw "Configuration file was not found: $configFile" }
 . $configFile
 Assert-DeployConfiguration $DeployConfig
+$profileDirectory = Split-Path -Parent $configFile
+$canonicalProfilesDirectory = if ([string]::IsNullOrWhiteSpace($ProfilesDirectory)) { $profileDirectory } else { [IO.Path]::GetFullPath($ProfilesDirectory) }
+Assert-ProfileIsolation -Configuration $DeployConfig -ProfilePath $configFile -ProfilesDirectory $profileDirectory -CanonicalProfilesDirectory $canonicalProfilesDirectory
 $repo = [IO.Path]::GetFullPath([string] $DeployConfig.CodeRepositoryPath)
 if (-not (Test-Path -LiteralPath $repo -PathType Container)) { throw "Site code repository was not found: $repo" }
 $gitArgs = @('-C', $repo)
