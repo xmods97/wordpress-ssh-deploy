@@ -10,7 +10,7 @@ TASK_LEAD: CODEX
 WORK_LOCK: CODEX
 WORKTREE: dedicated Codex worktree (local path intentionally omitted)
 BRANCH: codex/multisite-profile-isolation-p3-followup
-COMMIT: c219297 (working tree contains approved uncommitted local fix)
+COMMIT: f9a5198 (pushed to origin/codex/multisite-profile-isolation-p3-followup)
 
 ## Цель
 
@@ -32,4 +32,4 @@ COMMIT: c219297 (working tree contains approved uncommitted local fix)
 
 Проверки: полный Pester — 167/167, targeted `server.Tests.ps1` и `pull.Tests.ps1` — 99/99; smoke и shell syntax проходят под Laragon Git Bash; mutation-проверки ловят удаление root-флага и его ошибочную передачу non-root; `git diff --check` чист.
 
-Следующий шаг: commit и push этой утверждённой ветки, затем независимый read-only review. После review потребуется отдельное разрешение на reinstall runner и повтор production pull.
+Следующий шаг: независимый read-only review. После review потребуется отдельное разрешение на reinstall runner и повтор production pull.

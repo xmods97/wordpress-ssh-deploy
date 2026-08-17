@@ -842,3 +842,15 @@ Checks:
 
 Next:
 - Commit and push the approved branch, then stop for independent read-only review.
+
+2026-08-17 | WP-CLI-ROOT-PULL-FINALIZE-COMMITTED-PUSHED | CODEX | COMMITTED_PUSHED
+
+Result:
+- Committed as `f9a5198` and pushed to `origin/codex/multisite-profile-isolation-p3-followup`.
+
+Checks:
+- Full Pester: 167 passed, 0 failed; targeted server/pull tests: 99 passed, 0 failed.
+- Root/non-root smoke, shell syntax, mutation checks, and `git diff --check`: PASS.
+
+Next:
+- Independent read-only review; no VPS, SSH, database, pull, deploy, rollback, runner reinstall, or merge.

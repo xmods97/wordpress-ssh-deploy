@@ -574,7 +574,7 @@ TASK_NAME: Close round-two independent review findings for root UID detection, o
 DOMAIN: DEPLOYMENT
 TASK_LEAD: CODEX
 REVIEWER: CLAUDE
-STATUS: READY_TO_COMMIT
+STATUS: COMMITTED_PUSHED
 
 BRANCH: main
 WORKTREE: dedicated Codex worktree (local path intentionally omitted)
@@ -1630,6 +1630,7 @@ STATUS: READY_FOR_REVIEW
 BRANCH: codex/multisite-profile-isolation-p3-followup
 WORKTREE: dedicated Codex worktree (local path intentionally omitted)
 BASE_COMMIT: c219297
+COMMIT: f9a5198
 WORK_LOCK: CODEX
 
 CRITICAL: YES
@@ -1663,4 +1664,4 @@ CHECKS:
 - No VPS, SSH, database, pull, deploy, rollback, runner reinstall, commit, push, or merge was performed.
 
 NEXT:
-- Commit and push this approved branch, then stop for independent read-only review.
+- Independent read-only review; runner reinstall and production pull retry require a separate approval.
