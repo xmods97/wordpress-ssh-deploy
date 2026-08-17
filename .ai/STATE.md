@@ -1661,7 +1661,7 @@ CHECKS:
 - Root smoke and shell syntax pass under Laragon Git Bash.
 - `git diff --check`: PASS.
 - Mutation checks: removing the root flag fails; always passing the root flag fails the non-root case.
-- No VPS, SSH, database, pull, deploy, rollback, runner reinstall, commit, push, or merge was performed.
+- No VPS, SSH, database, pull, deploy, rollback, runner reinstall, or merge was performed; the approved implementation and metadata checkpoints were committed and pushed.
 
 NEXT:
 - Independent read-only review; runner reinstall and production pull retry require a separate approval.

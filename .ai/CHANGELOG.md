@@ -854,3 +854,15 @@ Checks:
 
 Next:
 - Independent read-only review; no VPS, SSH, database, pull, deploy, rollback, runner reinstall, or merge.
+
+2026-08-17 | WP-CLI-ROOT-PULL-REVIEW-METADATA-FIX | CODEX | READY_TO_COMMIT
+
+Result:
+- Corrected the current STATE entry so it no longer claims that commit and push were not performed.
+
+Checks:
+- Only current metadata was changed; prior CHANGELOG entries remain append-only.
+- No code, VPS, SSH, database, pull, deploy, rollback, runner reinstall, or merge was performed.
+
+Next:
+- Commit and push this metadata-only correction, then continue with the separate PR or runner-reinstall decision.
