@@ -135,7 +135,13 @@ assert_temp_file() {
 	esac
 }
 
-wp_cli() { "$PHP_BIN" "$WP_CLI_BIN" --path="$WP_DIR" "$@"; }
+wp_cli() {
+	if [ "${effective_uid:-}" = 0 ]; then
+		"$PHP_BIN" "$WP_CLI_BIN" --allow-root --path="$WP_DIR" "$@"
+	else
+		"$PHP_BIN" "$WP_CLI_BIN" --path="$WP_DIR" "$@"
+	fi
+}
 wp_config_value() { wp_cli config get "$1" --type=constant; }
 wp_config_variable() { wp_cli config get "$1" --type=variable; }
 

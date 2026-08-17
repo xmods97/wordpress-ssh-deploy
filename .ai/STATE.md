@@ -27,7 +27,7 @@ DEPLOYMENT_LEAD: INHERIT
 
 ## ACTIVE TASK INDEX
 
-ACTIVE_TASK_IDS: MULTISITE-PROFILE-ISOLATION-PR-FIXES
+ACTIVE_TASK_IDS: WP-CLI-ROOT-PULL-FIX-REVIEW-FOLLOWUP
 
 
 
@@ -574,7 +574,7 @@ TASK_NAME: Close round-two independent review findings for root UID detection, o
 DOMAIN: DEPLOYMENT
 TASK_LEAD: CODEX
 REVIEWER: CLAUDE
-STATUS: READY_FOR_REVIEW
+STATUS: COMMITTED_PUSHED
 
 BRANCH: main
 WORKTREE: dedicated Codex worktree (local path intentionally omitted)
@@ -1616,3 +1616,52 @@ FUTURE_REASSIGNMENT_REQUIRES_USER_COMMAND: YES
 - `TASK_LEAD: CODEX` для уже начатой задачи;
 - `REVIEWER: CLAUDE`;
 - `WORK_LOCK: CODEX`.
+
+## TASK: WP-CLI-ROOT-PULL-FIX-REVIEW-FOLLOWUP
+
+TASK_ID: WP-CLI-ROOT-PULL-FIX-REVIEW-FOLLOWUP
+TASK_NAME: Close independent review findings for WP-CLI root compatibility pull coverage
+DOMAIN: DEPLOYMENT
+TASK_LEAD: CODEX
+IMPLEMENTER: CODEX
+REVIEWER: CLAUDE
+STATUS: READY_FOR_REVIEW
+
+BRANCH: codex/multisite-profile-isolation-p3-followup
+WORKTREE: dedicated Codex worktree (local path intentionally omitted)
+BASE_COMMIT: c219297
+COMMIT: f9a5198
+WORK_LOCK: CODEX
+
+CRITICAL: YES
+PLAN_APPROVED: YES (2026-08-17)
+EXECUTION_APPROVED: YES (2026-08-17, local implementation and tests only)
+LIVE_ACTIONS: NONE
+
+IN_SCOPE:
+- pass `--allow-root` to WP-CLI when the runner's effective UID is 0
+- add behavioral root and non-root runner regression coverage
+- correct smoke stderr capture and reduce unavailable-command assumptions
+- synchronize current metadata without rewriting journal history
+- run local shell, Pester, and diff checks
+
+OUT_OF_SCOPE:
+- VPS, SSH, database, pull, deploy, rollback, cleanup, runner reinstall, and merge
+- private profiles and server configuration
+
+RESULT:
+- `server-deploy.sh` now adds `--allow-root` only for root execution; non-root execution keeps the prior invocation.
+- `tests/wp-cli-root.smoke.sh` now runs both root and non-root cases; the fake WP-CLI rejects a missing root flag and an unexpected root flag.
+- Smoke diagnostics now remain visible when the runner fails; each root/non-root case clears the prior pull artifact before execution.
+- Smoke uses a PID-suffixed temporary root and real `awk`, `gzip`, and `df` when available, with portable fallbacks otherwise.
+- The prior metadata claim about stderr capture was corrected by this follow-up; the CHANGELOG remains append-only.
+
+CHECKS:
+- Full Pester: 167 passed, 0 failed; targeted server/pull tests: 99 passed, 0 failed.
+- Root smoke and shell syntax pass under Laragon Git Bash.
+- `git diff --check`: PASS.
+- Mutation checks: removing the root flag fails; always passing the root flag fails the non-root case.
+- No VPS, SSH, database, pull, deploy, rollback, runner reinstall, or merge was performed; the approved implementation and metadata checkpoints were committed and pushed.
+
+NEXT:
+- Independent read-only review; runner reinstall and production pull retry require a separate approval.
