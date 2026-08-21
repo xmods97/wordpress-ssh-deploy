@@ -521,7 +521,7 @@ case "$DEPLOY_MODE" in
 		import_database
 		[ -z "$UPLOADS_ZIP" ] || sync_uploads
 		cleanup_wordpress
-		cleanup_backups
+		cleanup_backups || true
 		;;
 esac
 
