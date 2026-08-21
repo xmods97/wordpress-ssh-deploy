@@ -422,7 +422,7 @@ import_database() {
 	database_connection "$(wp_config_value DB_HOST)"
 	if ! mysql_import_file "$SQL_FILE"; then
 		if mysql_import_file "$BACKUP_FILE"; then
-			cleanup_backups
+			cleanup_backups || true
 			fail "Database import failed; rollback completed"
 		else
 			preserve_manual_recovery

@@ -187,6 +187,8 @@ else
 	if [ "${FIXTURE_EXPECT_ROLLBACK_RETENTION:-0}" = 1 ]; then
 		ordinary_backup_count="$(find "$target_root/backups" -maxdepth 1 -type f -name 'db-*.sql*' | wc -l | tr -d ' ')"
 		[ "$ordinary_backup_count" -eq 10 ] || { echo "Expected 10 ordinary backups after rollback retention, got $ordinary_backup_count" >&2; exit 1; }
+		fresh_backup_count="$(find "$target_root/backups" -maxdepth 1 -type f \( -name 'db-*.sql' -o -name 'db-*.sql.gz' \) ! -name 'db-2000*' | wc -l | tr -d ' ')"
+		[ "$fresh_backup_count" -eq 1 ] || { echo "Expected the fresh rollback backup to survive retention, got $fresh_backup_count" >&2; exit 1; }
 		printf '%s\n' 'Rollback retention: OK'
 	fi
 	printf '%s\n' 'Database rollback after failed import: OK'

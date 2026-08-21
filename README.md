@@ -150,6 +150,8 @@ exists, it prints `RECOVERY_BACKUP=none`. Diagnostic tokens include
 `MANUAL_RECOVERY_BACKUP_PERMISSIONS_FAILED`,
 `MANUAL_RECOVERY_MARKER_WRITE_FAILED`, and
 `MANUAL_RECOVERY_MARKER_PERMISSIONS_FAILED`.
+Retention is intentionally not run on the double-failure manual-recovery path;
+the protected recovery backup must remain available for the operator.
 
 ## Tests
 
