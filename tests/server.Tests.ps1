@@ -59,6 +59,17 @@ Describe 'Remote POSIX safety' {
 		}
 	}
 
+	It 'applies ordinary backup retention after a failed import rollback' {
+		Push-Location $repoRoot
+		try {
+			$output = & $shPath -c 'PATH=/usr/bin:/bin; export PATH; FIXTURE_EXPECT_ROLLBACK_RETENTION=1; export FIXTURE_EXPECT_ROLLBACK_RETENTION; sh ./tests/database-rollback.smoke.sh' 2>&1
+			$LASTEXITCODE | Should Be 0
+			$output -join "`n" | Should Match 'Rollback retention: OK'
+		} finally {
+			Pop-Location
+		}
+	}
+
 	It 'preserves a named manual-recovery backup when import and rollback both fail' {
 		Push-Location $repoRoot
 		try {

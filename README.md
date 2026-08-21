@@ -131,7 +131,9 @@ Before creating or accepting artifacts, both sides check their configured free
 space reserve. SQL dumps and ZIP archives are validated before use. Code and
 uploads are staged in temporary directories and swapped only after preparation.
 If a database import fails, the server immediately attempts to restore the
-backup created in the same operation. If rollback also fails, the validated
+backup created in the same operation. After a successful rollback, ordinary
+backup retention is applied before the runner exits with the rollback result.
+If rollback also fails, the validated
 backup is moved to a timestamped `protected-manual-recovery-*` directory and
 the runner prints `RECOVERY_BACKUP` and `RECOVERY_MARKER`; the marker contains
 the PHP + WP-CLI restore and verification commands without exposing the

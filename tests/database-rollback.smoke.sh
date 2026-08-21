@@ -29,6 +29,14 @@ INSERT INTO `wp_options` VALUES (2);
 -- INCOMING_FAIL
 SQL
 
+if [ "${FIXTURE_EXPECT_ROLLBACK_RETENTION:-0}" = 1 ]; then
+	old_backup=1
+	while [ "$old_backup" -le 11 ]; do
+		printf '%s\n' 'old backup' > "$target_root/backups/db-20000101-0000${old_backup}.sql"
+		old_backup=$((old_backup + 1))
+	done
+fi
+
 output="$(
 	PATH="$target_root/bin:/usr/bin:/bin" \
 	FIXTURE_ROOT="$target_root" \
@@ -176,6 +184,11 @@ else
 	esac
 	[ "$(wc -l < "$target_root/mysql-calls.log")" -eq 2 ] || { echo 'Expected import and rollback calls' >&2; exit 1; }
 	find "$target_root/backups" -type f -name 'db-*.sql' -size +0c | grep -q . || { echo 'Validated rollback backup was not preserved' >&2; exit 1; }
+	if [ "${FIXTURE_EXPECT_ROLLBACK_RETENTION:-0}" = 1 ]; then
+		ordinary_backup_count="$(find "$target_root/backups" -maxdepth 1 -type f -name 'db-*.sql*' | wc -l | tr -d ' ')"
+		[ "$ordinary_backup_count" -eq 10 ] || { echo "Expected 10 ordinary backups after rollback retention, got $ordinary_backup_count" >&2; exit 1; }
+		printf '%s\n' 'Rollback retention: OK'
+	fi
 	printf '%s\n' 'Database rollback after failed import: OK'
 fi
 

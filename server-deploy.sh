@@ -421,7 +421,9 @@ import_database() {
 	pass="$(wp_config_value DB_PASSWORD)"
 	database_connection "$(wp_config_value DB_HOST)"
 	if ! mysql_import_file "$SQL_FILE"; then
-		if mysql_import_file "$BACKUP_FILE"; then fail "Database import failed; rollback completed"
+		if mysql_import_file "$BACKUP_FILE"; then
+			cleanup_backups
+			fail "Database import failed; rollback completed"
 		else
 			preserve_manual_recovery
 			fail "Database import failed and rollback failed; manual recovery is required"
