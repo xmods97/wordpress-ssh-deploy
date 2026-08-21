@@ -22,6 +22,9 @@ case " $* " in
 	*' --info '*)
 		printf '%s\n' 'WP-CLI fixture'
 		;;
+	*' search-replace '*|*' option update '*|*' cache flush '*|*' transient delete '*|*' rewrite flush '*)
+		printf '%s\n' 'WP-CLI mutation fixture'
+		;;
 	*)
 		echo 'Unexpected fake PHP invocation' >&2
 		exit 1

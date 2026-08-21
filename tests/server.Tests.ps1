@@ -59,6 +59,72 @@ Describe 'Remote POSIX safety' {
 		}
 	}
 
+	It 'preserves a named manual-recovery backup when import and rollback both fail' {
+		Push-Location $repoRoot
+		try {
+			$output = & $shPath -c 'PATH=/usr/bin:/bin; export PATH; FIXTURE_FAIL_ALL_IMPORTS=1; export FIXTURE_FAIL_ALL_IMPORTS; sh ./tests/database-rollback.smoke.sh' 2>&1
+			$LASTEXITCODE | Should Be 0
+			$output -join "`n" | Should Match 'Database double-failure manual recovery: OK'
+		} finally {
+			Pop-Location
+		}
+	}
+
+	It 'keeps recovery output when chmod fails' {
+		Push-Location $repoRoot
+		try {
+			$output = & $shPath -c 'PATH=/usr/bin:/bin; export PATH; FIXTURE_FAIL_ALL_IMPORTS=1; export FIXTURE_FAIL_ALL_IMPORTS; FIXTURE_CHMOD_FAIL=1; export FIXTURE_CHMOD_FAIL; sh ./tests/database-rollback.smoke.sh' 2>&1
+			$LASTEXITCODE | Should Be 0
+			$output -join "`n" | Should Match 'Degraded chmod recovery output: OK'
+		} finally {
+			Pop-Location
+		}
+	}
+
+	It 'prints a fallback recovery command when marker permissions fail' {
+		Push-Location $repoRoot
+		try {
+			$output = & $shPath -c 'PATH=/usr/bin:/bin; export PATH; FIXTURE_FAIL_ALL_IMPORTS=1; export FIXTURE_FAIL_ALL_IMPORTS; FIXTURE_CHMOD_FAIL_MARKER=1; export FIXTURE_CHMOD_FAIL_MARKER; sh ./tests/database-rollback.smoke.sh' 2>&1
+			$LASTEXITCODE | Should Be 0
+			$output -join "`n" | Should Match 'Degraded marker fallback: OK'
+		} finally {
+			Pop-Location
+		}
+	}
+
+	It 'reports an explicit recovery state when the backup disappears' {
+		Push-Location $repoRoot
+		try {
+			$output = & $shPath -c 'PATH=/usr/bin:/bin; export PATH; FIXTURE_FAIL_ALL_IMPORTS=1; export FIXTURE_FAIL_ALL_IMPORTS; FIXTURE_DELETE_BACKUP_ON_FIRST_IMPORT=1; export FIXTURE_DELETE_BACKUP_ON_FIRST_IMPORT; sh ./tests/database-rollback.smoke.sh' 2>&1
+			$LASTEXITCODE | Should Be 0
+			$output -join "`n" | Should Match 'Degraded missing-backup output: OK'
+		} finally {
+			Pop-Location
+		}
+	}
+
+	It 'does not print a recovery command for a corrupted backup' {
+		Push-Location $repoRoot
+		try {
+			$output = & $shPath -c 'PATH=/usr/bin:/bin; export PATH; FIXTURE_FAIL_ALL_IMPORTS=1; export FIXTURE_FAIL_ALL_IMPORTS; FIXTURE_CORRUPT_BACKUP_ON_FIRST_IMPORT=1; export FIXTURE_CORRUPT_BACKUP_ON_FIRST_IMPORT; sh ./tests/database-rollback.smoke.sh' 2>&1
+			$LASTEXITCODE | Should Be 0
+			$output -join "`n" | Should Match 'Corrupted backup recovery output: OK'
+		} finally {
+			Pop-Location
+		}
+	}
+
+	It 'does not print a recovery command for a corrupted backup when protected directory creation fails' {
+		Push-Location $repoRoot
+		try {
+			$output = & $shPath -c 'PATH=/usr/bin:/bin; export PATH; FIXTURE_FAIL_ALL_IMPORTS=1; export FIXTURE_FAIL_ALL_IMPORTS; FIXTURE_CORRUPT_BACKUP_ON_FIRST_IMPORT=1; export FIXTURE_CORRUPT_BACKUP_ON_FIRST_IMPORT; FIXTURE_CHMOD_FAIL_DIR=1; export FIXTURE_CHMOD_FAIL_DIR; sh ./tests/database-rollback.smoke.sh' 2>&1
+			$LASTEXITCODE | Should Be 0
+			$output -join "`n" | Should Match 'Corrupted degraded backup recovery output: OK'
+		} finally {
+			Pop-Location
+		}
+	}
+
 	It 'keeps all shell files on LF line endings' {
 		foreach ($file in Get-ChildItem -LiteralPath $repoRoot -Recurse -Filter '*.sh') {
 			$bytes = [IO.File]::ReadAllBytes($file.FullName)

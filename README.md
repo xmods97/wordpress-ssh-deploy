@@ -131,8 +131,23 @@ Before creating or accepting artifacts, both sides check their configured free
 space reserve. SQL dumps and ZIP archives are validated before use. Code and
 uploads are staged in temporary directories and swapped only after preparation.
 If a database import fails, the server immediately attempts to restore the
-backup created in the same operation and preserves that backup for manual
-recovery if rollback also fails.
+backup created in the same operation. If rollback also fails, the validated
+backup is moved to a timestamped `protected-manual-recovery-*` directory and
+the runner prints `RECOVERY_BACKUP` and `RECOVERY_MARKER`; the marker contains
+the PHP + WP-CLI restore and verification commands without exposing the
+database password. The recovery SQL and marker are revalidated and written
+with mode `600`; normal backup retention does not recurse into protected
+recovery directories. If a degraded recovery path cannot create the marker or
+harden permissions, the runner still prints `MANUAL_RECOVERY_REQUIRED` and
+the backup path. If the SQL is protected, has passed revalidation, and the
+marker cannot be created, it also prints `RECOVERY_COMMAND`; if no backup
+exists, it prints `RECOVERY_BACKUP=none`. Diagnostic tokens include
+`MANUAL_RECOVERY_PROTECTED_DIR_FAILED`,
+`MANUAL_RECOVERY_BACKUP_UNAVAILABLE`,
+`MANUAL_RECOVERY_BACKUP_REVALIDATION_FAILED`,
+`MANUAL_RECOVERY_BACKUP_PERMISSIONS_FAILED`,
+`MANUAL_RECOVERY_MARKER_WRITE_FAILED`, and
+`MANUAL_RECOVERY_MARKER_PERMISSIONS_FAILED`.
 
 ## Tests
 

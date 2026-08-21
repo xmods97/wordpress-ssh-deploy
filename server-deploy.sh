@@ -52,6 +52,11 @@ BACKUP_FILE=''
 TRANSIENT_NEW=''
 TRANSIENT_OLD=''
 TRANSIENT_TARGET=''
+MANUAL_RECOVERY_DIR=''
+MANUAL_RECOVERY_BACKUP=''
+MANUAL_RECOVERY_MARKER=''
+MANUAL_RECOVERY_BACKUP_HARDENED=0
+MANUAL_RECOVERY_BACKUP_VALID=0
 
 normalize_url() {
 	value="$1"
@@ -217,6 +222,13 @@ assert_sql_dump() {
 	grep -Eq '^(CREATE TABLE|INSERT INTO|-- Table structure for table)' "$file" || fail "SQL dump contains no table structure"
 }
 
+manual_recovery_backup_is_valid() {
+	file="$1"
+	[ -s "$file" ] || return 1
+	grep -Eq '^-- (MySQL|MariaDB) dump' "$file" || return 1
+	grep -Eq '^(CREATE TABLE|INSERT INTO|-- Table structure for table)' "$file" || return 1
+}
+
 update_repository() {
 	require_cmd git
 	[ -f "$SERVER_GIT_SSH_KEY" ] || fail "Server Git SSH key was not found"
@@ -327,6 +339,80 @@ mysql_import_file() {
 	fi
 }
 
+preserve_manual_recovery() {
+	MANUAL_RECOVERY_MARKER=''
+	MANUAL_RECOVERY_BACKUP='none'
+	MANUAL_RECOVERY_BACKUP_HARDENED=0
+	MANUAL_RECOVERY_BACKUP_VALID=0
+	if [ -z "$BACKUP_FILE" ] || [ ! -s "$BACKUP_FILE" ]; then
+		printf '%s\n' 'MANUAL_RECOVERY_BACKUP_UNAVAILABLE' >&2
+		printf '%s\n' 'MANUAL_RECOVERY_REQUIRED' >&2
+		printf 'RECOVERY_BACKUP=%s\n' "$MANUAL_RECOVERY_BACKUP" >&2
+		return 0
+	fi
+
+	MANUAL_RECOVERY_DIR="$BACKUP_DIR/protected-manual-recovery-$timestamp"
+	MANUAL_RECOVERY_BACKUP="$MANUAL_RECOVERY_DIR/db-$timestamp.sql"
+	marker_path="$MANUAL_RECOVERY_DIR/RECOVERY.txt"
+
+	if mkdir -p "$MANUAL_RECOVERY_DIR" 2>/dev/null && chmod 700 "$MANUAL_RECOVERY_DIR" 2>/dev/null && mv "$BACKUP_FILE" "$MANUAL_RECOVERY_BACKUP" 2>/dev/null; then
+		BACKUP_FILE="$MANUAL_RECOVERY_BACKUP"
+		if chmod 600 "$MANUAL_RECOVERY_BACKUP" 2>/dev/null; then
+			MANUAL_RECOVERY_BACKUP_HARDENED=1
+			if manual_recovery_backup_is_valid "$MANUAL_RECOVERY_BACKUP"; then
+				MANUAL_RECOVERY_BACKUP_VALID=1
+				if {
+					printf '%s\n' 'status=manual-recovery-required'
+					printf 'created_at=%s\n' "$timestamp"
+					printf 'wp_dir=%s\n' "$WP_DIR"
+					printf 'db_name=%s\n' "$name"
+					printf "restore_command=%s %s --path='%s' db import '%s'\n" "$PHP_BIN" "$WP_CLI_BIN" "$WP_DIR" "$MANUAL_RECOVERY_BACKUP"
+					printf "verify_command=%s %s --path='%s' core is-installed\n" "$PHP_BIN" "$WP_CLI_BIN" "$WP_DIR"
+					printf '%s\n' 'Do not delete this directory until the database and site have been verified.'
+				} > "$marker_path" 2>/dev/null; then
+					if chmod 600 "$marker_path" 2>/dev/null; then
+						MANUAL_RECOVERY_MARKER="$marker_path"
+					else
+						rm -f "$marker_path" 2>/dev/null || true
+						printf '%s\n' 'MANUAL_RECOVERY_MARKER_PERMISSIONS_FAILED' >&2
+					fi
+				else
+					rm -f "$marker_path" 2>/dev/null || true
+					printf '%s\n' 'MANUAL_RECOVERY_MARKER_WRITE_FAILED' >&2
+				fi
+			else
+				MANUAL_RECOVERY_MARKER=''
+				MANUAL_RECOVERY_BACKUP_VALID=0
+				printf '%s\n' 'MANUAL_RECOVERY_BACKUP_REVALIDATION_FAILED' >&2
+			fi
+		else
+			printf '%s\n' 'MANUAL_RECOVERY_BACKUP_PERMISSIONS_FAILED' >&2
+		fi
+	else
+		MANUAL_RECOVERY_BACKUP="$BACKUP_FILE"
+		MANUAL_RECOVERY_MARKER=''
+		rmdir "$MANUAL_RECOVERY_DIR" 2>/dev/null || true
+		if chmod 600 "$BACKUP_FILE" 2>/dev/null; then
+			MANUAL_RECOVERY_BACKUP_HARDENED=1
+		else
+			printf '%s\n' 'MANUAL_RECOVERY_BACKUP_PERMISSIONS_FAILED' >&2
+		fi
+		if manual_recovery_backup_is_valid "$BACKUP_FILE"; then
+			MANUAL_RECOVERY_BACKUP_VALID=1
+		else
+			printf '%s\n' 'MANUAL_RECOVERY_BACKUP_REVALIDATION_FAILED' >&2
+		fi
+		printf '%s\n' 'MANUAL_RECOVERY_PROTECTED_DIR_FAILED' >&2
+	fi
+
+	printf '%s\n' 'MANUAL_RECOVERY_REQUIRED' >&2
+	printf 'RECOVERY_BACKUP=%s\n' "$MANUAL_RECOVERY_BACKUP" >&2
+	[ -z "$MANUAL_RECOVERY_MARKER" ] || printf 'RECOVERY_MARKER=%s\n' "$MANUAL_RECOVERY_MARKER" >&2
+	if [ "$MANUAL_RECOVERY_BACKUP_HARDENED" -eq 1 ] && [ "$MANUAL_RECOVERY_BACKUP_VALID" -eq 1 ] && [ -z "$MANUAL_RECOVERY_MARKER" ] && [ "$MANUAL_RECOVERY_BACKUP" != none ] && [ -s "$MANUAL_RECOVERY_BACKUP" ]; then
+		printf "RECOVERY_COMMAND=%s %s --path='%s' db import '%s'\n" "$PHP_BIN" "$WP_CLI_BIN" "$WP_DIR" "$MANUAL_RECOVERY_BACKUP" >&2
+	fi
+}
+
 import_database() {
 	require_cmd mysql
 	assert_sql_dump "$SQL_FILE"
@@ -336,7 +422,9 @@ import_database() {
 	database_connection "$(wp_config_value DB_HOST)"
 	if ! mysql_import_file "$SQL_FILE"; then
 		if mysql_import_file "$BACKUP_FILE"; then fail "Database import failed; rollback completed"
-		else fail "Database import failed and rollback failed"
+		else
+			preserve_manual_recovery
+			fail "Database import failed and rollback failed; manual recovery is required"
 		fi
 	fi
 	if command -v gzip >/dev/null 2>&1; then
@@ -387,7 +475,13 @@ cleanup_wordpress() {
 }
 
 cleanup_backups() {
-	find "$BACKUP_DIR" -type f -name 'db-*.sql*' | sort -r | awk "NR>$KEEP_BACKUPS" | while IFS= read -r backup_file; do
+	find "$BACKUP_DIR" -type f -name 'db-*.sql*' |
+	while IFS= read -r backup_file; do
+		case "$backup_file" in
+			"$BACKUP_DIR"/db-*.sql|"$BACKUP_DIR"/db-*.sql.gz) printf '%s\n' "$backup_file" ;;
+		esac
+	done |
+	sort -r | awk "NR>$KEEP_BACKUPS" | while IFS= read -r backup_file; do
 		[ -z "$backup_file" ] || rm -f "$backup_file"
 	done
 }
