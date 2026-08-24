@@ -139,7 +139,7 @@ function New-RemoteDeployCommand {
 		[string] $UploadsFile = ''
 	)
 
-	$productionFullOptIn = if ($Configuration.Contains('AllowProductionFull') -and $Configuration.AllowProductionFull -eq $true) { '1' } else { '0' }
+	$productionFullOptIn = if ($Configuration.Contains('AllowProductionFull') -and $Configuration.AllowProductionFull -is [bool] -and $Configuration.AllowProductionFull) { '1' } else { '0' }
 	$assignments = @(
 		@('LOCAL_URL', $Configuration.LocalUrl),
 		@('REMOTE_URL', $Configuration.RemoteUrl),
@@ -437,8 +437,12 @@ function Assert-DeployModeAllowed {
 		[ValidateSet('full', 'code', 'db')]
 		[string] $Mode,
 
-		[bool] $AllowProductionFull = $false
+		[object] $AllowProductionFull = $false
 	)
+
+	if ($AllowProductionFull -isnot [bool]) {
+		throw 'AllowProductionFull must be a Boolean.'
+	}
 
 	if ($Environment -eq 'production') {
 		if ($Mode -eq 'db') {

@@ -16,6 +16,7 @@ Describe 'Production deployment policy' {
 		{ Assert-DeployModeAllowed production db $true } | Should Throw 'forbidden for production'
 		{ Assert-DeployModeAllowed production full } | Should Throw 'forbidden for production'
 		{ Assert-DeployModeAllowed production full $true } | Should Not Throw
+		{ Assert-DeployModeAllowed production full 'true' } | Should Throw 'AllowProductionFull must be a Boolean'
 	}
 
 	It 'keeps code as the local and remote default' {

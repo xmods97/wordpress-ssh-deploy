@@ -31,6 +31,8 @@ Describe 'POSIX shell quoting' {
 		$config = $validConfiguration.Clone()
 		$config.AllowProductionFull = $true
 		(New-RemoteDeployCommand $config 'full') | Should Match "PRODUCTION_FULL_OPT_IN='1'"
+		$config.AllowProductionFull = 'true'
+		(New-RemoteDeployCommand $config 'full') | Should Match "PRODUCTION_FULL_OPT_IN='0'"
 	}
 
 	It 'does not expose a quoted value as a second command' {

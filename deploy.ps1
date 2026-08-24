@@ -35,7 +35,8 @@ Import-Module $modulePath -Force
 . $configPath
 if (-not $DeployConfig) { throw 'deploy.config.ps1 must define $DeployConfig.' }
 Assert-DeployConfiguration -Configuration $DeployConfig
-Assert-DeployModeAllowed -Environment $DeployConfig.Environment -Mode $Mode -AllowProductionFull ([bool]$DeployConfig.AllowProductionFull)
+$allowProductionFull = $DeployConfig.AllowProductionFull -is [bool] -and $DeployConfig.AllowProductionFull
+Assert-DeployModeAllowed -Environment $DeployConfig.Environment -Mode $Mode -AllowProductionFull $allowProductionFull
 if ($Message) {
 	throw 'Automatic Git commit/push was removed. Commit and push separately, then run deploy without Message.'
 }
