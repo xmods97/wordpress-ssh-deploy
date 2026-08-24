@@ -5,8 +5,8 @@ $gitRoot = Split-Path -Parent (Split-Path -Parent $gitPath)
 $shCandidates = @(
 	(Join-Path $gitRoot 'usr\bin\sh.exe'),
 	(Join-Path $gitRoot 'bin\sh.exe'),
-	'C:\Users\xmods\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\git\usr\bin\sh.exe',
-	'D:\laragon\bin\git\bin\sh.exe'
+	'D:\laragon\bin\git\bin\sh.exe',
+	'C:\Users\xmods\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\git\usr\bin\sh.exe'
 )
 $shPath = $shCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 
