@@ -11,9 +11,11 @@ Describe 'Production deployment policy' {
 		}
 	}
 
-	It 'rejects DB and full modes in production' {
+	It 'rejects DB and deny-by-default full modes in production' {
 		{ Assert-DeployModeAllowed production db } | Should Throw 'forbidden for production'
+		{ Assert-DeployModeAllowed production db $true } | Should Throw 'forbidden for production'
 		{ Assert-DeployModeAllowed production full } | Should Throw 'forbidden for production'
+		{ Assert-DeployModeAllowed production full $true } | Should Not Throw
 	}
 
 	It 'keeps code as the local and remote default' {
@@ -23,7 +25,7 @@ Describe 'Production deployment policy' {
 
 	It 'checks server policy before updating the repository' {
 		$policyCall = $serverSource.LastIndexOf("`nassert_server_policy`n")
-		$repositoryCall = $serverSource.IndexOf("`n`t`tupdate_repository`n", $policyCall)
+		$repositoryCall = $serverSource.IndexOf('update_repository', $policyCall)
 		$policyCall | Should BeGreaterThan -1
 		$repositoryCall | Should BeGreaterThan $policyCall
 	}

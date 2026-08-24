@@ -31,6 +31,12 @@ Describe 'Deploy configuration validation' {
 		$errors | Should Match 'Missing configuration value: RemoteUrl'
 	}
 
+	It 'rejects a non-Boolean production full-mode opt-in' {
+		$config = $validConfiguration.Clone()
+		$config.AllowProductionFull = 'true'
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'AllowProductionFull must be a Boolean'
+	}
+
 	It 'rejects a remote URL with a different domain' {
 		$config = $validConfiguration.Clone()
 		$config.RemoteUrl = 'https://other.example.com'

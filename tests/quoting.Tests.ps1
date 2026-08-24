@@ -26,6 +26,13 @@ Describe 'POSIX shell quoting' {
 		$command | Should Match "sh '/usr/local/libexec/wordpress-ssh-deploy/example-site/server-deploy\.sh'$"
 	}
 
+	It 'sends the production full-mode client opt-in only from a Boolean profile value' {
+		(New-RemoteDeployCommand $validConfiguration 'full') | Should Match "PRODUCTION_FULL_OPT_IN='0'"
+		$config = $validConfiguration.Clone()
+		$config.AllowProductionFull = $true
+		(New-RemoteDeployCommand $config 'full') | Should Match "PRODUCTION_FULL_OPT_IN='1'"
+	}
+
 	It 'does not expose a quoted value as a second command' {
 		$command = New-RemoteDeployCommand $validConfiguration 'db' "x'; touch /tmp/unsafe; echo '" ''
 		$command | Should Match 'SQL_FILE='

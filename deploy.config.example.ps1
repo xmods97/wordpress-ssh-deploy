@@ -3,7 +3,8 @@
 
 $DeployConfig = @{
 	# Required: development, staging, or production.
-	# Production permits only code deployment.
+	# Production defaults to code-only. Full mode requires this Boolean opt-in and an independent server policy opt-in.
+	AllowProductionFull = $false
 	Environment = 'staging'
 
 	LocalWpPath      = 'C:\Sites\example.test'

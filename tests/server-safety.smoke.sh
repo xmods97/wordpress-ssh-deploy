@@ -45,8 +45,20 @@ run_server() {
 
 output="$(run_server production db || true)"
 case "$output" in
-	*'Database and uploads deployment is forbidden for production'*) ;;
+	*'Database-only deployment is forbidden for production'*) ;;
 	*) echo "Production DB mode was not rejected correctly" >&2; exit 1 ;;
+esac
+
+output="$(run_server production full || true)"
+case "$output" in
+	*'Production full mode requires an explicit client profile opt-in'*) ;;
+	*) echo "Production full mode was not rejected without client opt-in" >&2; exit 1 ;;
+esac
+
+output="$(PRODUCTION_FULL_OPT_IN=1 run_server production full || true)"
+case "$output" in
+	*'Production full mode is disabled by server policy'*) ;;
+	*) echo "Production full mode was not rejected without server opt-in" >&2; exit 1 ;;
 esac
 
 output="$(run_server staging code || true)"

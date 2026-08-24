@@ -1,4 +1,5 @@
 SERVER_ENVIRONMENT='production'
+SERVER_ALLOW_PRODUCTION_FULL='0'
 SERVER_EXPECTED_URL='https://example.com'
 SERVER_EXPECTED_WP_DIR='/tmp/wordpress-ssh-deploy-fixture/wp'
 SERVER_EXPECTED_REPO_DIR='/tmp/wordpress-ssh-deploy-fixture/repo'

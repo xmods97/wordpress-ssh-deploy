@@ -2,6 +2,8 @@
 # Keep server.config.sh untracked and writable only by the server administrator.
 
 SERVER_ENVIRONMENT='staging'
+# Production full mode is deny-by-default and requires a matching local profile opt-in.
+SERVER_ALLOW_PRODUCTION_FULL='0'
 SERVER_EXPECTED_URL='https://staging.example.com'
 SERVER_EXPECTED_WP_DIR='/var/www/staging.example.com'
 SERVER_EXPECTED_REPO_DIR='/srv/repos/example-site'

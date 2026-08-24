@@ -40,6 +40,7 @@ SERVER_CONFIG="$SCRIPT_DIR/server.config.sh"
 : "${MIN_REMOTE_FREE_SPACE_MB:?MIN_REMOTE_FREE_SPACE_MB is required}"
 
 DEPLOY_MODE="${DEPLOY_MODE:-code}"
+PRODUCTION_FULL_OPT_IN="${PRODUCTION_FULL_OPT_IN:-0}"
 KEEP_BACKUPS="${KEEP_BACKUPS:-10}"
 SQL_FILE="${SQL_FILE:-}"
 UPLOADS_ZIP="${UPLOADS_ZIP:-}"
@@ -113,8 +114,17 @@ wp_config_value() { wp_cli config get "$1" --type=constant; }
 
 assert_mode() {
 	case "$DEPLOY_MODE" in preflight|code|db|full) ;; *) fail "Unknown DEPLOY_MODE" ;; esac
-	if [ "$SERVER_ENVIRONMENT" = production ] && [ "$DEPLOY_MODE" != code ] && [ "$DEPLOY_MODE" != preflight ]; then
-		fail "Database and uploads deployment is forbidden for production"
+	case "$PRODUCTION_FULL_OPT_IN" in 0|1) ;; *) fail "Invalid production full-mode client opt-in" ;; esac
+	case "${SERVER_ALLOW_PRODUCTION_FULL:-0}" in 0|1) ;; *) fail "Invalid server production full-mode policy" ;; esac
+	if [ "$SERVER_ENVIRONMENT" = production ]; then
+		case "$DEPLOY_MODE" in
+			code|preflight) ;;
+			db) fail "Database-only deployment is forbidden for production" ;;
+			full)
+				[ "$PRODUCTION_FULL_OPT_IN" = 1 ] || fail "Production full mode requires an explicit client profile opt-in"
+				[ "${SERVER_ALLOW_PRODUCTION_FULL:-0}" = 1 ] || fail "Production full mode is disabled by server policy"
+				;;
+		esac
 	fi
 }
 

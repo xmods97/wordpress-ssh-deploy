@@ -139,6 +139,7 @@ function New-RemoteDeployCommand {
 		[string] $UploadsFile = ''
 	)
 
+	$productionFullOptIn = if ($Configuration.Contains('AllowProductionFull') -and $Configuration.AllowProductionFull -eq $true) { '1' } else { '0' }
 	$assignments = @(
 		@('LOCAL_URL', $Configuration.LocalUrl),
 		@('REMOTE_URL', $Configuration.RemoteUrl),
@@ -156,6 +157,7 @@ function New-RemoteDeployCommand {
 		@('EXPECTED_DB_NAME', $Configuration.ExpectedRemoteDbName),
 		@('SYNC_PATHS', ($Configuration.SyncPaths -join ',')),
 		@('DEPLOY_MODE', $DeployMode),
+		@('PRODUCTION_FULL_OPT_IN', $productionFullOptIn),
 		@('SQL_FILE', $SqlFile),
 		@('UPLOADS_ZIP', $UploadsFile)
 	)
@@ -259,8 +261,9 @@ function Get-DeployConfigurationErrors {
 		'ExpectedRemoteDbName'
 	)
 	$optionalKeys = @('LocalDbPassword', 'SshKeyPath')
+	$optionalBooleanKeys = @('AllowProductionFull')
 	$otherRequiredKeys = @('SshPort', 'KeepBackups', 'MinimumLocalFreeSpaceMB', 'MinimumRemoteFreeSpaceMB', 'SyncPaths')
-	$allowedKeys = $requiredStringKeys + $optionalKeys + $otherRequiredKeys
+	$allowedKeys = $requiredStringKeys + $optionalKeys + $optionalBooleanKeys + $otherRequiredKeys
 
 	foreach ($key in $Configuration.Keys) {
 		if ([string] $key -notin $allowedKeys) {
@@ -287,6 +290,9 @@ function Get-DeployConfigurationErrors {
 		if ($Configuration.Contains($key) -and $null -ne $Configuration[$key] -and $Configuration[$key] -isnot [string]) {
 			Add-ValidationError $errors "Optional configuration value must be a string: $key"
 		}
+	}
+	if ($Configuration.Contains('AllowProductionFull') -and $Configuration.AllowProductionFull -isnot [bool]) {
+		Add-ValidationError $errors 'AllowProductionFull must be a Boolean when configured.'
 	}
 
 	if ($errors.Count -gt 0) {
@@ -429,11 +435,18 @@ function Assert-DeployModeAllowed {
 
 		[Parameter(Mandatory = $true)]
 		[ValidateSet('full', 'code', 'db')]
-		[string] $Mode
+		[string] $Mode,
+
+		[bool] $AllowProductionFull = $false
 	)
 
-	if ($Environment -eq 'production' -and $Mode -ne 'code') {
-		throw "Mode '$Mode' is forbidden for production. Use code mode."
+	if ($Environment -eq 'production') {
+		if ($Mode -eq 'db') {
+			throw "Mode '$Mode' is forbidden for production. Use code mode or an explicitly enabled full mode."
+		}
+		if ($Mode -eq 'full' -and -not $AllowProductionFull) {
+			throw "Mode '$Mode' is forbidden for production until AllowProductionFull is explicitly enabled."
+		}
 	}
 }
 
