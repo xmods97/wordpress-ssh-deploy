@@ -16,7 +16,7 @@ Describe 'Remote POSIX safety' {
 	}
 
 	It 'passes shell syntax checks' {
-		foreach ($file in @('server-deploy.sh', 'server.config.example.sh', 'tests/server-safety.smoke.sh', 'tests/database-rollback.smoke.sh', 'tests/fixtures/server.config.production.sh', 'tests/fixtures/server.config.staging.sh', 'tests/fixtures/fake-php.sh', 'tests/fixtures/fake-id.sh', 'tests/fixtures/fake-mysqldump.sh', 'tests/fixtures/fake-mysql.sh', 'tests/fixtures/fake-df.sh')) {
+		foreach ($file in @('server-deploy.sh', 'server.config.example.sh', 'tests/server-safety.smoke.sh', 'tests/database-rollback.smoke.sh', 'tests/url-rewrite-rollback.smoke.sh', 'tests/fixtures/server.config.production.sh', 'tests/fixtures/server.config.staging.sh', 'tests/fixtures/fake-php.sh', 'tests/fixtures/fake-id.sh', 'tests/fixtures/fake-mysqldump.sh', 'tests/fixtures/fake-mysql.sh', 'tests/fixtures/fake-df.sh')) {
 			& $shPath -n (Join-Path $repoRoot $file)
 			$LASTEXITCODE | Should Be 0
 		}
@@ -67,6 +67,17 @@ Describe 'Remote POSIX safety' {
 			$output = & $shPath -c 'PATH=/usr/bin:/bin; export PATH; sh ./tests/database-rollback.smoke.sh' 2>&1
 			$LASTEXITCODE | Should Be 0
 			$output -join "`n" | Should Match 'Database rollback after failed import: OK'
+		} finally {
+			Pop-Location
+		}
+	}
+
+	It 'restores the backup after URL rewrite or verification failure' {
+		Push-Location $repoRoot
+		try {
+			$output = & $shPath -c 'PATH=/usr/bin:/bin; export PATH; sh ./tests/url-rewrite-rollback.smoke.sh' 2>&1
+			$LASTEXITCODE | Should Be 0
+			$output -join "`n" | Should Match 'URL rewrite rollback: OK'
 		} finally {
 			Pop-Location
 		}

@@ -438,18 +438,48 @@ import_database() {
 	pass="$(wp_config_value DB_PASSWORD)"
 	database_connection "$(wp_config_value DB_HOST)"
 	if ! mysql_import_file "$SQL_FILE"; then
-		if mysql_import_file "$BACKUP_FILE"; then
-			cleanup_backups || true
-			fail "Database import failed; rollback completed"
-		else
-			preserve_manual_recovery
-			fail "Database import failed and rollback failed; manual recovery is required"
-		fi
+		fail_after_database_mutation "Database import failed"
 	fi
+
+}
+
+finalize_database_backup() {
 	if command -v gzip >/dev/null 2>&1; then
 		gzip -f "$BACKUP_FILE"
 		gzip -t "$BACKUP_FILE.gz" || fail "Compressed database backup is invalid"
 	fi
+}
+
+rollback_database_or_require_manual_recovery() {
+	if mysql_import_file "$BACKUP_FILE"; then
+		cleanup_backups || true
+		return 0
+	fi
+	preserve_manual_recovery
+	return 1
+}
+
+fail_after_database_mutation() {
+	reason="$1"
+	if rollback_database_or_require_manual_recovery; then
+		fail "$reason; rollback completed"
+	fi
+	fail "$reason and rollback failed; manual recovery is required"
+}
+
+rewrite_wordpress_urls() {
+	: "${LOCAL_URL:?LOCAL_URL is required for database deployment}"
+	[ "$(normalize_url "$LOCAL_URL")" != "$(normalize_url "$REMOTE_URL")" ] || fail "Local and remote URLs must differ for database deployment"
+
+	if ! wp_cli search-replace "$LOCAL_URL" "$REMOTE_URL" --all-tables-with-prefix --precise --recurse-objects --skip-columns=guid; then
+		fail_after_database_mutation "URL rewrite failed"
+	fi
+
+	remaining_replacements="$(wp_cli search-replace "$LOCAL_URL" "$REMOTE_URL" --all-tables-with-prefix --precise --recurse-objects --skip-columns=guid --dry-run --format=count)" || fail_after_database_mutation "URL rewrite verification failed"
+	case "$remaining_replacements" in
+		0) ;;
+		*) fail_after_database_mutation "URL rewrite verification failed" ;;
+	esac
 }
 
 sync_uploads() {
@@ -485,9 +515,6 @@ sync_uploads() {
 }
 
 cleanup_wordpress() {
-	wp_cli search-replace "$LOCAL_URL" "$REMOTE_URL" --all-tables --precise --recurse-objects --skip-columns=guid
-	wp_cli option update home "$REMOTE_URL"
-	wp_cli option update siteurl "$REMOTE_URL"
 	wp_cli cache flush || true
 	wp_cli transient delete --all || true
 	wp_cli rewrite flush --hard || true
@@ -540,6 +567,8 @@ case "$DEPLOY_MODE" in
 				fi
 				backup_database
 				import_database
+				rewrite_wordpress_urls
+				finalize_database_backup
 				[ -z "$UPLOADS_ZIP" ] || sync_uploads
 				cleanup_wordpress
 				cleanup_backups || true
