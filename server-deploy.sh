@@ -95,7 +95,20 @@ assert_temp_file() {
 	esac
 }
 
-wp_cli() { "$PHP_BIN" "$WP_CLI_BIN" --path="$WP_DIR" "$@"; }
+wp_cli() {
+	case "$(id -u)" in
+		0) "$PHP_BIN" "$WP_CLI_BIN" --allow-root --path="$WP_DIR" "$@" ;;
+		*) "$PHP_BIN" "$WP_CLI_BIN" --path="$WP_DIR" "$@" ;;
+	esac
+}
+
+wp_cli_manual_prefix() {
+	case "$(id -u)" in
+		0) printf "%s %s --allow-root --path='%s'" "$PHP_BIN" "$WP_CLI_BIN" "$WP_DIR" ;;
+		*) printf "%s %s --path='%s'" "$PHP_BIN" "$WP_CLI_BIN" "$WP_DIR" ;;
+	esac
+}
+
 wp_config_value() { wp_cli config get "$1" --type=constant; }
 
 assert_mode() {
@@ -364,13 +377,14 @@ preserve_manual_recovery() {
 			MANUAL_RECOVERY_BACKUP_HARDENED=1
 			if manual_recovery_backup_is_valid "$MANUAL_RECOVERY_BACKUP"; then
 				MANUAL_RECOVERY_BACKUP_VALID=1
+				manual_wp_cli="$(wp_cli_manual_prefix)"
 				if {
 					printf '%s\n' 'status=manual-recovery-required'
 					printf 'created_at=%s\n' "$timestamp"
 					printf 'wp_dir=%s\n' "$WP_DIR"
 					printf 'db_name=%s\n' "$name"
-					printf "restore_command=%s %s --path='%s' db import '%s'\n" "$PHP_BIN" "$WP_CLI_BIN" "$WP_DIR" "$MANUAL_RECOVERY_BACKUP"
-					printf "verify_command=%s %s --path='%s' core is-installed\n" "$PHP_BIN" "$WP_CLI_BIN" "$WP_DIR"
+					printf "restore_command=%s db import '%s'\n" "$manual_wp_cli" "$MANUAL_RECOVERY_BACKUP"
+					printf "verify_command=%s core is-installed\n" "$manual_wp_cli"
 					printf '%s\n' 'Do not delete this directory until the database and site have been verified.'
 				} > "$marker_path" 2>/dev/null; then
 					if chmod 600 "$marker_path" 2>/dev/null; then
@@ -412,7 +426,7 @@ preserve_manual_recovery() {
 	printf 'RECOVERY_BACKUP=%s\n' "$MANUAL_RECOVERY_BACKUP" >&2
 	[ -z "$MANUAL_RECOVERY_MARKER" ] || printf 'RECOVERY_MARKER=%s\n' "$MANUAL_RECOVERY_MARKER" >&2
 	if [ "$MANUAL_RECOVERY_BACKUP_HARDENED" -eq 1 ] && [ "$MANUAL_RECOVERY_BACKUP_VALID" -eq 1 ] && [ -z "$MANUAL_RECOVERY_MARKER" ] && [ "$MANUAL_RECOVERY_BACKUP" != none ] && [ -s "$MANUAL_RECOVERY_BACKUP" ]; then
-		printf "RECOVERY_COMMAND=%s %s --path='%s' db import '%s'\n" "$PHP_BIN" "$WP_CLI_BIN" "$WP_DIR" "$MANUAL_RECOVERY_BACKUP" >&2
+		printf "RECOVERY_COMMAND=%s db import '%s'\n" "$(wp_cli_manual_prefix)" "$MANUAL_RECOVERY_BACKUP" >&2
 	fi
 }
 

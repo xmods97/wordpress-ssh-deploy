@@ -5,7 +5,18 @@ repo_dir="$(CDPATH= cd -P "$(dirname "$0")/.." && pwd)"
 fixture_dir="${TMPDIR:-/tmp}/wordpress-ssh-deploy-server-test-$$"
 target_root='/tmp/wordpress-ssh-deploy-fixture'
 mkdir -p "$fixture_dir"
-trap 'rm -rf "$fixture_dir" "$target_root"' 0 1 2 15
+cleanup_fixture() {
+	status=$?
+	trap - 0 1 2 15
+	rm -rf "$fixture_dir" "$target_root"
+	exit "$status"
+}
+trap cleanup_fixture 0 1 2 15
+
+if [ "${FIXTURE_FORCE_SMOKE_FAILURE:-0}" = 1 ]; then
+	echo 'Forced smoke failure' >&2
+	exit 1
+fi
 
 cp "$repo_dir/server-deploy.sh" "$fixture_dir/server-deploy.sh"
 cp "$repo_dir/tests/fixtures/server.config.production.sh" "$fixture_dir/server.config.sh"
@@ -51,9 +62,10 @@ mkdir -p "$target_root/wp/wp-content" "$target_root/repo/.git" "$target_root/tmp
 touch -t 202001010000 "$target_root/tmp/local-db-stale.sql"
 : > "$target_root/tmp/preflight-input.sql"
 cp "$repo_dir/tests/fixtures/fake-php.sh" "$target_root/bin/php"
+cp "$repo_dir/tests/fixtures/fake-id.sh" "$target_root/bin/id"
 : > "$target_root/bin/wp"
 
-output="$(FIXTURE_SQL_FILE="$target_root/tmp/preflight-input.sql" run_server production preflight)"
+output="$(FIXTURE_EFFECTIVE_UID=0 FIXTURE_EXPECT_ALLOW_ROOT=1 FIXTURE_SQL_FILE="$target_root/tmp/preflight-input.sql" run_server production preflight)"
 case "$output" in
 	*'WordPress deployment completed (preflight)'*) ;;
 	*) echo 'Preflight did not complete correctly' >&2; exit 1 ;;
@@ -75,6 +87,12 @@ esac
 	exit 1
 }
 
+output="$(FIXTURE_EFFECTIVE_UID=1000 FIXTURE_EXPECT_ALLOW_ROOT=0 run_server production preflight)"
+case "$output" in
+	*'WordPress deployment completed (preflight)'*) ;;
+	*) echo 'Non-root preflight did not complete correctly' >&2; exit 1 ;;
+esac
+
 run_server production code >/dev/null 2>&1 || true
 [ ! -d "$target_root/lock/deploy.lock" ] || {
 	echo 'Lock directory remained after a failed operation' >&2
@@ -84,3 +102,4 @@ run_server production code >/dev/null 2>&1 || true
 echo 'Remote production policy: OK'
 echo 'Remote lock cleanup: OK'
 echo 'Remote preflight purity: OK'
+echo 'Remote WP-CLI root guard: OK'

@@ -1,5 +1,14 @@
 #!/usr/bin/env sh
 
+case "${FIXTURE_EXPECT_ALLOW_ROOT-}" in
+	1)
+		case " $* " in *' --allow-root '*) ;; *) echo 'Missing --allow-root for root WP-CLI invocation' >&2; exit 1 ;; esac
+		;;
+	0)
+		case " $* " in *' --allow-root '*) echo 'Unexpected --allow-root for non-root WP-CLI invocation' >&2; exit 1 ;; esac
+		;;
+esac
+
 case " $* " in
 	*' eval '*)
 		printf '%s\n' "${FIXTURE_ENVIRONMENT:-production}"

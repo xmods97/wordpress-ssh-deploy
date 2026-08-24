@@ -5,7 +5,13 @@ repo_dir="$(CDPATH= cd -P "$(dirname "$0")/.." && pwd)"
 fixture_dir="${TMPDIR:-/tmp}/wordpress-ssh-deploy-rollback-test-$$"
 target_root='/tmp/wordpress-ssh-deploy-staging-fixture'
 mkdir -p "$fixture_dir"
-trap 'rm -rf "$fixture_dir" "$target_root"' 0 1 2 15
+cleanup_fixture() {
+	status=$?
+	trap - 0 1 2 15
+	rm -rf "$fixture_dir" "$target_root"
+	exit "$status"
+}
+trap cleanup_fixture 0 1 2 15
 
 cp "$repo_dir/server-deploy.sh" "$fixture_dir/server-deploy.sh"
 cp "$repo_dir/tests/fixtures/server.config.staging.sh" "$fixture_dir/server.config.sh"
@@ -14,6 +20,7 @@ mkdir -p "$target_root/wp/wp-content" "$target_root/repo/.git" "$target_root/tmp
 : > "$target_root/id_ed25519"
 : > "$target_root/bin/wp"
 cp "$repo_dir/tests/fixtures/fake-php.sh" "$target_root/bin/php"
+cp "$repo_dir/tests/fixtures/fake-id.sh" "$target_root/bin/id"
 cp "$repo_dir/tests/fixtures/fake-mysqldump.sh" "$target_root/bin/mysqldump"
 cp "$repo_dir/tests/fixtures/fake-mysql.sh" "$target_root/bin/mysql"
 cp "$repo_dir/tests/fixtures/fake-mysql.sh" "$target_root/bin/chmod"
@@ -43,6 +50,7 @@ output="$(
 	FIXTURE_ENVIRONMENT='staging' \
 	FIXTURE_URL='https://staging.example.com' \
 	FIXTURE_DB_NAME='wordpress_staging' \
+	FIXTURE_EFFECTIVE_UID="${FIXTURE_EFFECTIVE_UID:-1000}" \
 	ENVIRONMENT='staging' \
 	LOCAL_URL='http://example.test' \
 	REMOTE_URL='https://staging.example.com' \
@@ -85,6 +93,11 @@ if [ "${FIXTURE_FAIL_ALL_IMPORTS:-0}" = 1 ]; then
 		[ -n "$recovery_backup" ] && [ -s "$recovery_backup" ] || { echo 'Fallback recovery backup path was not preserved' >&2; exit 1; }
 		case "$output" in *'RECOVERY_MARKER='*) echo 'Marker path must not be printed after marker chmod failure' >&2; exit 1 ;; esac
 		case "$output" in *'RECOVERY_COMMAND='*) ;; *) echo 'Fallback recovery command was not printed' >&2; exit 1 ;; esac
+		case "${FIXTURE_EFFECTIVE_UID:-1000}" in
+			0) recovery_wp_cli="$target_root/bin/php $target_root/bin/wp --allow-root --path='$target_root/wp'" ;;
+			*) recovery_wp_cli="$target_root/bin/php $target_root/bin/wp --path='$target_root/wp'" ;;
+		esac
+		case "$output" in *"RECOVERY_COMMAND=$recovery_wp_cli db import '$recovery_backup'"*) ;; *) echo 'Fallback recovery command does not use the expected root-aware prefix' >&2; exit 1 ;; esac
 		printf '%s\n' 'Degraded marker fallback: OK'
 	elif [ "${FIXTURE_CORRUPT_BACKUP_ON_FIRST_IMPORT:-0}" = 1 ] && [ "${FIXTURE_CHMOD_FAIL_DIR:-0}" = 1 ]; then
 		case "$output" in *'MANUAL_RECOVERY_PROTECTED_DIR_FAILED'*) ;; *) echo 'Protected-directory failure diagnostic was not returned' >&2; echo "$output" >&2; exit 1 ;; esac
@@ -120,8 +133,12 @@ if [ "${FIXTURE_FAIL_ALL_IMPORTS:-0}" = 1 ]; then
 	[ -n "$recovery_marker" ] && [ -s "$recovery_marker" ] || { echo 'Manual recovery marker was not written' >&2; exit 1; }
 	case "$output" in *fixture_password*) echo 'Database password leaked in output' >&2; exit 1 ;; esac
 	grep -Fq 'fixture_password' "$recovery_marker" && { echo 'Database password leaked in marker' >&2; exit 1; } || true
-	grep -Fq "restore_command=$target_root/bin/php $target_root/bin/wp --path='$target_root/wp' db import '$recovery_backup'" "$recovery_marker" || { echo 'Recovery command does not use PHP and WP-CLI' >&2; exit 1; }
-	grep -Fq "verify_command=$target_root/bin/php $target_root/bin/wp --path='$target_root/wp' core is-installed" "$recovery_marker" || { echo 'Recovery verification command is incomplete' >&2; exit 1; }
+	case "${FIXTURE_EFFECTIVE_UID:-1000}" in
+		0) recovery_wp_cli="$target_root/bin/php $target_root/bin/wp --allow-root --path='$target_root/wp'" ;;
+		*) recovery_wp_cli="$target_root/bin/php $target_root/bin/wp --path='$target_root/wp'" ;;
+	esac
+	grep -Fq "restore_command=$recovery_wp_cli db import '$recovery_backup'" "$recovery_marker" || { echo 'Recovery command does not use the expected root-aware PHP and WP-CLI prefix' >&2; exit 1; }
+	grep -Fq "verify_command=$recovery_wp_cli core is-installed" "$recovery_marker" || { echo 'Recovery verification command is incomplete' >&2; exit 1; }
 	grep -Fq "600 $recovery_backup" "$target_root/chmod-calls.log" || { echo 'Recovery SQL permissions were not hardened to 600' >&2; exit 1; }
 	grep -Fq "600 $recovery_marker" "$target_root/chmod-calls.log" || { echo 'Recovery marker permissions were not hardened to 600' >&2; exit 1; }
 	[ "$(wc -l < "$target_root/mysql-calls.log")" -eq 2 ] || { echo 'Expected import and rollback calls' >&2; exit 1; }
@@ -148,6 +165,7 @@ SQL
 		FIXTURE_ENVIRONMENT='staging' \
 		FIXTURE_URL='https://staging.example.com' \
 		FIXTURE_DB_NAME='wordpress_staging' \
+		FIXTURE_EFFECTIVE_UID="${FIXTURE_EFFECTIVE_UID:-1000}" \
 		ENVIRONMENT='staging' \
 		LOCAL_URL='http://example.test' \
 		REMOTE_URL='https://staging.example.com' \

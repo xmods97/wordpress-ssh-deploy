@@ -16,7 +16,7 @@ Describe 'Remote POSIX safety' {
 	}
 
 	It 'passes shell syntax checks' {
-		foreach ($file in @('server-deploy.sh', 'server.config.example.sh', 'tests/server-safety.smoke.sh', 'tests/database-rollback.smoke.sh', 'tests/fixtures/server.config.production.sh', 'tests/fixtures/server.config.staging.sh', 'tests/fixtures/fake-php.sh', 'tests/fixtures/fake-mysqldump.sh', 'tests/fixtures/fake-mysql.sh', 'tests/fixtures/fake-df.sh')) {
+		foreach ($file in @('server-deploy.sh', 'server.config.example.sh', 'tests/server-safety.smoke.sh', 'tests/database-rollback.smoke.sh', 'tests/fixtures/server.config.production.sh', 'tests/fixtures/server.config.staging.sh', 'tests/fixtures/fake-php.sh', 'tests/fixtures/fake-id.sh', 'tests/fixtures/fake-mysqldump.sh', 'tests/fixtures/fake-mysql.sh', 'tests/fixtures/fake-df.sh')) {
 			& $shPath -n (Join-Path $repoRoot $file)
 			$LASTEXITCODE | Should Be 0
 		}
@@ -44,6 +44,18 @@ Describe 'Remote POSIX safety' {
 			$output -join "`n" | Should Match 'Remote production policy: OK'
 			$output -join "`n" | Should Match 'Remote lock cleanup: OK'
 			$output -join "`n" | Should Match 'Remote preflight purity: OK'
+			$output -join "`n" | Should Match 'Remote WP-CLI root guard: OK'
+		} finally {
+			Pop-Location
+		}
+	}
+
+	It 'preserves a forced smoke-test failure exit status' {
+		Push-Location $repoRoot
+		try {
+			$output = & $shPath -c 'PATH=/usr/bin:/bin; export PATH; FIXTURE_FORCE_SMOKE_FAILURE=1; export FIXTURE_FORCE_SMOKE_FAILURE; sh ./tests/server-safety.smoke.sh' 2>&1
+			$LASTEXITCODE | Should Be 1
+			$output -join "`n" | Should Match 'Forced smoke failure'
 		} finally {
 			Pop-Location
 		}
@@ -77,6 +89,28 @@ Describe 'Remote POSIX safety' {
 			$output = & $shPath -c 'PATH=/usr/bin:/bin; export PATH; FIXTURE_FAIL_ALL_IMPORTS=1; export FIXTURE_FAIL_ALL_IMPORTS; sh ./tests/database-rollback.smoke.sh' 2>&1
 			$LASTEXITCODE | Should Be 0
 			$output -join "`n" | Should Match 'Database double-failure manual recovery: OK'
+		} finally {
+			Pop-Location
+		}
+	}
+
+	It 'prints root-compatible manual recovery commands' {
+		Push-Location $repoRoot
+		try {
+			$output = & $shPath -c 'PATH=/usr/bin:/bin; export PATH; FIXTURE_FAIL_ALL_IMPORTS=1; export FIXTURE_FAIL_ALL_IMPORTS; FIXTURE_EFFECTIVE_UID=0; export FIXTURE_EFFECTIVE_UID; sh ./tests/database-rollback.smoke.sh' 2>&1
+			$LASTEXITCODE | Should Be 0
+			$output -join "`n" | Should Match 'Database double-failure manual recovery: OK'
+		} finally {
+			Pop-Location
+		}
+	}
+
+	It 'prints a root-compatible fallback recovery command when the marker is unavailable' {
+		Push-Location $repoRoot
+		try {
+			$output = & $shPath -c 'PATH=/usr/bin:/bin; export PATH; FIXTURE_FAIL_ALL_IMPORTS=1; export FIXTURE_FAIL_ALL_IMPORTS; FIXTURE_CHMOD_FAIL_MARKER=1; export FIXTURE_CHMOD_FAIL_MARKER; FIXTURE_EFFECTIVE_UID=0; export FIXTURE_EFFECTIVE_UID; sh ./tests/database-rollback.smoke.sh' 2>&1
+			$LASTEXITCODE | Should Be 0
+			$output -join "`n" | Should Match 'Degraded marker fallback: OK'
 		} finally {
 			Pop-Location
 		}
