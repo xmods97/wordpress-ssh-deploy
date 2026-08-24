@@ -47,6 +47,7 @@ PHP_BIN="${PHP_BIN:-php}"
 WP_CLI_BIN="${WP_CLI_BIN:-wp}"
 timestamp="$(date +%Y%m%d-%H%M%S)"
 lock_acquired=0
+cleanup_artifacts=0
 ARCHIVE_LISTING=''
 BACKUP_FILE=''
 TRANSIENT_NEW=''
@@ -159,30 +160,32 @@ assert_wordpress_target() {
 cleanup_exit() {
 	status=$?
 	trap - 0 1 2 15
-	if [ -n "$SQL_FILE" ]; then
-		case "$SQL_FILE" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$SQL_FILE" ;; esac
-	fi
-	if [ -n "$UPLOADS_ZIP" ]; then
-		case "$UPLOADS_ZIP" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$UPLOADS_ZIP" ;; esac
-	fi
-	if [ -n "$ARCHIVE_LISTING" ]; then
-		case "$ARCHIVE_LISTING" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$ARCHIVE_LISTING" ;; esac
-	fi
-	if [ -n "$TRANSIENT_NEW" ]; then
-		case "$TRANSIENT_NEW" in "$WP_DIR"/*) rm -rf "$TRANSIENT_NEW" ;; esac
-	fi
-	if [ -n "$TRANSIENT_OLD" ] && [ -n "$TRANSIENT_TARGET" ]; then
-		case "$TRANSIENT_OLD:$TRANSIENT_TARGET" in
-			"$WP_DIR"/*:"$WP_DIR"/*)
-				if [ ! -e "$TRANSIENT_TARGET" ] && [ -e "$TRANSIENT_OLD" ]; then mv "$TRANSIENT_OLD" "$TRANSIENT_TARGET" 2>/dev/null || true
-				elif [ -e "$TRANSIENT_OLD" ]; then rm -rf "$TRANSIENT_OLD"
-				fi
-				;;
-		esac
-	fi
-	if [ "$lock_acquired" -eq 1 ]; then
-		rm -f "$SERVER_LOCK_DIR/pid"
-		rmdir "$SERVER_LOCK_DIR" 2>/dev/null || true
+	if [ "$cleanup_artifacts" -eq 1 ]; then
+		if [ -n "$SQL_FILE" ]; then
+			case "$SQL_FILE" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$SQL_FILE" ;; esac
+		fi
+		if [ -n "$UPLOADS_ZIP" ]; then
+			case "$UPLOADS_ZIP" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$UPLOADS_ZIP" ;; esac
+		fi
+		if [ -n "$ARCHIVE_LISTING" ]; then
+			case "$ARCHIVE_LISTING" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$ARCHIVE_LISTING" ;; esac
+		fi
+		if [ -n "$TRANSIENT_NEW" ]; then
+			case "$TRANSIENT_NEW" in "$WP_DIR"/*) rm -rf "$TRANSIENT_NEW" ;; esac
+		fi
+		if [ -n "$TRANSIENT_OLD" ] && [ -n "$TRANSIENT_TARGET" ]; then
+			case "$TRANSIENT_OLD:$TRANSIENT_TARGET" in
+				"$WP_DIR"/*:"$WP_DIR"/*)
+					if [ ! -e "$TRANSIENT_TARGET" ] && [ -e "$TRANSIENT_OLD" ]; then mv "$TRANSIENT_OLD" "$TRANSIENT_TARGET" 2>/dev/null || true
+					elif [ -e "$TRANSIENT_OLD" ]; then rm -rf "$TRANSIENT_OLD"
+					fi
+					;;
+			esac
+		fi
+		if [ "$lock_acquired" -eq 1 ]; then
+			rm -f "$SERVER_LOCK_DIR/pid"
+			rmdir "$SERVER_LOCK_DIR" 2>/dev/null || true
+		fi
 	fi
 	exit "$status"
 }
@@ -491,11 +494,6 @@ cleanup_backups() {
 assert_mode
 assert_server_policy
 assert_wordpress_target
-acquire_lock
-cleanup_stale_temp_files
-mkdir -p "$BACKUP_DIR"
-assert_free_space_kb "$WP_DIR" 0 "WordPress filesystem"
-assert_free_space_kb "$BACKUP_DIR" 0 "Backup filesystem"
 
 case "$DEPLOY_MODE" in
 	preflight)
@@ -503,25 +501,36 @@ case "$DEPLOY_MODE" in
 		[ -f "$SERVER_GIT_SSH_KEY" ] || fail "Server Git SSH key was not found"
 		wp_cli --info
 		;;
-	code)
-		update_repository
-		copy_code
-		;;
-	db|full)
-		require_cmd wc
-		assert_sql_dump "$SQL_FILE"
-		incoming_kb="$(wc -c < "$SQL_FILE" | awk '{ print int(($1 + 1023) / 1024) }')"
-		case "$incoming_kb" in ''|*[!0-9]*) fail "Incoming SQL size check failed" ;; esac
-		assert_free_space_kb "$BACKUP_DIR" "$incoming_kb" "Backup filesystem"
-		if [ "$DEPLOY_MODE" = full ]; then
-			update_repository
-			copy_code
-		fi
-		backup_database
-		import_database
-		[ -z "$UPLOADS_ZIP" ] || sync_uploads
-		cleanup_wordpress
-		cleanup_backups || true
+	code|db|full)
+		cleanup_artifacts=1
+		acquire_lock
+		cleanup_stale_temp_files
+		mkdir -p "$BACKUP_DIR"
+		assert_free_space_kb "$WP_DIR" 0 "WordPress filesystem"
+		assert_free_space_kb "$BACKUP_DIR" 0 "Backup filesystem"
+
+		case "$DEPLOY_MODE" in
+			code)
+				update_repository
+				copy_code
+				;;
+			db|full)
+				require_cmd wc
+				assert_sql_dump "$SQL_FILE"
+				incoming_kb="$(wc -c < "$SQL_FILE" | awk '{ print int(($1 + 1023) / 1024) }')"
+				case "$incoming_kb" in ''|*[!0-9]*) fail "Incoming SQL size check failed" ;; esac
+				assert_free_space_kb "$BACKUP_DIR" "$incoming_kb" "Backup filesystem"
+				if [ "$DEPLOY_MODE" = full ]; then
+					update_repository
+					copy_code
+				fi
+				backup_database
+				import_database
+				[ -z "$UPLOADS_ZIP" ] || sync_uploads
+				cleanup_wordpress
+				cleanup_backups || true
+				;;
+		esac
 		;;
 esac
 

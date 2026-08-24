@@ -43,6 +43,7 @@ Describe 'Remote POSIX safety' {
 			$LASTEXITCODE | Should Be 0
 			$output -join "`n" | Should Match 'Remote production policy: OK'
 			$output -join "`n" | Should Match 'Remote lock cleanup: OK'
+			$output -join "`n" | Should Match 'Remote preflight purity: OK'
 		} finally {
 			Pop-Location
 		}
