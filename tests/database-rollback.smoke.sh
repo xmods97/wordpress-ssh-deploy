@@ -33,8 +33,10 @@ cat > "$incoming" <<'SQL'
 -- Table structure for table `wp_options`
 CREATE TABLE `wp_options` (`option_id` bigint NOT NULL);
 INSERT INTO `wp_options` VALUES (2);
--- INCOMING_FAIL
 SQL
+if [ "${FIXTURE_FAIL_AFTER_IMPORT:-0}" != 1 ]; then
+	printf '%s\n' '-- INCOMING_FAIL' >> "$incoming"
+fi
 
 if [ "${FIXTURE_EXPECT_ROLLBACK_RETENTION:-0}" = 1 ]; then
 	old_backup=1
@@ -42,6 +44,11 @@ if [ "${FIXTURE_EXPECT_ROLLBACK_RETENTION:-0}" = 1 ]; then
 		printf '%s\n' 'old backup' > "$target_root/backups/db-20000101-0000${old_backup}.sql"
 		old_backup=$((old_backup + 1))
 	done
+fi
+
+uploads_input=''
+if [ "${FIXTURE_FAIL_AFTER_IMPORT:-0}" = 1 ]; then
+	uploads_input="$target_root/tmp/missing-uploads.zip"
 fi
 
 output="$(
@@ -68,11 +75,16 @@ output="$(
 	MIN_REMOTE_FREE_SPACE_MB='1' \
 	DEPLOY_MODE='db' \
 	SQL_FILE="$incoming" \
-	UPLOADS_ZIP='' \
+	UPLOADS_ZIP="$uploads_input" \
 	sh "$fixture_dir/server-deploy.sh" 2>&1 || true
 )"
 
-if [ "${FIXTURE_FAIL_ALL_IMPORTS:-0}" = 1 ]; then
+if [ "${FIXTURE_FAIL_AFTER_IMPORT:-0}" = 1 ]; then
+	case "$output" in *'Uploads archive was not found'*) ;; *) echo 'Post-import failure was not returned' >&2; echo "$output" >&2; exit 1 ;; esac
+	case "$output" in *'AUTOMATIC_DATABASE_ROLLBACK=completed'*) ;; *) echo 'Automatic post-import rollback was not confirmed' >&2; echo "$output" >&2; exit 1 ;; esac
+	[ "$(wc -l < "$target_root/mysql-calls.log")" -eq 2 ] || { echo 'Expected import and automatic rollback calls' >&2; exit 1; }
+	printf '%s\n' 'Post-import database rollback: OK'
+elif [ "${FIXTURE_FAIL_ALL_IMPORTS:-0}" = 1 ]; then
 	if [ "${FIXTURE_CHMOD_FAIL:-0}" = 1 ]; then
 		case "$output" in
 			*'MANUAL_RECOVERY_PROTECTED_DIR_FAILED'*) ;;

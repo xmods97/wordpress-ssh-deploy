@@ -35,6 +35,13 @@ Describe 'POSIX shell quoting' {
 		(New-RemoteDeployCommand $config 'full') | Should Match "PRODUCTION_FULL_OPT_IN='0'"
 	}
 
+	It 'does not send the production full-mode token for preflight' {
+		$config = $validConfiguration.Clone()
+		$config.AllowProductionFull = $true
+		$command = New-RemoteDeployCommand $config 'preflight'
+		$command | Should Not Match 'PRODUCTION_FULL_OPT_IN='
+	}
+
 	It 'does not expose a quoted value as a second command' {
 		$command = New-RemoteDeployCommand $validConfiguration 'db' "x'; touch /tmp/unsafe; echo '" ''
 		$command | Should Match 'SQL_FILE='
@@ -43,6 +50,26 @@ Describe 'POSIX shell quoting' {
 }
 
 Describe 'External command handling' {
+	It 'uses the AST-only profile loader and keeps preflight independent of Git status' {
+		$deploy = Get-Content -Raw (Join-Path $repoRoot 'deploy.ps1')
+		$deploy | Should Match 'Import-DeployProfileData'
+		$deploy | Should Match '\[string\] \$ProfilePath'
+		$deploy | Should Not Match '\. \$configPath'
+		$deploy | Should Match '\$PreflightOnly -and \$Mode -ne .db.'
+	}
+
+	It 'allows a verified explicit release path to bypass the working tree Git gate' {
+		$deploy = Get-Content -Raw (Join-Path $repoRoot 'deploy.ps1')
+		$deploy | Should Match '\$Mode -ne .db. -and -not \$resolvedReleasePath'
+		$deploy | Should Match 'Assert-ReleasePackage \$resolvedReleasePath'
+	}
+
+	It 'keeps legacy scp opt-in per profile' {
+		$deploy = Get-Content -Raw (Join-Path $repoRoot 'deploy.ps1')
+		$deploy | Should Match "Contains\('UseLegacyScp'\)"
+		$deploy | Should Match "@\('-O', '-P'"
+	}
+
 	It 'reports a non-zero exit code without including command arguments' {
 		$message = ''
 		try {

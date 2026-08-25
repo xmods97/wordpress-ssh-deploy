@@ -7,8 +7,9 @@ the deployment.
 
 > [!WARNING]
 > `db` and `full` replace the remote database. `full` can also replace the
-> configured uploads directory. Both modes are forbidden when the local or
-> server environment is `production`.
+> configured uploads directory. `db` remains forbidden in `production`;
+> `full` requires both the local native Boolean opt-in and the independent
+> private server policy opt-in.
 
 ## Features
 
@@ -40,7 +41,8 @@ Remote Linux host:
 ## Setup
 
 1. Copy these files into the root of the WordPress code repository.
-2. Copy `deploy.config.example.ps1` to `deploy.config.ps1`.
+2. Copy `deploy.config.example.ps1` to `deploy.config.ps1`, or pass an external
+   AST-only profile with `-ProfilePath`.
 3. Select the target `Environment`: `development`, `staging`, or `production`.
 4. Fill every path, host, database safety lock, and `SyncPaths` entry.
 5. Set `ExpectedRemoteDomain`, `ExpectedRemoteWpPath`, and
@@ -86,10 +88,34 @@ The private server policy independently verifies the environment, URL,
 WordPress path, repository path, temporary path, backup path, and database name.
 It also pins the Git SSH key, PHP/WP-CLI executables, synchronized paths, backup
 retention, and lock location. Client-provided expected values cannot replace
-this policy. Production accepts only `code`; both local and remote scripts
-reject `db` and `full`. The server validates its policy and the actual WordPress
+this policy. Production accepts `code` and a separately gated `full`; `db` is
+always rejected. The server validates its policy and the actual WordPress
 target before updating the deployment repository. The installed runner and
 policy live outside the writable Git checkout so a pull cannot replace them.
+
+Private profiles are parsed as literal data only. The loader rejects commands,
+extra statements, dynamic expressions, and non-literal values; it never
+dot-sources a profile.
+
+### Restricted root wrapper
+
+For a site using `root-ssh-wrapper.sh`, keep the private wrapper configuration
+outside the Git checkout and root-owned with mode `0600`. The forced-command
+entry must also disable forwarding and interactive access, for example:
+
+```text
+restrict,command="/root/.../root-ssh-wrapper.sh /root/.../wrapper.config"
+```
+
+The SSH server must not allow user-controlled environment policy: use
+`PermitUserEnvironment no` and do not configure a broad `AcceptEnv`. The
+wrapper accepts only its fixed runner, temporary-directory operations, and
+legacy SCP. Set `UseLegacyScp = $true` only in a profile whose wrapper requires
+the legacy SCP protocol (`scp -O`). See
+`root-ssh-wrapper.config.example.sh` for the non-secret configuration shape.
+The Bella wrapper installer preserves the existing
+`ALLOW_PRODUCTION_FULL_OPT_IN` value; enabling that wrapper policy is a separate
+server-side approval step and is never enabled implicitly by wrapper installation.
 
 ### Internal structure
 

@@ -27,6 +27,11 @@ SERVER_CONFIG="$SCRIPT_DIR/server.config.sh"
 : "${SERVER_MIN_FREE_SPACE_MB:?SERVER_MIN_FREE_SPACE_MB is required in server.config.sh}"
 : "${SERVER_LOCK_DIR:?SERVER_LOCK_DIR is required in server.config.sh}"
 
+# Git source policy is private server configuration, never client input.
+SERVER_GIT_REMOTE="${SERVER_GIT_REMOTE:-origin}"
+SERVER_GIT_BRANCH="${SERVER_GIT_BRANCH:-main}"
+SERVER_GIT_SSH_PORT="${SERVER_GIT_SSH_PORT:-22}"
+
 : "${ENVIRONMENT:?ENVIRONMENT is required}"
 : "${REMOTE_URL:?REMOTE_URL is required}"
 : "${WP_DIR:?WP_DIR is required}"
@@ -49,11 +54,14 @@ WP_CLI_BIN="${WP_CLI_BIN:-wp}"
 timestamp="$(date +%Y%m%d-%H%M%S)"
 lock_acquired=0
 cleanup_artifacts=0
+database_mutation_active=0
 ARCHIVE_LISTING=''
 BACKUP_FILE=''
 TRANSIENT_NEW=''
 TRANSIENT_OLD=''
 TRANSIENT_TARGET=''
+GIT_SSH_WRAPPER=''
+MYSQL_DEFAULTS_FILE=''
 MANUAL_RECOVERY_DIR=''
 MANUAL_RECOVERY_BACKUP=''
 MANUAL_RECOVERY_MARKER=''
@@ -143,6 +151,10 @@ assert_server_policy() {
 	[ "$KEEP_BACKUPS" = "$SERVER_KEEP_BACKUPS" ] || fail "Backup retention does not match server policy"
 	[ "$MIN_REMOTE_FREE_SPACE_MB" = "$SERVER_MIN_FREE_SPACE_MB" ] || fail "Free-space policy does not match server policy"
 	case "$SERVER_GIT_SSH_KEY" in *[!A-Za-z0-9_./-]*) fail "Server Git SSH key path contains unsafe characters" ;; esac
+	case "$SERVER_GIT_REMOTE" in ''|*[!A-Za-z0-9._-]*) fail "Server Git remote contains unsafe characters" ;; esac
+	case "$SERVER_GIT_BRANCH" in ''|/*|*..*|*//*|*[!A-Za-z0-9._/-]*) fail "Server Git branch contains unsafe characters" ;; esac
+	case "$SERVER_GIT_SSH_PORT" in ''|*[!0-9]*) fail "Server Git SSH port must be an integer" ;; esac
+	[ "$SERVER_GIT_SSH_PORT" -ge 1 ] && [ "$SERVER_GIT_SSH_PORT" -le 65535 ] || fail "Server Git SSH port is outside the allowed range"
 	case "$KEEP_BACKUPS" in ''|*[!0-9]*) fail "Backup retention must be an integer" ;; esac
 	[ "$KEEP_BACKUPS" -ge 1 ] && [ "$KEEP_BACKUPS" -le 1000 ] || fail "Backup retention is outside the allowed range"
 	case "$MIN_REMOTE_FREE_SPACE_MB" in ''|*[!0-9]*) fail "Minimum free space must be an integer" ;; esac
@@ -183,6 +195,14 @@ assert_wordpress_target() {
 cleanup_exit() {
 	status=$?
 	trap - 0 1 2 15
+	if [ "$status" -ne 0 ] && [ "$database_mutation_active" -eq 1 ] && [ -n "$BACKUP_FILE" ] && [ -s "$BACKUP_FILE" ]; then
+		if rollback_database_or_require_manual_recovery; then
+			printf '%s\n' 'AUTOMATIC_DATABASE_ROLLBACK=completed' >&2
+		else
+			printf '%s\n' 'AUTOMATIC_DATABASE_ROLLBACK=failed; manual recovery is required' >&2
+		fi
+		database_mutation_active=0
+	fi
 	if [ "$cleanup_artifacts" -eq 1 ]; then
 		if [ -n "$SQL_FILE" ]; then
 			case "$SQL_FILE" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$SQL_FILE" ;; esac
@@ -192,6 +212,12 @@ cleanup_exit() {
 		fi
 		if [ -n "$ARCHIVE_LISTING" ]; then
 			case "$ARCHIVE_LISTING" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$ARCHIVE_LISTING" ;; esac
+		fi
+		if [ -n "$GIT_SSH_WRAPPER" ]; then
+			case "$GIT_SSH_WRAPPER" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$GIT_SSH_WRAPPER" ;; esac
+		fi
+		if [ -n "$MYSQL_DEFAULTS_FILE" ]; then
+			case "$MYSQL_DEFAULTS_FILE" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$MYSQL_DEFAULTS_FILE" ;; esac
 		fi
 		if [ -n "$TRANSIENT_NEW" ]; then
 			case "$TRANSIENT_NEW" in "$WP_DIR"/*) rm -rf "$TRANSIENT_NEW" ;; esac
@@ -258,9 +284,24 @@ manual_recovery_backup_is_valid() {
 update_repository() {
 	require_cmd git
 	[ -f "$SERVER_GIT_SSH_KEY" ] || fail "Server Git SSH key was not found"
+	[ -d "$SERVER_EXPECTED_TMP_DIR" ] || fail "Server temporary directory was not found"
+	GIT_SSH_WRAPPER="$SERVER_EXPECTED_TMP_DIR/.git-ssh-wrapper.$$"
+	[ ! -e "$GIT_SSH_WRAPPER" ] || fail "Temporary Git SSH wrapper path already exists"
+	(
+		umask 077
+		printf '%s\n' '#!/bin/sh' "exec /usr/bin/ssh -p '$SERVER_GIT_SSH_PORT' -i '$SERVER_GIT_SSH_KEY' -o IdentitiesOnly=yes \"\$@\"" > "$GIT_SSH_WRAPPER"
+	)
+	chmod 700 "$GIT_SSH_WRAPPER"
 	(
 		cd "$REPO_DIR"
-		GIT_SSH_COMMAND="ssh -i $SERVER_GIT_SSH_KEY -o IdentitiesOnly=yes" git pull --ff-only origin main
+		[ -z "$(git status --porcelain)" ] || fail "Deployment Git repository has local changes"
+		GIT_SSH="$GIT_SSH_WRAPPER" git fetch "$SERVER_GIT_REMOTE" "$SERVER_GIT_BRANCH"
+		if git show-ref --verify --quiet "refs/heads/$SERVER_GIT_BRANCH"; then
+			GIT_SSH="$GIT_SSH_WRAPPER" git checkout "$SERVER_GIT_BRANCH"
+		else
+			GIT_SSH="$GIT_SSH_WRAPPER" git checkout -b "$SERVER_GIT_BRANCH" FETCH_HEAD
+		fi
+		GIT_SSH="$GIT_SSH_WRAPPER" git pull --ff-only "$SERVER_GIT_REMOTE" "$SERVER_GIT_BRANCH"
 	)
 }
 
@@ -276,6 +317,24 @@ database_connection() {
 			DB_PORT_VALUE=''
 			;;
 	esac
+}
+
+create_mysql_defaults_file() {
+	[ -n "$MYSQL_DEFAULTS_FILE" ] && return 0
+	MYSQL_DEFAULTS_FILE="$SERVER_EXPECTED_TMP_DIR/.mysql-client.$$.cnf"
+	[ ! -e "$MYSQL_DEFAULTS_FILE" ] || fail "Temporary MySQL credentials path already exists"
+	require_cmd sed
+	escaped_pass="$(printf '%s' "$pass" | sed 's/[\\"]/\\&/g')"
+	(
+		umask 077
+		printf '%s\n' '[client]' "user=$user" "password=\"$escaped_pass\"" "host=$DB_HOST_VALUE" > "$MYSQL_DEFAULTS_FILE"
+		if [ -n "$DB_PORT_VALUE" ]; then
+			printf '%s\n' "port=$DB_PORT_VALUE" >> "$MYSQL_DEFAULTS_FILE"
+		elif [ "$DB_HOST_VALUE" = 'localhost' ]; then
+			printf '%s\n' 'protocol=socket' >> "$MYSQL_DEFAULTS_FILE"
+		fi
+	)
+	escaped_pass=''
 }
 
 assert_sync_path() {
@@ -346,23 +405,24 @@ backup_database() {
 	user="$(wp_config_value DB_USER)"
 	pass="$(wp_config_value DB_PASSWORD)"
 	database_connection "$(wp_config_value DB_HOST)"
+	create_mysql_defaults_file
 	mkdir -p "$BACKUP_DIR"
 	BACKUP_FILE="$BACKUP_DIR/db-$timestamp.sql"
-	if [ -n "$DB_PORT_VALUE" ]; then
-		MYSQL_PWD="$pass" mysqldump --host="$DB_HOST_VALUE" --port="$DB_PORT_VALUE" --user="$user" --single-transaction --quick --no-tablespaces --default-character-set=utf8mb4 "$name" > "$BACKUP_FILE"
-	else
-		MYSQL_PWD="$pass" mysqldump --host="$DB_HOST_VALUE" --user="$user" --single-transaction --quick --no-tablespaces --default-character-set=utf8mb4 "$name" > "$BACKUP_FILE"
+	if ! mysqldump --defaults-file="$MYSQL_DEFAULTS_FILE" --single-transaction --quick --no-tablespaces --default-character-set=utf8mb4 "$name" > "$BACKUP_FILE"; then
+		rm -f "$BACKUP_FILE"
+		BACKUP_FILE=''
+		fail "Database backup failed"
 	fi
-	assert_sql_dump "$BACKUP_FILE"
+	if ! ( assert_sql_dump "$BACKUP_FILE" ); then
+		rm -f "$BACKUP_FILE"
+		BACKUP_FILE=''
+		fail "Database backup validation failed"
+	fi
 }
 
 mysql_import_file() {
 	import_file="$1"
-	if [ -n "$DB_PORT_VALUE" ]; then
-		MYSQL_PWD="$pass" mysql --host="$DB_HOST_VALUE" --port="$DB_PORT_VALUE" --user="$user" "$name" < "$import_file"
-	else
-		MYSQL_PWD="$pass" mysql --host="$DB_HOST_VALUE" --user="$user" "$name" < "$import_file"
-	fi
+	mysql --defaults-file="$MYSQL_DEFAULTS_FILE" "$name" < "$import_file"
 }
 
 preserve_manual_recovery() {
@@ -447,6 +507,7 @@ import_database() {
 	user="$(wp_config_value DB_USER)"
 	pass="$(wp_config_value DB_PASSWORD)"
 	database_connection "$(wp_config_value DB_HOST)"
+	create_mysql_defaults_file
 	if ! mysql_import_file "$SQL_FILE"; then
 		fail_after_database_mutation "Database import failed"
 	fi
@@ -472,8 +533,10 @@ rollback_database_or_require_manual_recovery() {
 fail_after_database_mutation() {
 	reason="$1"
 	if rollback_database_or_require_manual_recovery; then
+		database_mutation_active=0
 		fail "$reason; rollback completed"
 	fi
+	database_mutation_active=0
 	fail "$reason and rollback failed; manual recovery is required"
 }
 
@@ -576,11 +639,13 @@ case "$DEPLOY_MODE" in
 					copy_code
 				fi
 				backup_database
+				database_mutation_active=1
 				import_database
 				rewrite_wordpress_urls
-				finalize_database_backup
 				[ -z "$UPLOADS_ZIP" ] || sync_uploads
 				cleanup_wordpress
+				database_mutation_active=0
+				finalize_database_backup
 				cleanup_backups || true
 				;;
 		esac

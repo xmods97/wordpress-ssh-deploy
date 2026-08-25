@@ -5,6 +5,8 @@ $DeployConfig = @{
 	# Required: development, staging, or production.
 	# Production defaults to code-only. Full mode requires this Boolean opt-in and an independent server policy opt-in.
 	AllowProductionFull = $false
+	# Set true only for a profile whose forced-command wrapper accepts legacy SCP (-O).
+	UseLegacyScp = $false
 	Environment = 'staging'
 
 	LocalWpPath      = 'C:\Sites\example.test'

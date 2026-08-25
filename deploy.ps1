@@ -2,6 +2,8 @@
 param(
 	[Parameter(Position = 0)] [string] $Message = '',
 	[ValidateSet('full', 'code', 'db')] [string] $Mode = 'code',
+	[string] $ProfilePath = '',
+	[string] $ReleasePath = '',
 	[switch] $SkipGit,
 	[switch] $SkipUploads,
 	[switch] $PreflightOnly
@@ -21,20 +23,33 @@ function New-Zip([string] $SourceDirectory, [string] $DestinationZip) {
 		$SourceDirectory, $DestinationZip, [System.IO.Compression.CompressionLevel]::Optimal, $false
 	)
 }
-
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $modulePath = Join-Path $repoRoot 'src\WordPressSshDeploy.psm1'
-$configPath = Join-Path $repoRoot 'deploy.config.ps1'
+$defaultConfigPath = Join-Path $repoRoot 'deploy.config.ps1'
+$configPath = if ([string]::IsNullOrWhiteSpace($ProfilePath)) {
+	$defaultConfigPath
+} elseif ([IO.Path]::IsPathRooted($ProfilePath)) {
+	$ProfilePath
+} else {
+	Join-Path $repoRoot $ProfilePath
+}
 if (-not (Test-Path -LiteralPath $modulePath)) {
 	throw 'Missing src\WordPressSshDeploy.psm1.'
 }
-if (-not (Test-Path -LiteralPath $configPath)) {
-	throw 'Missing deploy.config.ps1. Copy deploy.config.example.ps1 and fill in your values.'
+if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+	if ([string]::IsNullOrWhiteSpace($ProfilePath)) {
+		throw 'Missing deploy.config.ps1. Copy deploy.config.example.ps1 and fill in your values, or pass -ProfilePath.'
+	}
+	throw "Deploy profile not found: $configPath"
 }
 Import-Module $modulePath -Force
-. $configPath
-if (-not $DeployConfig) { throw 'deploy.config.ps1 must define $DeployConfig.' }
+$DeployConfig = Import-DeployProfileData -Path $configPath
 Assert-DeployConfiguration -Configuration $DeployConfig
+$resolvedReleasePath = ''
+if (-not [string]::IsNullOrWhiteSpace($ReleasePath)) {
+	if ($Mode -eq 'code') { throw '-ReleasePath is supported only for db or full mode.' }
+	$resolvedReleasePath = if ([IO.Path]::IsPathRooted($ReleasePath)) { [IO.Path]::GetFullPath($ReleasePath) } else { [IO.Path]::GetFullPath((Join-Path $repoRoot $ReleasePath)) }
+}
 $allowProductionFull = $DeployConfig.AllowProductionFull -is [bool] -and $DeployConfig.AllowProductionFull
 Assert-DeployModeAllowed -Environment $DeployConfig.Environment -Mode $Mode -AllowProductionFull $allowProductionFull
 if ($Message) {
@@ -53,7 +68,13 @@ $remoteUploads = "$($DeployConfig.RemoteTmpPath)/uploads-$stamp.zip"
 $target = "$($DeployConfig.SshUser)@$($DeployConfig.SshHost)"
 $remoteCleanupNeeded = $false
 $sshArgs = @('-p', [string]$DeployConfig.SshPort)
-$scpArgs = @('-P', [string]$DeployConfig.SshPort)
+# Forced-command wrappers use the legacy SCP protocol. Keep this opt-in per
+# profile so ordinary sites retain the OpenSSH default behavior.
+$scpArgs = if ($DeployConfig.Contains('UseLegacyScp') -and $DeployConfig.UseLegacyScp) {
+	@('-O', '-P', [string]$DeployConfig.SshPort)
+} else {
+	@('-P', [string]$DeployConfig.SshPort)
+}
 if ($DeployConfig.SshKeyPath) {
 	$sshArgs += @('-i', $DeployConfig.SshKeyPath, '-o', 'IdentitiesOnly=yes')
 	$scpArgs += @('-i', $DeployConfig.SshKeyPath, '-o', 'IdentitiesOnly=yes')
@@ -63,19 +84,20 @@ try {
 	Write-Step 'Local preflight'
 	Assert-Path $DeployConfig.LocalWpPath 'Local WordPress'
 	Assert-Path (Join-Path $DeployConfig.LocalWpPath 'wp-config.php') 'wp-config.php'
-	if ($Mode -ne 'db') { Assert-Path $DeployConfig.GitPath 'Git' }
+	if (-not $PreflightOnly -and $Mode -ne 'db' -and -not $resolvedReleasePath) { Assert-Path $DeployConfig.GitPath 'Git' }
 	if ($Mode -ne 'code') {
 		Assert-Path $DeployConfig.MysqldumpPath 'mysqldump'
 		if (-not $SkipUploads) { Assert-Path $DeployConfig.LocalUploadsPath 'Uploads' }
+	}
+	if ($resolvedReleasePath) {
+		Assert-ReleasePackage $resolvedReleasePath $DeployConfig (-not $SkipUploads)
 	}
 	$requiredLocalBytes = [long] $DeployConfig.MinimumLocalFreeSpaceMB * 1MB
 	if ($Mode -ne 'code' -and -not $SkipUploads) {
 		$requiredLocalBytes += Get-DirectoryContentSizeBytes $DeployConfig.LocalUploadsPath
 	}
 	Assert-AvailableDiskSpace $repoRoot $requiredLocalBytes 'Local deployment workspace'
-	New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
-
-	if ($Mode -ne 'db') {
+	if (-not $PreflightOnly -and $Mode -ne 'db' -and -not $resolvedReleasePath) {
 		Write-Step 'Verify Git checkout'
 		$status = @(Invoke-CommandOutput $DeployConfig.GitPath @('status','--porcelain','--untracked-files=all') $repoRoot)
 		if ($status.Count -gt 0) {
@@ -95,28 +117,38 @@ try {
 		return
 	}
 
+	if (-not $resolvedReleasePath) { New-Item -ItemType Directory -Force -Path $buildDir | Out-Null }
+
 	if ($Mode -ne 'code') {
-		Write-Step 'Export database'
-		$dbArgs = @("--host=$($DeployConfig.LocalDbHost)","--user=$($DeployConfig.LocalDbUser)","--result-file=$sqlPath",'--single-transaction','--quick','--default-character-set=utf8mb4',$DeployConfig.LocalDbName)
-		$previousMysqlPassword = $env:MYSQL_PWD
-		try {
-			if ($DeployConfig.LocalDbPassword) { $env:MYSQL_PWD = $DeployConfig.LocalDbPassword }
-			else { Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue }
-			Invoke-CheckedCommand $DeployConfig.MysqldumpPath $dbArgs $repoRoot
-			Assert-SqlDumpFile $sqlPath
-		} finally {
-			if ($null -eq $previousMysqlPassword) { Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue }
-			else { $env:MYSQL_PWD = $previousMysqlPassword }
-		}
-		if (-not $SkipUploads) {
-			Write-Step 'Pack uploads'
-			New-Zip $DeployConfig.LocalUploadsPath $uploadsZip
-			Assert-ZipArchiveFile $uploadsZip
+		$localSqlPath = $sqlPath
+		$localUploadsPath = $uploadsZip
+		if ($resolvedReleasePath) {
+			$localSqlPath = Join-Path $resolvedReleasePath 'database.sql'
+			$localUploadsPath = Join-Path $resolvedReleasePath 'uploads.zip'
+			Write-Ok "Using verified release package: $resolvedReleasePath"
+		} else {
+			Write-Step 'Export database'
+			$dbArgs = @("--host=$($DeployConfig.LocalDbHost)","--user=$($DeployConfig.LocalDbUser)","--result-file=$sqlPath",'--single-transaction','--quick','--default-character-set=utf8mb4',$DeployConfig.LocalDbName)
+			$previousMysqlPassword = $env:MYSQL_PWD
+			try {
+				if ($DeployConfig.LocalDbPassword) { $env:MYSQL_PWD = $DeployConfig.LocalDbPassword }
+				else { Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue }
+				Invoke-CheckedCommand $DeployConfig.MysqldumpPath $dbArgs $repoRoot
+				Assert-SqlDumpFile $sqlPath
+			} finally {
+				if ($null -eq $previousMysqlPassword) { Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue }
+				else { $env:MYSQL_PWD = $previousMysqlPassword }
+			}
+			if (-not $SkipUploads) {
+				Write-Step 'Pack uploads'
+				New-Zip $DeployConfig.LocalUploadsPath $uploadsZip
+				Assert-ZipArchiveFile $uploadsZip
+			}
 		}
 		Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, "mkdir -p $(ConvertTo-ShSingleQuotedString $DeployConfig.RemoteTmpPath)")) $repoRoot
 		$remoteCleanupNeeded = $true
-		Invoke-CheckedCommand 'scp' ($scpArgs + @($sqlPath, "$target`:$remoteSql")) $repoRoot
-		if (-not $SkipUploads) { Invoke-CheckedCommand 'scp' ($scpArgs + @($uploadsZip, "$target`:$remoteUploads")) $repoRoot }
+		Invoke-CheckedCommand 'scp' ($scpArgs + @($localSqlPath, "$target`:$remoteSql")) $repoRoot
+		if (-not $SkipUploads) { Invoke-CheckedCommand 'scp' ($scpArgs + @($localUploadsPath, "$target`:$remoteUploads")) $repoRoot }
 	}
 
 	Write-Step 'Run remote deployment'

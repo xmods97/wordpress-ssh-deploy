@@ -37,6 +37,87 @@ Describe 'Deploy configuration validation' {
 		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'AllowProductionFull must be a Boolean'
 	}
 
+	It 'accepts legacy SCP only as a Boolean profile opt-in' {
+		$config = $validConfiguration.Clone()
+		$config.UseLegacyScp = $true
+		@(Get-DeployConfigurationErrors $config).Count | Should Be 0
+		$config.UseLegacyScp = 'true'
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'UseLegacyScp must be a Boolean'
+	}
+
+	It 'accepts the typed profile metadata and pull policy keys' {
+		$config = $validConfiguration.Clone()
+		$config.SiteId = 'example-site'
+		$config.DisplayName = 'Example site'
+		$config.GitRemoteName = 'origin'
+		$config.GitBranch = 'main'
+		$config.CodeRepositoryPath = 'C:\Sites\example-site'
+		$config.WorkRoot = 'C:\Deploy\example-site'
+		$config.MysqlPath = 'C:\laragon\bin\mysql.exe'
+		$config.LocalPhpPath = 'C:\laragon\bin\php.exe'
+		$config.LocalWpCliPath = 'C:\tools\wp-cli.phar'
+		$config.ExpectedDbTablePrefix = 'wp_'
+		$config.ExpectedDbTableCount = 19
+		$config.ExpectedPullDbTableCount = 19
+		$config.ExpectedWordPressCoreVersion = '7.0.4'
+		$config.FullSyncPaths = @('wp-content/themes')
+		$config.ProtectedSyncPaths = @('wp-config.php', '.htaccess')
+		$config.PullEnabled = $true
+		$config.AllowProductionPull = $true
+		$config.LocalBackupDirectory = 'C:\Deploy\example-site\backups'
+		$config.AllowedPullPaths = @('wp-content/uploads')
+		$config.FullPullPaths = @('wp-content/uploads')
+		$config.ExcludedPullPaths = @('wp-content/cache')
+		$config.RequirePullConfirmation = $true
+		$config.KeepLocalBackups = 5
+		$config.KeepBackupDays = 30
+		$config.MaxBackupSizeMB = 10240
+		$config.MinimumPullDbTableCount = 19
+		$config.AllowDestructiveLocalReplace = $false
+		$config.CorePolicy = 'preserve-local-core'
+		@(Get-DeployConfigurationErrors $config).Count | Should Be 0
+
+		$config.ExpectedDbTablePrefix = 'wp-'
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'ExpectedDbTablePrefix contains unsupported characters'
+	}
+
+	It 'requires the database prefix and exact table count together' {
+		$config = $validConfiguration.Clone()
+		$config.ExpectedDbTablePrefix = 'wp_'
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'ExpectedDbTablePrefix and ExpectedDbTableCount must be configured together'
+		$config.Remove('ExpectedDbTablePrefix')
+		$config.ExpectedDbTableCount = 19
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'ExpectedDbTablePrefix and ExpectedDbTableCount must be configured together'
+	}
+
+	It 'applies safety and duplicate checks to profile path arrays' {
+		$config = $validConfiguration.Clone()
+		$config.FullSyncPaths = @('.git')
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'Unsafe FullSyncPaths value'
+		$config.FullSyncPaths = @('wp-content/uploads', 'WP-CONTENT/UPLOADS')
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'Duplicate FullSyncPaths value'
+		$config.FullSyncPaths = @('wp-content/uploads')
+		$config.ProtectedSyncPaths = @('wp-config.php', '.git')
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'Unsafe ProtectedSyncPaths value'
+	}
+
+	It 'rejects path control characters without throwing and blocks option-like Git names' {
+		foreach ($path in @("wp-content|x", "wp-content`r`nx")) {
+			$config = $validConfiguration.Clone()
+			$config.FullSyncPaths = @($path)
+			$errors = $null
+			try { $errors = (Get-DeployConfigurationErrors $config) -join "`n" } catch { throw 'Path validation must fail closed without throwing.' }
+			$errors | Should Match 'Unsafe FullSyncPaths value'
+		}
+
+		$config = $validConfiguration.Clone()
+		$config.GitRemoteName = '--upload-pack'
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'GitRemoteName contains unsupported characters'
+		$config.GitRemoteName = 'origin'
+		$config.GitBranch = '--upload-pack'
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'GitBranch contains unsupported characters'
+	}
+
 	It 'rejects a remote URL with a different domain' {
 		$config = $validConfiguration.Clone()
 		$config.RemoteUrl = 'https://other.example.com'
