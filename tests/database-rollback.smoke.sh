@@ -18,6 +18,10 @@ cp "$repo_dir/tests/fixtures/fake-mysqldump.sh" "$target_root/bin/mysqldump"
 cp "$repo_dir/tests/fixtures/fake-mysql.sh" "$target_root/bin/mysql"
 cp "$repo_dir/tests/fixtures/fake-mysql.sh" "$target_root/bin/chmod"
 cp "$repo_dir/tests/fixtures/fake-df.sh" "$target_root/bin/df"
+cp "$repo_dir/tests/fixtures/fake-du.sh" "$target_root/bin/du"
+cp "$repo_dir/tests/fixtures/fake-id.sh" "$target_root/bin/id"
+cp "$repo_dir/tests/fixtures/fake-stat.sh" "$target_root/bin/stat"
+cp "$repo_dir/tests/fixtures/fake-chown.sh" "$target_root/bin/chown"
 
 incoming="$target_root/tmp/local-db-fixture.sql"
 cat > "$incoming" <<'SQL'
@@ -53,6 +57,8 @@ output="$(
 	EXPECTED_DB_NAME='wordpress_staging' \
 	EXPECTED_REMOTE_DOMAIN='staging.example.com' \
 	SYNC_PATHS='wp-content/themes/example-theme' \
+	PLUGIN_SYNC_PATHS='' \
+	ALLOWED_DEPLOY_MODES='preflight,code,db,code-db,uploads,plugins,full' \
 	GIT_SSH_KEY="$target_root/id_ed25519" \
 	PHP_BIN="$target_root/bin/php" \
 	WP_CLI_BIN="$target_root/bin/wp" \
@@ -158,6 +164,8 @@ SQL
 		EXPECTED_DB_NAME='wordpress_staging' \
 		EXPECTED_REMOTE_DOMAIN='staging.example.com' \
 		SYNC_PATHS='wp-content/themes/example-theme' \
+		PLUGIN_SYNC_PATHS='' \
+		ALLOWED_DEPLOY_MODES='preflight,code,db,code-db,uploads,plugins,full' \
 		GIT_SSH_KEY="$target_root/id_ed25519" \
 		PHP_BIN="$target_root/bin/php" \
 		WP_CLI_BIN="$target_root/bin/wp" \

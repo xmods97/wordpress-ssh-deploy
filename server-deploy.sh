@@ -1,8 +1,16 @@
 #!/usr/bin/env sh
 set -eu
 
+# The forced root wrapper intentionally starts commands with this exact
+# minimal PATH. Extend only that trusted value with standard system admin
+# directories so root-owned utilities such as runuser remain available.
+case "${PATH:-}" in
+	/usr/bin:/bin) PATH=/usr/bin:/bin:/usr/sbin:/sbin ;;
+esac
+export PATH
+
 fail() { echo "ERROR: $1" >&2; exit 1; }
-require_cmd() { command -v "$1" >/dev/null 2>&1 || fail "Required command is not available"; }
+require_cmd() { command -v "$1" >/dev/null 2>&1 || fail "Required command is not available: $1"; }
 
 SCRIPT_DIR="$(CDPATH= cd -P "$(dirname "$0")" && pwd)"
 SERVER_CONFIG="$SCRIPT_DIR/server.config.sh"
@@ -23,9 +31,23 @@ SERVER_CONFIG="$SCRIPT_DIR/server.config.sh"
 : "${SERVER_PHP_BIN:?SERVER_PHP_BIN is required in server.config.sh}"
 : "${SERVER_WP_CLI_BIN:?SERVER_WP_CLI_BIN is required in server.config.sh}"
 : "${SERVER_SYNC_PATHS:?SERVER_SYNC_PATHS is required in server.config.sh}"
+: "${SERVER_PLUGIN_SYNC_PATHS:=}"
+if [ -z "${SERVER_ALLOWED_DEPLOY_MODES+x}" ]; then
+	case "$SERVER_ENVIRONMENT" in
+		production) SERVER_ALLOWED_DEPLOY_MODES='preflight,code,full' ;;
+		development|staging) SERVER_ALLOWED_DEPLOY_MODES='preflight,code,db,full' ;;
+		*) SERVER_ALLOWED_DEPLOY_MODES='' ;;
+	esac
+fi
+[ -n "$SERVER_ALLOWED_DEPLOY_MODES" ] || fail "SERVER_ALLOWED_DEPLOY_MODES must not be empty"
 : "${SERVER_KEEP_BACKUPS:?SERVER_KEEP_BACKUPS is required in server.config.sh}"
 : "${SERVER_MIN_FREE_SPACE_MB:?SERVER_MIN_FREE_SPACE_MB is required in server.config.sh}"
 : "${SERVER_LOCK_DIR:?SERVER_LOCK_DIR is required in server.config.sh}"
+
+# Git source policy is private server configuration, never client input.
+SERVER_GIT_REMOTE="${SERVER_GIT_REMOTE:-origin}"
+SERVER_GIT_BRANCH="${SERVER_GIT_BRANCH:-main}"
+SERVER_GIT_SSH_PORT="${SERVER_GIT_SSH_PORT:-22}"
 
 : "${ENVIRONMENT:?ENVIRONMENT is required}"
 : "${REMOTE_URL:?REMOTE_URL is required}"
@@ -40,6 +62,9 @@ SERVER_CONFIG="$SCRIPT_DIR/server.config.sh"
 : "${MIN_REMOTE_FREE_SPACE_MB:?MIN_REMOTE_FREE_SPACE_MB is required}"
 
 DEPLOY_MODE="${DEPLOY_MODE:-code}"
+PLUGIN_SYNC_PATHS="${PLUGIN_SYNC_PATHS:-}"
+ALLOWED_DEPLOY_MODES="${ALLOWED_DEPLOY_MODES:-}"
+PRODUCTION_FULL_OPT_IN="${PRODUCTION_FULL_OPT_IN:-0}"
 KEEP_BACKUPS="${KEEP_BACKUPS:-10}"
 SQL_FILE="${SQL_FILE:-}"
 UPLOADS_ZIP="${UPLOADS_ZIP:-}"
@@ -47,11 +72,21 @@ PHP_BIN="${PHP_BIN:-php}"
 WP_CLI_BIN="${WP_CLI_BIN:-wp}"
 timestamp="$(date +%Y%m%d-%H%M%S)"
 lock_acquired=0
+cleanup_artifacts=0
+database_mutation_active=0
 ARCHIVE_LISTING=''
 BACKUP_FILE=''
 TRANSIENT_NEW=''
 TRANSIENT_OLD=''
 TRANSIENT_TARGET=''
+TRANSIENT_REPLACED=0
+TRANSIENT_COMMITTED=0
+CANONICAL_WP_DIR="$WP_DIR"
+SITE_OWNER=''
+SITE_GROUP=''
+SITE_UID=''
+GIT_SSH_WRAPPER=''
+MYSQL_DEFAULTS_FILE=''
 MANUAL_RECOVERY_DIR=''
 MANUAL_RECOVERY_BACKUP=''
 MANUAL_RECOVERY_MARKER=''
@@ -94,14 +129,107 @@ assert_temp_file() {
 	esac
 }
 
-wp_cli() { "$PHP_BIN" "$WP_CLI_BIN" --path="$WP_DIR" "$@"; }
+wp_cli() {
+	case "$(id -u)" in
+		0) "$PHP_BIN" "$WP_CLI_BIN" --allow-root --path="$WP_DIR" "$@" ;;
+		*) "$PHP_BIN" "$WP_CLI_BIN" --path="$WP_DIR" "$@" ;;
+	esac
+}
+
+is_safe_owner_component() {
+	value="$1"
+	[ -n "$value" ] || return 1
+	case "$value" in
+		root|-*|*[!A-Za-z0-9_.@+-]*) return 1 ;;
+	esac
+}
+
+discover_site_owner() {
+	SITE_OWNER="$(stat -c '%U' "$WP_DIR/wp-content")" || { printf '%s\n' 'ERROR: Could not determine WordPress content owner' >&2; return 1; }
+	SITE_GROUP="$(stat -c '%G' "$WP_DIR/wp-content")" || { printf '%s\n' 'ERROR: Could not determine WordPress content group' >&2; return 1; }
+	SITE_UID="$(stat -c '%u' "$WP_DIR/wp-content")" || { printf '%s\n' 'ERROR: Could not determine WordPress content owner UID' >&2; return 1; }
+	is_safe_owner_component "$SITE_OWNER" || { printf '%s\n' 'ERROR: WordPress content owner is unsafe' >&2; return 1; }
+	is_safe_owner_component "$SITE_GROUP" || { printf '%s\n' 'ERROR: WordPress content group is unsafe' >&2; return 1; }
+	case "$SITE_UID" in ''|*[!0-9]*) printf '%s\n' 'ERROR: WordPress content owner UID is invalid' >&2; return 1 ;; esac
+	[ "$SITE_UID" -ne 0 ] || { printf '%s\n' 'ERROR: WordPress content owner must not be root' >&2; return 1; }
+}
+
+assert_runtime_cache_ownership_prerequisites() {
+	case "$(id -u)" in
+		0)
+			require_cmd stat
+			require_cmd chown
+			require_cmd runuser
+			discover_site_owner || fail "Runtime cache ownership prerequisites failed"
+			;;
+	esac
+}
+
+normalize_divi_runtime_cache_ownership() {
+	case "$(id -u)" in
+		0) ;;
+		*) return 0 ;;
+	esac
+
+	discover_site_owner || return 1
+	runtime_cache_dir="$WP_DIR/wp-content/et-cache"
+	[ ! -L "$runtime_cache_dir" ] || { printf '%s\n' 'ERROR: Divi runtime cache directory must not be a symbolic link' >&2; return 1; }
+	[ -e "$runtime_cache_dir" ] || return 0
+	[ -d "$runtime_cache_dir" ] || { printf '%s\n' 'ERROR: Divi runtime cache path is not a directory' >&2; return 1; }
+	chown -R -- "$SITE_OWNER:$SITE_GROUP" "$runtime_cache_dir" || { printf '%s\n' 'ERROR: Divi runtime cache ownership normalization failed' >&2; return 1; }
+}
+
+wp_cli_as_site_owner() {
+	case "$(id -u)" in
+		0)
+			discover_site_owner || return 1
+			runuser -u "$SITE_OWNER" -g "$SITE_GROUP" -- "$PHP_BIN" "$WP_CLI_BIN" --path="$WP_DIR" "$@"
+			;;
+		*) wp_cli "$@" ;;
+	esac
+}
+
+wp_cli_manual_prefix() {
+	case "$(id -u)" in
+		0) printf "%s %s --allow-root --path='%s'" "$PHP_BIN" "$WP_CLI_BIN" "$WP_DIR" ;;
+		*) printf "%s %s --path='%s'" "$PHP_BIN" "$WP_CLI_BIN" "$WP_DIR" ;;
+	esac
+}
+
 wp_config_value() { wp_cli config get "$1" --type=constant; }
 
 assert_mode() {
-	case "$DEPLOY_MODE" in preflight|code|db|full) ;; *) fail "Unknown DEPLOY_MODE" ;; esac
-	if [ "$SERVER_ENVIRONMENT" = production ] && [ "$DEPLOY_MODE" != code ] && [ "$DEPLOY_MODE" != preflight ]; then
-		fail "Database and uploads deployment is forbidden for production"
+	case "$DEPLOY_MODE" in preflight|code|db|code-db|uploads|plugins|full) ;; *) fail "Unknown DEPLOY_MODE" ;; esac
+	case ",$ALLOWED_DEPLOY_MODES," in *,$DEPLOY_MODE,*) ;; *) fail "Deploy mode is not enabled by profile policy" ;; esac
+	case ",$SERVER_ALLOWED_DEPLOY_MODES," in *,$DEPLOY_MODE,*) ;; *) fail "Deploy mode is not enabled by server policy" ;; esac
+	case "$PRODUCTION_FULL_OPT_IN" in 0|1) ;; *) fail "Invalid production full-mode client opt-in" ;; esac
+	case "${SERVER_ALLOW_PRODUCTION_FULL:-0}" in 0|1) ;; *) fail "Invalid server production full-mode policy" ;; esac
+	if [ "$SERVER_ENVIRONMENT" = production ]; then
+		case "$DEPLOY_MODE" in
+			preflight|code|db|code-db|uploads|plugins) ;;
+			full)
+				[ "$PRODUCTION_FULL_OPT_IN" = 1 ] || fail "Production full mode requires an explicit client profile opt-in"
+				[ "${SERVER_ALLOW_PRODUCTION_FULL:-0}" = 1 ] || fail "Production full mode is disabled by server policy"
+				;;
+		esac
 	fi
+	if [ "$DEPLOY_MODE" = plugins ] && [ -z "$PLUGIN_SYNC_PATHS" ]; then
+		fail "Plugins mode requires configured plugin sync paths"
+	fi
+}
+
+assert_allowed_modes_subset() {
+	requested="$1"
+	allowed="$2"
+	old_ifs="$IFS"
+	IFS=','
+	for mode in $requested; do
+		IFS="$old_ifs"
+		case "$mode" in preflight|code|db|code-db|uploads|plugins|full) ;; *) fail "Invalid profile deploy mode policy" ;; esac
+		case ",$allowed," in *,$mode,*) ;; *) fail "Profile deploy mode is outside server policy" ;; esac
+		IFS=','
+	done
+	IFS="$old_ifs"
 }
 
 assert_server_policy() {
@@ -116,9 +244,15 @@ assert_server_policy() {
 	[ "$PHP_BIN" = "$SERVER_PHP_BIN" ] || fail "PHP path does not match server policy"
 	[ "$WP_CLI_BIN" = "$SERVER_WP_CLI_BIN" ] || fail "WP-CLI path does not match server policy"
 	[ "$SYNC_PATHS" = "$SERVER_SYNC_PATHS" ] || fail "Sync paths do not match server policy"
+	[ "$PLUGIN_SYNC_PATHS" = "$SERVER_PLUGIN_SYNC_PATHS" ] || fail "Plugin sync paths do not match server policy"
+	assert_allowed_modes_subset "$ALLOWED_DEPLOY_MODES" "$SERVER_ALLOWED_DEPLOY_MODES"
 	[ "$KEEP_BACKUPS" = "$SERVER_KEEP_BACKUPS" ] || fail "Backup retention does not match server policy"
 	[ "$MIN_REMOTE_FREE_SPACE_MB" = "$SERVER_MIN_FREE_SPACE_MB" ] || fail "Free-space policy does not match server policy"
 	case "$SERVER_GIT_SSH_KEY" in *[!A-Za-z0-9_./-]*) fail "Server Git SSH key path contains unsafe characters" ;; esac
+	case "$SERVER_GIT_REMOTE" in ''|*[!A-Za-z0-9._-]*) fail "Server Git remote contains unsafe characters" ;; esac
+	case "$SERVER_GIT_BRANCH" in ''|/*|*..*|*//*|*[!A-Za-z0-9._/-]*) fail "Server Git branch contains unsafe characters" ;; esac
+	case "$SERVER_GIT_SSH_PORT" in ''|*[!0-9]*) fail "Server Git SSH port must be an integer" ;; esac
+	[ "$SERVER_GIT_SSH_PORT" -ge 1 ] && [ "$SERVER_GIT_SSH_PORT" -le 65535 ] || fail "Server Git SSH port is outside the allowed range"
 	case "$KEEP_BACKUPS" in ''|*[!0-9]*) fail "Backup retention must be an integer" ;; esac
 	[ "$KEEP_BACKUPS" -ge 1 ] && [ "$KEEP_BACKUPS" -le 1000 ] || fail "Backup retention is outside the allowed range"
 	case "$MIN_REMOTE_FREE_SPACE_MB" in ''|*[!0-9]*) fail "Minimum free space must be an integer" ;; esac
@@ -159,30 +293,54 @@ assert_wordpress_target() {
 cleanup_exit() {
 	status=$?
 	trap - 0 1 2 15
-	if [ -n "$SQL_FILE" ]; then
-		case "$SQL_FILE" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$SQL_FILE" ;; esac
+	if [ "$status" -ne 0 ] && [ "$database_mutation_active" -eq 1 ] && [ -n "$BACKUP_FILE" ] && [ -s "$BACKUP_FILE" ]; then
+		if rollback_database_or_require_manual_recovery; then
+			printf '%s\n' 'AUTOMATIC_DATABASE_ROLLBACK=completed' >&2
+		else
+			printf '%s\n' 'AUTOMATIC_DATABASE_ROLLBACK=failed; manual recovery is required' >&2
+		fi
+		database_mutation_active=0
 	fi
-	if [ -n "$UPLOADS_ZIP" ]; then
-		case "$UPLOADS_ZIP" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$UPLOADS_ZIP" ;; esac
-	fi
-	if [ -n "$ARCHIVE_LISTING" ]; then
-		case "$ARCHIVE_LISTING" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$ARCHIVE_LISTING" ;; esac
-	fi
-	if [ -n "$TRANSIENT_NEW" ]; then
-		case "$TRANSIENT_NEW" in "$WP_DIR"/*) rm -rf "$TRANSIENT_NEW" ;; esac
-	fi
-	if [ -n "$TRANSIENT_OLD" ] && [ -n "$TRANSIENT_TARGET" ]; then
-		case "$TRANSIENT_OLD:$TRANSIENT_TARGET" in
-			"$WP_DIR"/*:"$WP_DIR"/*)
-				if [ ! -e "$TRANSIENT_TARGET" ] && [ -e "$TRANSIENT_OLD" ]; then mv "$TRANSIENT_OLD" "$TRANSIENT_TARGET" 2>/dev/null || true
-				elif [ -e "$TRANSIENT_OLD" ]; then rm -rf "$TRANSIENT_OLD"
-				fi
-				;;
-		esac
-	fi
-	if [ "$lock_acquired" -eq 1 ]; then
-		rm -f "$SERVER_LOCK_DIR/pid"
-		rmdir "$SERVER_LOCK_DIR" 2>/dev/null || true
+	if [ "$cleanup_artifacts" -eq 1 ]; then
+		if [ -n "$SQL_FILE" ]; then
+			case "$SQL_FILE" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$SQL_FILE" 2>/dev/null || true ;; esac
+		fi
+		if [ -n "$UPLOADS_ZIP" ]; then
+			case "$UPLOADS_ZIP" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$UPLOADS_ZIP" 2>/dev/null || true ;; esac
+		fi
+		if [ -n "$ARCHIVE_LISTING" ]; then
+			case "$ARCHIVE_LISTING" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$ARCHIVE_LISTING" 2>/dev/null || true ;; esac
+		fi
+		if [ -n "$GIT_SSH_WRAPPER" ]; then
+			case "$GIT_SSH_WRAPPER" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$GIT_SSH_WRAPPER" 2>/dev/null || true ;; esac
+		fi
+		if [ -n "$MYSQL_DEFAULTS_FILE" ]; then
+			case "$MYSQL_DEFAULTS_FILE" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$MYSQL_DEFAULTS_FILE" 2>/dev/null || true ;; esac
+		fi
+		if [ -n "$TRANSIENT_NEW" ]; then
+			case "$TRANSIENT_NEW" in "$WP_DIR"/*|"$CANONICAL_WP_DIR"/*) rm -rf "$TRANSIENT_NEW" 2>/dev/null || true ;; esac
+		fi
+		if [ -n "$TRANSIENT_TARGET" ]; then
+			case "$TRANSIENT_TARGET" in
+				"$WP_DIR"/*|"$CANONICAL_WP_DIR"/*)
+					if [ "$TRANSIENT_REPLACED" -eq 1 ] && [ "$TRANSIENT_COMMITTED" -eq 0 ]; then
+						if restore_transient_target; then
+							printf '%s\n' 'AUTOMATIC_CODE_ROLLBACK=completed' >&2
+						else
+							printf '%s\n' 'AUTOMATIC_CODE_ROLLBACK=failed; manual recovery is required' >&2
+						fi
+					elif [ "$TRANSIENT_REPLACED" -eq 0 ] && [ -n "$TRANSIENT_OLD" ] && [ -e "$TRANSIENT_OLD" ]; then
+						if [ ! -e "$TRANSIENT_TARGET" ]; then mv "$TRANSIENT_OLD" "$TRANSIENT_TARGET" 2>/dev/null || true
+						else rm -rf "$TRANSIENT_OLD" 2>/dev/null || true
+						fi
+					fi
+					;;
+			esac
+		fi
+		if [ "$lock_acquired" -eq 1 ]; then
+			rm -f "$SERVER_LOCK_DIR/pid" 2>/dev/null || true
+			rmdir "$SERVER_LOCK_DIR" 2>/dev/null || true
+		fi
 	fi
 	exit "$status"
 }
@@ -232,9 +390,24 @@ manual_recovery_backup_is_valid() {
 update_repository() {
 	require_cmd git
 	[ -f "$SERVER_GIT_SSH_KEY" ] || fail "Server Git SSH key was not found"
+	[ -d "$SERVER_EXPECTED_TMP_DIR" ] || fail "Server temporary directory was not found"
+	GIT_SSH_WRAPPER="$SERVER_EXPECTED_TMP_DIR/.git-ssh-wrapper.$$"
+	[ ! -e "$GIT_SSH_WRAPPER" ] || fail "Temporary Git SSH wrapper path already exists"
+	(
+		umask 077
+		printf '%s\n' '#!/bin/sh' "exec /usr/bin/ssh -p '$SERVER_GIT_SSH_PORT' -i '$SERVER_GIT_SSH_KEY' -o IdentitiesOnly=yes \"\$@\"" > "$GIT_SSH_WRAPPER"
+	)
+	chmod 700 "$GIT_SSH_WRAPPER"
 	(
 		cd "$REPO_DIR"
-		GIT_SSH_COMMAND="ssh -i $SERVER_GIT_SSH_KEY -o IdentitiesOnly=yes" git pull --ff-only origin main
+		[ -z "$(git status --porcelain)" ] || fail "Deployment Git repository has local changes"
+		GIT_SSH="$GIT_SSH_WRAPPER" git fetch "$SERVER_GIT_REMOTE" "$SERVER_GIT_BRANCH"
+		if git show-ref --verify --quiet "refs/heads/$SERVER_GIT_BRANCH"; then
+			GIT_SSH="$GIT_SSH_WRAPPER" git checkout "$SERVER_GIT_BRANCH"
+		else
+			GIT_SSH="$GIT_SSH_WRAPPER" git checkout -b "$SERVER_GIT_BRANCH" FETCH_HEAD
+		fi
+		GIT_SSH="$GIT_SSH_WRAPPER" git pull --ff-only "$SERVER_GIT_REMOTE" "$SERVER_GIT_BRANCH"
 	)
 }
 
@@ -252,11 +425,43 @@ database_connection() {
 	esac
 }
 
+create_mysql_defaults_file() {
+	[ -n "$MYSQL_DEFAULTS_FILE" ] && return 0
+	MYSQL_DEFAULTS_FILE="$SERVER_EXPECTED_TMP_DIR/.mysql-client.$$.cnf"
+	[ ! -e "$MYSQL_DEFAULTS_FILE" ] || fail "Temporary MySQL credentials path already exists"
+	require_cmd sed
+	escaped_pass="$(printf '%s' "$pass" | sed 's/[\\"]/\\&/g')"
+	(
+		umask 077
+		printf '%s\n' '[client]' "user=$user" "password=\"$escaped_pass\"" "host=$DB_HOST_VALUE" > "$MYSQL_DEFAULTS_FILE"
+		if [ -n "$DB_PORT_VALUE" ]; then
+			printf '%s\n' "port=$DB_PORT_VALUE" >> "$MYSQL_DEFAULTS_FILE"
+		elif [ "$DB_HOST_VALUE" = 'localhost' ]; then
+			printf '%s\n' 'protocol=socket' >> "$MYSQL_DEFAULTS_FILE"
+		fi
+	)
+	escaped_pass=''
+}
+
 assert_sync_path() {
 	relative="$1"
+	component="$2"
 	case "$relative" in
-		''|.|/*|*\\*|*:*) fail "Unsafe sync path" ;;
+		''|.|*/|/*|*\\*|*:*) fail "Unsafe sync path" ;;
 		../*|*/../*|*/..|./*|*/./*|*/.|.git|.git/*|.deploy|.deploy/*|wp-config.php) fail "Unsafe sync path" ;;
+	esac
+	case "$component" in
+		code)
+			case "$relative" in
+				wp-content/themes/Divi|wp-content/themes/Divi/*) fail "Divi requires a separate site-specific policy" ;;
+				wp-content/themes/*) ;;
+				*) fail "Code sync path must be inside wp-content/themes" ;;
+			esac
+			;;
+		plugins)
+			case "$relative" in wp-content/plugins/*) ;; *) fail "Plugin sync path must be inside wp-content/plugins" ;; esac
+			;;
+		*) fail "Unknown sync component" ;;
 	esac
 }
 
@@ -275,14 +480,69 @@ assert_no_symlink_components() {
 	IFS="$old_ifs"
 }
 
-copy_code() {
+assert_theme_ownership_prerequisites() {
+	require_cmd stat
+	require_cmd chown
+	discover_site_owner || fail "Theme ownership prerequisites failed"
+}
+
+normalize_theme_ownership() {
+	target_path="$1"
+	discover_site_owner || return 1
+	canonical_wp_for_ownership="$(CDPATH= cd -P "$WP_DIR" && pwd)" || fail "Could not determine canonical WordPress path"
+	themes_dir="$canonical_wp_for_ownership/wp-content/themes"
+	case "$target_path" in
+		"$themes_dir"|"$themes_dir"/*) ;;
+		*) printf '%s\n' "Theme ownership normalization skipped for non-theme path: $target_path"; return 0 ;;
+	esac
+	[ -d "$themes_dir" ] || fail "WordPress themes directory was not found"
+	chown -- "$SITE_OWNER:$SITE_GROUP" "$themes_dir" || fail "Theme directory ownership normalization failed"
+	[ -e "$target_path" ] || fail "Synchronized theme target was not found"
+	chown -R -- "$SITE_OWNER:$SITE_GROUP" "$target_path" || fail "Synchronized theme ownership normalization failed"
+	printf '%s\n' "Theme ownership normalized to $SITE_OWNER:$SITE_GROUP"
+}
+
+normalize_divi_ownership() {
+	discover_site_owner || return 1
+	canonical_wp_for_ownership="$(CDPATH= cd -P "$WP_DIR" && pwd)" || fail "Could not determine canonical WordPress path"
+	divi_dir="$canonical_wp_for_ownership/wp-content/themes/Divi"
+	[ -d "$divi_dir" ] || return 0
+	chown -R -- "$SITE_OWNER:$SITE_GROUP" "$divi_dir" || fail "Divi ownership normalization failed"
+	printf '%s\n' "Divi ownership normalized to $SITE_OWNER:$SITE_GROUP"
+}
+
+restore_transient_target() {
+	failed_root="${TRANSIENT_NEW%/*}"
+	failed_target="$failed_root/${TRANSIENT_TARGET##*/}.__failed__.$$"
+	[ ! -e "$failed_target" ] || rm -rf "$failed_target" 2>/dev/null || true
+	if [ -e "$TRANSIENT_TARGET" ]; then
+		mv "$TRANSIENT_TARGET" "$failed_target" 2>/dev/null || return 1
+	fi
+	if [ -e "$TRANSIENT_OLD" ]; then
+		if mv "$TRANSIENT_OLD" "$TRANSIENT_TARGET" 2>/dev/null; then
+			rm -rf "$failed_target" 2>/dev/null || true
+			return 0
+		fi
+		if [ -e "$failed_target" ]; then
+			mv "$failed_target" "$TRANSIENT_TARGET" 2>/dev/null || true
+		fi
+		return 1
+	fi
+	rm -rf "$failed_target" 2>/dev/null || true
+}
+
+copy_paths() {
+	paths="$1"
+	label="$2"
+	[ -n "$paths" ] || fail "$label sync paths are empty"
 	require_cmd du
 	canonical_wp="$(CDPATH= cd -P "$WP_DIR" && pwd)"
+	CANONICAL_WP_DIR="$canonical_wp"
 	old_ifs="$IFS"
 	IFS=','
-	for relative in $SYNC_PATHS; do
+	for relative in $paths; do
 		IFS="$old_ifs"
-		assert_sync_path "$relative"
+		assert_sync_path "$relative" "$label"
 		source_path="$REPO_DIR/$relative"
 		target_path="$canonical_wp/$relative"
 		[ -d "$source_path" ] || fail "Configured sync source was not found"
@@ -290,11 +550,15 @@ copy_code() {
 		case "$target_path" in "$canonical_wp"/*) ;; *) fail "Sync target escaped WordPress directory" ;; esac
 		mkdir -p "$(dirname "$target_path")"
 		source_kb="$(du -sk "$source_path" | awk 'NR==1 { print $1 }')"
-		case "$source_kb" in ''|*[!0-9]*) fail "Code size check failed" ;; esac
+		case "$source_kb" in ''|*[!0-9]*) fail "$label size check failed" ;; esac
 		assert_free_space_kb "$WP_DIR" "$source_kb" "WordPress filesystem"
+		transient_root="$WP_DIR/wp-content/.deploy-transient"
+		[ ! -L "$transient_root" ] || fail "Transient directory must not be a symbolic link"
+		mkdir -p "$transient_root"
+		target_name="${target_path##*/}"
 		TRANSIENT_TARGET="$target_path"
-		TRANSIENT_NEW="$target_path.__new__.$timestamp"
-		TRANSIENT_OLD="$target_path.__old__.$timestamp"
+		TRANSIENT_NEW="$transient_root/$target_name.__new__.$timestamp.$$"
+		TRANSIENT_OLD="$transient_root/$target_name.__old__.$timestamp.$$"
 		rm -rf "$TRANSIENT_NEW" "$TRANSIENT_OLD"
 		mkdir -p "$TRANSIENT_NEW"
 		if command -v rsync >/dev/null 2>&1; then
@@ -307,12 +571,19 @@ copy_code() {
 			[ ! -e "$TRANSIENT_OLD" ] || mv "$TRANSIENT_OLD" "$target_path"
 			fail "Atomic code replacement failed"
 		fi
-		rm -rf "$TRANSIENT_OLD"
-		TRANSIENT_NEW=''; TRANSIENT_OLD=''; TRANSIENT_TARGET=''
+		TRANSIENT_REPLACED=1
+		normalize_theme_ownership "$target_path"
+		TRANSIENT_COMMITTED=1
+		rm -rf "$TRANSIENT_OLD" 2>/dev/null || fail "Old code target cleanup failed"
+		TRANSIENT_NEW=''; TRANSIENT_OLD=''; TRANSIENT_TARGET=''; TRANSIENT_REPLACED=0; TRANSIENT_COMMITTED=0
 		IFS=','
 	done
 	IFS="$old_ifs"
+	if [ "$DEPLOY_MODE" = full ]; then normalize_divi_ownership; fi
 }
+
+copy_code() { copy_paths "$SYNC_PATHS" code; }
+copy_plugins() { copy_paths "$PLUGIN_SYNC_PATHS" plugins; }
 
 backup_database() {
 	require_cmd mysqldump
@@ -320,23 +591,24 @@ backup_database() {
 	user="$(wp_config_value DB_USER)"
 	pass="$(wp_config_value DB_PASSWORD)"
 	database_connection "$(wp_config_value DB_HOST)"
+	create_mysql_defaults_file
 	mkdir -p "$BACKUP_DIR"
 	BACKUP_FILE="$BACKUP_DIR/db-$timestamp.sql"
-	if [ -n "$DB_PORT_VALUE" ]; then
-		MYSQL_PWD="$pass" mysqldump --host="$DB_HOST_VALUE" --port="$DB_PORT_VALUE" --user="$user" --single-transaction --quick --no-tablespaces --default-character-set=utf8mb4 "$name" > "$BACKUP_FILE"
-	else
-		MYSQL_PWD="$pass" mysqldump --host="$DB_HOST_VALUE" --user="$user" --single-transaction --quick --no-tablespaces --default-character-set=utf8mb4 "$name" > "$BACKUP_FILE"
+	if ! mysqldump --defaults-file="$MYSQL_DEFAULTS_FILE" --single-transaction --quick --no-tablespaces --default-character-set=utf8mb4 "$name" > "$BACKUP_FILE"; then
+		rm -f "$BACKUP_FILE"
+		BACKUP_FILE=''
+		fail "Database backup failed"
 	fi
-	assert_sql_dump "$BACKUP_FILE"
+	if ! ( assert_sql_dump "$BACKUP_FILE" ); then
+		rm -f "$BACKUP_FILE"
+		BACKUP_FILE=''
+		fail "Database backup validation failed"
+	fi
 }
 
 mysql_import_file() {
 	import_file="$1"
-	if [ -n "$DB_PORT_VALUE" ]; then
-		MYSQL_PWD="$pass" mysql --host="$DB_HOST_VALUE" --port="$DB_PORT_VALUE" --user="$user" "$name" < "$import_file"
-	else
-		MYSQL_PWD="$pass" mysql --host="$DB_HOST_VALUE" --user="$user" "$name" < "$import_file"
-	fi
+	mysql --defaults-file="$MYSQL_DEFAULTS_FILE" "$name" < "$import_file"
 }
 
 preserve_manual_recovery() {
@@ -361,13 +633,14 @@ preserve_manual_recovery() {
 			MANUAL_RECOVERY_BACKUP_HARDENED=1
 			if manual_recovery_backup_is_valid "$MANUAL_RECOVERY_BACKUP"; then
 				MANUAL_RECOVERY_BACKUP_VALID=1
+				manual_wp_cli="$(wp_cli_manual_prefix)"
 				if {
 					printf '%s\n' 'status=manual-recovery-required'
 					printf 'created_at=%s\n' "$timestamp"
 					printf 'wp_dir=%s\n' "$WP_DIR"
 					printf 'db_name=%s\n' "$name"
-					printf "restore_command=%s %s --path='%s' db import '%s'\n" "$PHP_BIN" "$WP_CLI_BIN" "$WP_DIR" "$MANUAL_RECOVERY_BACKUP"
-					printf "verify_command=%s %s --path='%s' core is-installed\n" "$PHP_BIN" "$WP_CLI_BIN" "$WP_DIR"
+					printf "restore_command=%s db import '%s'\n" "$manual_wp_cli" "$MANUAL_RECOVERY_BACKUP"
+					printf "verify_command=%s core is-installed\n" "$manual_wp_cli"
 					printf '%s\n' 'Do not delete this directory until the database and site have been verified.'
 				} > "$marker_path" 2>/dev/null; then
 					if chmod 600 "$marker_path" 2>/dev/null; then
@@ -409,7 +682,7 @@ preserve_manual_recovery() {
 	printf 'RECOVERY_BACKUP=%s\n' "$MANUAL_RECOVERY_BACKUP" >&2
 	[ -z "$MANUAL_RECOVERY_MARKER" ] || printf 'RECOVERY_MARKER=%s\n' "$MANUAL_RECOVERY_MARKER" >&2
 	if [ "$MANUAL_RECOVERY_BACKUP_HARDENED" -eq 1 ] && [ "$MANUAL_RECOVERY_BACKUP_VALID" -eq 1 ] && [ -z "$MANUAL_RECOVERY_MARKER" ] && [ "$MANUAL_RECOVERY_BACKUP" != none ] && [ -s "$MANUAL_RECOVERY_BACKUP" ]; then
-		printf "RECOVERY_COMMAND=%s %s --path='%s' db import '%s'\n" "$PHP_BIN" "$WP_CLI_BIN" "$WP_DIR" "$MANUAL_RECOVERY_BACKUP" >&2
+		printf "RECOVERY_COMMAND=%s db import '%s'\n" "$(wp_cli_manual_prefix)" "$MANUAL_RECOVERY_BACKUP" >&2
 	fi
 }
 
@@ -420,27 +693,65 @@ import_database() {
 	user="$(wp_config_value DB_USER)"
 	pass="$(wp_config_value DB_PASSWORD)"
 	database_connection "$(wp_config_value DB_HOST)"
+	create_mysql_defaults_file
 	if ! mysql_import_file "$SQL_FILE"; then
-		if mysql_import_file "$BACKUP_FILE"; then
-			cleanup_backups || true
-			fail "Database import failed; rollback completed"
-		else
-			preserve_manual_recovery
-			fail "Database import failed and rollback failed; manual recovery is required"
-		fi
+		fail_after_database_mutation "Database import failed"
 	fi
+
+}
+
+finalize_database_backup() {
 	if command -v gzip >/dev/null 2>&1; then
 		gzip -f "$BACKUP_FILE"
 		gzip -t "$BACKUP_FILE.gz" || fail "Compressed database backup is invalid"
 	fi
 }
 
+rollback_database_or_require_manual_recovery() {
+	if mysql_import_file "$BACKUP_FILE"; then
+		cleanup_backups || true
+		return 0
+	fi
+	preserve_manual_recovery
+	return 1
+}
+
+fail_after_database_mutation() {
+	reason="$1"
+	if rollback_database_or_require_manual_recovery; then
+		database_mutation_active=0
+		fail "$reason; rollback completed"
+	fi
+	database_mutation_active=0
+	fail "$reason and rollback failed; manual recovery is required"
+}
+
+rewrite_wordpress_urls() {
+	: "${LOCAL_URL:?LOCAL_URL is required for database deployment}"
+	[ "$(normalize_url "$LOCAL_URL")" != "$(normalize_url "$REMOTE_URL")" ] || fail "Local and remote URLs must differ for database deployment"
+
+	if ! wp_cli search-replace "$LOCAL_URL" "$REMOTE_URL" --all-tables-with-prefix --precise --recurse-objects --skip-columns=guid; then
+		fail_after_database_mutation "URL rewrite failed"
+	fi
+
+	remaining_replacements="$(wp_cli search-replace "$LOCAL_URL" "$REMOTE_URL" --all-tables-with-prefix --precise --recurse-objects --skip-columns=guid --dry-run --format=count)" || fail_after_database_mutation "URL rewrite verification failed"
+	case "$remaining_replacements" in
+		0) ;;
+		*) fail_after_database_mutation "URL rewrite verification failed" ;;
+	esac
+}
+
 sync_uploads() {
 	[ -f "$UPLOADS_ZIP" ] || fail "Uploads archive was not found"
 	require_cmd unzip
-	new="$WP_DIR/wp-content/uploads.__new__"
-	old="$WP_DIR/wp-content/uploads.__old__"
-	current="$WP_DIR/wp-content/uploads"
+	canonical_wp_for_uploads="$(CDPATH= cd -P "$WP_DIR" && pwd)" || fail "Could not determine canonical WordPress path"
+	CANONICAL_WP_DIR="$canonical_wp_for_uploads"
+	transient_root="$canonical_wp_for_uploads/wp-content/.deploy-transient"
+	[ ! -L "$transient_root" ] || fail "Transient directory must not be a symbolic link"
+	mkdir -p "$transient_root"
+	new="$transient_root/uploads.__new__"
+	old="$transient_root/uploads.__old__"
+	current="$canonical_wp_for_uploads/wp-content/uploads"
 	ARCHIVE_LISTING="$SERVER_EXPECTED_TMP_DIR/uploads-$timestamp.list"
 	[ ! -L "$new" ] && [ ! -L "$old" ] && [ ! -L "$current" ] || fail "Uploads paths must not be symbolic links"
 	unzip -tq "$UPLOADS_ZIP" >/dev/null || fail "Uploads archive integrity check failed"
@@ -463,17 +774,36 @@ sync_uploads() {
 		[ ! -d "$old" ] || mv "$old" "$current"
 		fail "Atomic uploads replacement failed"
 	fi
-	rm -rf "$old"
-	TRANSIENT_NEW=''; TRANSIENT_OLD=''; TRANSIENT_TARGET=''
+	TRANSIENT_REPLACED=1
+	TRANSIENT_COMMITTED=1
+	rm -rf "$old" 2>/dev/null || fail "Old uploads target cleanup failed"
+	TRANSIENT_NEW=''; TRANSIENT_OLD=''; TRANSIENT_TARGET=''; TRANSIENT_REPLACED=0; TRANSIENT_COMMITTED=0
 }
 
 cleanup_wordpress() {
-	wp_cli search-replace "$LOCAL_URL" "$REMOTE_URL" --all-tables --precise --recurse-objects --skip-columns=guid
-	wp_cli option update home "$REMOTE_URL"
-	wp_cli option update siteurl "$REMOTE_URL"
-	wp_cli cache flush || true
-	wp_cli transient delete --all || true
+	if ! refresh_wordpress_runtime_cache; then
+		printf '%s\n' 'WARNING: Runtime cache refresh failed after database deployment; database changes remain committed.' >&2
+	fi
 	wp_cli rewrite flush --hard || true
+}
+
+refresh_wordpress_runtime_cache() {
+	# Divi's public cache-clearing method requires an authenticated editor.
+	# The internal method is the same invalidation path without that HTTP-only
+	# capability check, which makes it safe to use from this guarded WP-CLI
+	# runner after a successful atomic code replacement.
+	if ! normalize_divi_runtime_cache_ownership; then
+		return 1
+	fi
+	if ! wp_cli_as_site_owner eval 'if ( class_exists( "ET_Core_PageResource" ) ) { $previous_error_reporting = error_reporting(); error_reporting( $previous_error_reporting & ~E_WARNING ); try { ET_Core_PageResource::do_remove_static_resources( "all", "all", true ); } finally { error_reporting( $previous_error_reporting ); } echo "Divi static resources invalidated.\\n"; } else { echo "Divi static resources are not installed.\\n"; }'; then
+		return 1
+	fi
+	if ! wp_cli_as_site_owner cache flush; then
+		return 1
+	fi
+	if ! wp_cli_as_site_owner transient delete --all; then
+		return 1
+	fi
 }
 
 cleanup_backups() {
@@ -491,11 +821,8 @@ cleanup_backups() {
 assert_mode
 assert_server_policy
 assert_wordpress_target
-acquire_lock
-cleanup_stale_temp_files
-mkdir -p "$BACKUP_DIR"
-assert_free_space_kb "$WP_DIR" 0 "WordPress filesystem"
-assert_free_space_kb "$BACKUP_DIR" 0 "Backup filesystem"
+assert_theme_ownership_prerequisites
+assert_runtime_cache_ownership_prerequisites
 
 case "$DEPLOY_MODE" in
 	preflight)
@@ -503,25 +830,47 @@ case "$DEPLOY_MODE" in
 		[ -f "$SERVER_GIT_SSH_KEY" ] || fail "Server Git SSH key was not found"
 		wp_cli --info
 		;;
-	code)
-		update_repository
-		copy_code
-		;;
-	db|full)
-		require_cmd wc
-		assert_sql_dump "$SQL_FILE"
-		incoming_kb="$(wc -c < "$SQL_FILE" | awk '{ print int(($1 + 1023) / 1024) }')"
-		case "$incoming_kb" in ''|*[!0-9]*) fail "Incoming SQL size check failed" ;; esac
-		assert_free_space_kb "$BACKUP_DIR" "$incoming_kb" "Backup filesystem"
-		if [ "$DEPLOY_MODE" = full ]; then
-			update_repository
-			copy_code
-		fi
-		backup_database
-		import_database
-		[ -z "$UPLOADS_ZIP" ] || sync_uploads
-		cleanup_wordpress
-		cleanup_backups || true
+	code|db|code-db|uploads|plugins|full)
+		cleanup_artifacts=1
+		acquire_lock
+		cleanup_stale_temp_files
+		mkdir -p "$BACKUP_DIR"
+		assert_free_space_kb "$WP_DIR" 0 "WordPress filesystem"
+		assert_free_space_kb "$BACKUP_DIR" 0 "Backup filesystem"
+
+		case "$DEPLOY_MODE" in
+			code|plugins|code-db|full)
+				update_repository
+				case "$DEPLOY_MODE" in
+					code|code-db|full) copy_code ;;
+					esac
+				case "$DEPLOY_MODE" in
+					plugins|full) copy_plugins ;;
+					esac
+				case "$DEPLOY_MODE" in
+					code) refresh_wordpress_runtime_cache ;;
+					esac
+				;;
+			uploads)
+				sync_uploads
+				;;
+			db|code-db|full)
+				require_cmd wc
+				assert_sql_dump "$SQL_FILE"
+				incoming_kb="$(wc -c < "$SQL_FILE" | awk '{ print int(($1 + 1023) / 1024) }')"
+				case "$incoming_kb" in ''|*[!0-9]*) fail "Incoming SQL size check failed" ;; esac
+				assert_free_space_kb "$BACKUP_DIR" "$incoming_kb" "Backup filesystem"
+				backup_database
+				database_mutation_active=1
+				import_database
+				rewrite_wordpress_urls
+				[ -z "$UPLOADS_ZIP" ] || sync_uploads
+				cleanup_wordpress
+				database_mutation_active=0
+				finalize_database_backup
+				cleanup_backups || true
+				;;
+		esac
 		;;
 esac
 
