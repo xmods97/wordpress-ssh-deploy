@@ -59,6 +59,8 @@ if run_output="$(FIXTURE_CHOWN_FAIL=1 run_runner code)"; then echo 'Chown failur
 grep -Fq 'child release' "$target_root/wp/wp-content/themes/bella-maria-child/style.css"
 
 plugin_output="$(run_runner plugins)"
+[ -n "$plugin_output" ]
+case "$plugin_output" in *'Plugin ownership normalized to admin_nadry:admin_nadry'*) ;; *) echo "$plugin_output" >&2; exit 1 ;; esac
 [ -f "$target_root/wp/wp-content/plugins/example-plugin/plugin.php" ] || { echo 'Plugin component was not copied' >&2; exit 1; }
 grep -Fq 'plugin release' "$target_root/wp/wp-content/plugins/example-plugin/plugin.php"
 
@@ -67,6 +69,14 @@ printf '%s\n' '-- MySQL dump 10.13  Distrib fixture' '-- Table structure for tab
 full_output="$(run_runner full "$target_root/tmp/local-db-fixture.sql")"
 case "$full_output" in *'Theme ownership normalized to admin_nadry:admin_nadry'*) ;; *) echo "$full_output" >&2; exit 1 ;; esac
 grep -Fq -- "admin_nadry:admin_nadry $target_root/wp/wp-content/themes/Divi" "$target_root/chown-calls.log"
+[ "$(wc -l < "$target_root/mysql-calls.log")" -eq 1 ] || { echo 'Full mode did not execute database import' >&2; exit 1; }
+
+: > "$target_root/chown-calls.log"
+: > "$target_root/mysql-calls.log"
+printf '%s\n' '-- MySQL dump 10.13  Distrib fixture' '-- Table structure for table `wp_options`' 'CREATE TABLE `wp_options` (`option_id` bigint NOT NULL);' 'INSERT INTO `wp_options` VALUES (2);' > "$target_root/tmp/local-db-fixture.sql"
+code_db_output="$(run_runner code-db "$target_root/tmp/local-db-fixture.sql")"
+case "$code_db_output" in *'WordPress deployment completed (code-db)'*) ;; *) echo "$code_db_output" >&2; exit 1 ;; esac
+[ "$(wc -l < "$target_root/mysql-calls.log")" -eq 1 ] || { echo 'Code-db mode did not execute database import' >&2; exit 1; }
 
 if root_owner_output="$(FIXTURE_OWNER_UID=0 run_runner code)"; then
 	echo 'Root-owned WordPress content must be rejected' >&2

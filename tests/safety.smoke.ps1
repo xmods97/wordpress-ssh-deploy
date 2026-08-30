@@ -22,7 +22,10 @@ $requiredRemotePatterns = @(
 	'SERVER_ENVIRONMENT',
 	'SERVER_EXPECTED_WP_DIR',
 	'SERVER_EXPECTED_DB_NAME',
-	'Database and uploads deployment is forbidden for production',
+	'Deploy mode is not enabled by profile policy',
+	'Deploy mode is not enabled by server policy',
+	'Production full mode requires an explicit client profile opt-in',
+	'Production full mode is disabled by server policy',
 	'Another deployment operation is already running',
 	'Sync path must not contain symbolic links',
 	'trap cleanup_exit'

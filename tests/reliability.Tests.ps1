@@ -52,7 +52,7 @@ Describe 'Local artifact validation' {
 
 Describe 'Remote replacement and rollback guards' {
 	It 'uses staged directories for code and uploads replacement' {
-		$serverSource | Should Match 'target_path\.__new__\.\$timestamp'
+		$serverSource | Should Match '__new__\.\$timestamp'
 		$serverSource | Should Match 'Atomic code replacement failed'
 		$serverSource | Should Match 'Atomic uploads replacement failed'
 	}

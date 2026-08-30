@@ -25,6 +25,10 @@ $unknown = $DeployConfig.Clone()
 $unknown.TypoValue = 'x'
 $cases += ,@($unknown, 'Unknown configuration key')
 
+$invalidProductionOptIn = $DeployConfig.Clone()
+$invalidProductionOptIn.AllowProductionFull = 'true'
+$cases += ,@($invalidProductionOptIn, 'AllowProductionFull must be a Boolean')
+
 $stringPort = $DeployConfig.Clone()
 $stringPort.SshPort = '22'
 $cases += ,@($stringPort, 'SshPort must be an integer')
@@ -43,7 +47,7 @@ foreach ($case in $cases) {
 		throw "Expected validation failure not found: $($case[1])"
 	}
 }
-Write-Output 'Invalid cases rejected: 7/7'
+Write-Output 'Invalid cases rejected: 8/8'
 
 $nonDictionary = @(Get-DeployConfigurationErrors -Configuration ([pscustomobject] @{}))
 if (-not ($nonDictionary -match 'IDictionary')) {
@@ -65,4 +69,5 @@ foreach ($forbiddenMode in @('db', 'full')) {
 		}
 	}
 }
+Assert-DeployModeAllowed -Environment production -Mode full -AllowProductionFull $true
 Write-Output 'Production mode policy: OK'

@@ -26,6 +26,35 @@ Describe 'POSIX shell quoting' {
 		$command | Should Match "sh '/usr/local/libexec/wordpress-ssh-deploy/example-site/server-deploy\.sh'$"
 	}
 
+	It 'sends separate code, plugin, and capability policies' {
+		$config = $validConfiguration.Clone()
+		$config.PluginSyncPaths = @('wp-content/plugins/example-plugin')
+		$config.AllowedDeployModes = @('preflight', 'code', 'db', 'code-db', 'uploads', 'plugins', 'full')
+		$command = New-RemoteDeployCommand $config 'code-db' '/srv/tmp/example-deploy/database.sql' ''
+		$command | Should Match "SYNC_PATHS='wp-content/themes/example-theme'"
+		$command | Should Match "PLUGIN_SYNC_PATHS='wp-content/plugins/example-plugin'"
+		$command | Should Match "ALLOWED_DEPLOY_MODES='preflight,code,db,code-db,uploads,plugins,full'"
+		$command | Should Match "DEPLOY_MODE='code-db'"
+	}
+
+	It 'sends the production full-mode client opt-in only for an opted-in full command' {
+		$config = $validConfiguration.Clone()
+		$config.Environment = 'production'
+		$config.AllowProductionFull = $true
+		foreach ($mode in @('preflight', 'code', 'db', 'code-db', 'uploads', 'plugins')) {
+			(New-RemoteDeployCommand $config $mode) | Should Match "PRODUCTION_FULL_OPT_IN='0'"
+		}
+		$config.Remove('AllowedDeployModes')
+		(New-RemoteDeployCommand $config 'preflight') | Should Match "ALLOWED_DEPLOY_MODES='preflight,code,full'"
+		(New-RemoteDeployCommand $config 'full') | Should Match "PRODUCTION_FULL_OPT_IN='1'"
+		foreach ($environment in @('staging', 'development')) {
+			$config.Environment = $environment
+			(New-RemoteDeployCommand $config 'full') | Should Match "PRODUCTION_FULL_OPT_IN='0'"
+		}
+		$config.AllowProductionFull = 'true'
+		(New-RemoteDeployCommand $config 'full') | Should Match "PRODUCTION_FULL_OPT_IN='0'"
+	}
+
 	It 'does not expose a quoted value as a second command' {
 		$command = New-RemoteDeployCommand $validConfiguration 'db' "x'; touch /tmp/unsafe; echo '" ''
 		$command | Should Match 'SQL_FILE='

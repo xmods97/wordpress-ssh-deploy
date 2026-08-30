@@ -502,6 +502,22 @@ normalize_theme_ownership() {
 	printf '%s\n' "Theme ownership normalized to $SITE_OWNER:$SITE_GROUP"
 }
 
+normalize_plugin_ownership() {
+	target_path="$1"
+	discover_site_owner || return 1
+	canonical_wp_for_ownership="$(CDPATH= cd -P "$WP_DIR" && pwd)" || fail "Could not determine canonical WordPress path"
+	plugins_dir="$canonical_wp_for_ownership/wp-content/plugins"
+	case "$target_path" in
+		"$plugins_dir"|"$plugins_dir"/*) ;;
+		*) fail "Synchronized plugin target escaped plugins directory" ;;
+	esac
+	[ -d "$plugins_dir" ] || fail "WordPress plugins directory was not found"
+	chown -- "$SITE_OWNER:$SITE_GROUP" "$plugins_dir" || fail "Plugin directory ownership normalization failed"
+	[ -e "$target_path" ] || fail "Synchronized plugin target was not found"
+	chown -R -- "$SITE_OWNER:$SITE_GROUP" "$target_path" || fail "Synchronized plugin ownership normalization failed"
+	printf '%s\n' "Plugin ownership normalized to $SITE_OWNER:$SITE_GROUP"
+}
+
 normalize_divi_ownership() {
 	discover_site_owner || return 1
 	canonical_wp_for_ownership="$(CDPATH= cd -P "$WP_DIR" && pwd)" || fail "Could not determine canonical WordPress path"
@@ -533,8 +549,8 @@ restore_transient_target() {
 
 copy_paths() {
 	paths="$1"
-	label="$2"
-	[ -n "$paths" ] || fail "$label sync paths are empty"
+	component_label="$2"
+	[ -n "$paths" ] || fail "$component_label sync paths are empty"
 	require_cmd du
 	canonical_wp="$(CDPATH= cd -P "$WP_DIR" && pwd)"
 	CANONICAL_WP_DIR="$canonical_wp"
@@ -542,7 +558,7 @@ copy_paths() {
 	IFS=','
 	for relative in $paths; do
 		IFS="$old_ifs"
-		assert_sync_path "$relative" "$label"
+		assert_sync_path "$relative" "$component_label"
 		source_path="$REPO_DIR/$relative"
 		target_path="$canonical_wp/$relative"
 		[ -d "$source_path" ] || fail "Configured sync source was not found"
@@ -550,7 +566,7 @@ copy_paths() {
 		case "$target_path" in "$canonical_wp"/*) ;; *) fail "Sync target escaped WordPress directory" ;; esac
 		mkdir -p "$(dirname "$target_path")"
 		source_kb="$(du -sk "$source_path" | awk 'NR==1 { print $1 }')"
-		case "$source_kb" in ''|*[!0-9]*) fail "$label size check failed" ;; esac
+		case "$source_kb" in ''|*[!0-9]*) fail "$component_label size check failed" ;; esac
 		assert_free_space_kb "$WP_DIR" "$source_kb" "WordPress filesystem"
 		transient_root="$WP_DIR/wp-content/.deploy-transient"
 		[ ! -L "$transient_root" ] || fail "Transient directory must not be a symbolic link"
@@ -573,6 +589,7 @@ copy_paths() {
 		fi
 		TRANSIENT_REPLACED=1
 		normalize_theme_ownership "$target_path"
+		if [ "$component_label" = plugins ]; then normalize_plugin_ownership "$target_path"; fi
 		TRANSIENT_COMMITTED=1
 		rm -rf "$TRANSIENT_OLD" 2>/dev/null || fail "Old code target cleanup failed"
 		TRANSIENT_NEW=''; TRANSIENT_OLD=''; TRANSIENT_TARGET=''; TRANSIENT_REPLACED=0; TRANSIENT_COMMITTED=0
@@ -839,21 +856,21 @@ case "$DEPLOY_MODE" in
 		assert_free_space_kb "$BACKUP_DIR" 0 "Backup filesystem"
 
 		case "$DEPLOY_MODE" in
-			code|plugins|code-db|full)
-				update_repository
-				case "$DEPLOY_MODE" in
-					code|code-db|full) copy_code ;;
-					esac
-				case "$DEPLOY_MODE" in
-					plugins|full) copy_plugins ;;
-					esac
-				case "$DEPLOY_MODE" in
-					code) refresh_wordpress_runtime_cache ;;
-					esac
-				;;
-			uploads)
-				sync_uploads
-				;;
+			code|plugins|code-db|full) update_repository ;;
+		esac
+		case "$DEPLOY_MODE" in
+			code|code-db|full) copy_code ;;
+		esac
+		case "$DEPLOY_MODE" in
+			plugins|full) copy_plugins ;;
+		esac
+		case "$DEPLOY_MODE" in
+			code) refresh_wordpress_runtime_cache ;;
+		esac
+		case "$DEPLOY_MODE" in
+			uploads) sync_uploads ;;
+		esac
+		case "$DEPLOY_MODE" in
 			db|code-db|full)
 				require_cmd wc
 				assert_sql_dump "$SQL_FILE"

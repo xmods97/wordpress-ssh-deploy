@@ -31,6 +31,46 @@ Describe 'Deploy configuration validation' {
 		$errors | Should Match 'Missing configuration value: RemoteUrl'
 	}
 
+	It 'rejects a non-Boolean production full-mode opt-in' {
+		$config = $validConfiguration.Clone()
+		$config.AllowProductionFull = 'true'
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'AllowProductionFull must be a Boolean'
+	}
+
+	It 'accepts explicit independent component capabilities' {
+		$config = $validConfiguration.Clone()
+		$config.AllowedDeployModes = @('preflight', 'code', 'db', 'code-db', 'uploads', 'plugins', 'full')
+		$config.PluginSyncPaths = @('wp-content/plugins/example-plugin')
+		@(Get-DeployConfigurationErrors $config).Count | Should Be 0
+	}
+
+	It 'rejects unknown component capabilities and unsafe plugin paths' {
+		$config = $validConfiguration.Clone()
+		$config.AllowedDeployModes = @('preflight', 'database')
+		$config.PluginSyncPaths = @('../plugins')
+		$errors = (Get-DeployConfigurationErrors $config) -join "`n"
+		$errors | Should Match 'Unknown AllowedDeployModes'
+		$errors | Should Match 'Unsafe PluginSyncPaths'
+	}
+
+	It 'rejects protected or cross-component sync paths' {
+		$config = $validConfiguration.Clone()
+		$config.SyncPaths = @('wp-content/themes/Divi')
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'Unsafe SyncPaths'
+		$config = $validConfiguration.Clone()
+		$config.SyncPaths = @('wp-content/mu-plugins')
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'Unsafe SyncPaths'
+		$config = $validConfiguration.Clone()
+		$config.PluginSyncPaths = @('wp-content/mu-plugins/example-loader')
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'Unsafe PluginSyncPaths'
+	}
+
+	It 'requires plugin paths for explicit plugins mode' {
+		$config = $validConfiguration.Clone()
+		$config.PluginSyncPaths = @()
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'PluginSyncPaths must contain at least one path'
+	}
+
 	It 'rejects a remote URL with a different domain' {
 		$config = $validConfiguration.Clone()
 		$config.RemoteUrl = 'https://other.example.com'

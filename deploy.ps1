@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
 	[Parameter(Position = 0)] [string] $Message = '',
-	[ValidateSet('full', 'code', 'db')] [string] $Mode = 'code',
+	[ValidateSet('full', 'code', 'db', 'code-db', 'uploads', 'plugins')] [string] $Mode = 'code',
 	[switch] $SkipGit,
 	[switch] $SkipUploads,
 	[switch] $PreflightOnly
@@ -21,6 +21,12 @@ function New-Zip([string] $SourceDirectory, [string] $DestinationZip) {
 		$SourceDirectory, $DestinationZip, [System.IO.Compression.CompressionLevel]::Optimal, $false
 	)
 }
+function Test-ModeComponent([string] $SelectedMode, [string] $Component) {
+	$matrix = @{
+		code = @('code'); db = @('db'); 'code-db' = @('code','db'); uploads = @('uploads'); plugins = @('plugins'); full = @('code','db','uploads','plugins')
+	}
+	return $matrix[$SelectedMode] -contains $Component
+}
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $modulePath = Join-Path $repoRoot 'src\WordPressSshDeploy.psm1'
@@ -35,12 +41,27 @@ Import-Module $modulePath -Force
 . $configPath
 if (-not $DeployConfig) { throw 'deploy.config.ps1 must define $DeployConfig.' }
 Assert-DeployConfiguration -Configuration $DeployConfig
-Assert-DeployModeAllowed -Environment $DeployConfig.Environment -Mode $Mode
+$allowProductionFull = $DeployConfig.AllowProductionFull -is [bool] -and $DeployConfig.AllowProductionFull
+$allowedModes = if ($DeployConfig.Contains('AllowedDeployModes')) {
+	@($DeployConfig.AllowedDeployModes)
+} elseif ($DeployConfig.Environment -eq 'production') {
+	if ($allowProductionFull) { @('preflight', 'code', 'full') } else { @('preflight', 'code') }
+} else {
+	@('preflight', 'code', 'db', 'full')
+}
+Assert-DeployModeAllowed -Environment $DeployConfig.Environment -Mode $Mode -AllowProductionFull $allowProductionFull -AllowedDeployModes $allowedModes
+$hasCode = Test-ModeComponent $Mode 'code'
+$hasDatabase = Test-ModeComponent $Mode 'db'
+$hasUploads = Test-ModeComponent $Mode 'uploads'
+$hasPlugins = Test-ModeComponent $Mode 'plugins'
 if ($Message) {
 	throw 'Automatic Git commit/push was removed. Commit and push separately, then run deploy without Message.'
 }
-if ($SkipGit -and $Mode -ne 'db') {
-	throw '-SkipGit is supported only for db mode. Code deployment requires a clean, pushed Git checkout.'
+if ($SkipUploads) {
+	throw '-SkipUploads is retired. Use code-db for code plus database without uploads.'
+}
+if ($SkipGit -and ($hasCode -or $hasPlugins)) {
+	throw '-SkipGit is not supported for code or plugins. These components require a clean, pushed Git checkout.'
 }
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -62,19 +83,19 @@ try {
 	Write-Step 'Local preflight'
 	Assert-Path $DeployConfig.LocalWpPath 'Local WordPress'
 	Assert-Path (Join-Path $DeployConfig.LocalWpPath 'wp-config.php') 'wp-config.php'
-	if ($Mode -ne 'db') { Assert-Path $DeployConfig.GitPath 'Git' }
-	if ($Mode -ne 'code') {
+	if ($hasCode -or $hasPlugins) { Assert-Path $DeployConfig.GitPath 'Git' }
+	if ($hasDatabase) {
 		Assert-Path $DeployConfig.MysqldumpPath 'mysqldump'
-		if (-not $SkipUploads) { Assert-Path $DeployConfig.LocalUploadsPath 'Uploads' }
 	}
+	if ($hasUploads) { Assert-Path $DeployConfig.LocalUploadsPath 'Uploads' }
 	$requiredLocalBytes = [long] $DeployConfig.MinimumLocalFreeSpaceMB * 1MB
-	if ($Mode -ne 'code' -and -not $SkipUploads) {
+	if ($hasUploads) {
 		$requiredLocalBytes += Get-DirectoryContentSizeBytes $DeployConfig.LocalUploadsPath
 	}
 	Assert-AvailableDiskSpace $repoRoot $requiredLocalBytes 'Local deployment workspace'
 	New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
 
-	if ($Mode -ne 'db') {
+	if ($hasCode -or $hasPlugins) {
 		Write-Step 'Verify Git checkout'
 		$status = @(Invoke-CommandOutput $DeployConfig.GitPath @('status','--porcelain','--untracked-files=all') $repoRoot)
 		if ($status.Count -gt 0) {
@@ -94,7 +115,10 @@ try {
 		return
 	}
 
-	if ($Mode -ne 'code') {
+	if ($hasDatabase -or $hasUploads) {
+		New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
+	}
+	if ($hasDatabase) {
 		Write-Step 'Export database'
 		$dbArgs = @("--host=$($DeployConfig.LocalDbHost)","--user=$($DeployConfig.LocalDbUser)","--result-file=$sqlPath",'--single-transaction','--quick','--default-character-set=utf8mb4',$DeployConfig.LocalDbName)
 		$previousMysqlPassword = $env:MYSQL_PWD
@@ -107,20 +131,22 @@ try {
 			if ($null -eq $previousMysqlPassword) { Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue }
 			else { $env:MYSQL_PWD = $previousMysqlPassword }
 		}
-		if (-not $SkipUploads) {
-			Write-Step 'Pack uploads'
-			New-Zip $DeployConfig.LocalUploadsPath $uploadsZip
-			Assert-ZipArchiveFile $uploadsZip
-		}
+	}
+	if ($hasUploads) {
+		Write-Step 'Pack uploads'
+		New-Zip $DeployConfig.LocalUploadsPath $uploadsZip
+		Assert-ZipArchiveFile $uploadsZip
+	}
+	if ($hasDatabase -or $hasUploads) {
 		Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, "mkdir -p $(ConvertTo-ShSingleQuotedString $DeployConfig.RemoteTmpPath)")) $repoRoot
 		$remoteCleanupNeeded = $true
-		Invoke-CheckedCommand 'scp' ($scpArgs + @($sqlPath, "$target`:$remoteSql")) $repoRoot
-		if (-not $SkipUploads) { Invoke-CheckedCommand 'scp' ($scpArgs + @($uploadsZip, "$target`:$remoteUploads")) $repoRoot }
+		if ($hasDatabase) { Invoke-CheckedCommand 'scp' ($scpArgs + @($sqlPath, "$target`:$remoteSql")) $repoRoot }
+		if ($hasUploads) { Invoke-CheckedCommand 'scp' ($scpArgs + @($uploadsZip, "$target`:$remoteUploads")) $repoRoot }
 	}
 
 	Write-Step 'Run remote deployment'
-	$sqlArg = if ($Mode -ne 'code') { $remoteSql } else { '' }
-	$uploadsArg = if ($Mode -ne 'code' -and -not $SkipUploads) { $remoteUploads } else { '' }
+	$sqlArg = if ($hasDatabase) { $remoteSql } else { '' }
+	$uploadsArg = if ($hasUploads) { $remoteUploads } else { '' }
 	Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, (New-RemoteDeployCommand $DeployConfig $Mode $sqlArg $uploadsArg))) $repoRoot
 	$remoteCleanupNeeded = $false
 

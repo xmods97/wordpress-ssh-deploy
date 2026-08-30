@@ -134,11 +134,21 @@ function New-RemoteDeployCommand {
 	[CmdletBinding()]
 	param(
 		[Parameter(Mandatory = $true)] [System.Collections.IDictionary] $Configuration,
-		[Parameter(Mandatory = $true)] [ValidateSet('preflight', 'full', 'code', 'db')] [string] $DeployMode,
+		[Parameter(Mandatory = $true)] [ValidateSet('preflight', 'full', 'code', 'db', 'code-db', 'uploads', 'plugins')] [string] $DeployMode,
 		[string] $SqlFile = '',
 		[string] $UploadsFile = ''
 	)
 
+	$allowProductionFull = $Configuration.Contains('AllowProductionFull') -and $Configuration.AllowProductionFull -is [bool] -and $Configuration.AllowProductionFull
+	$productionFullOptIn = if ($Configuration.Environment -eq 'production' -and $DeployMode -eq 'full' -and $allowProductionFull) { '1' } else { '0' }
+	$pluginPaths = if ($Configuration.Contains('PluginSyncPaths')) { @($Configuration.PluginSyncPaths) } else { @() }
+	$effectiveModes = if ($Configuration.Contains('AllowedDeployModes')) {
+		@($Configuration.AllowedDeployModes)
+	} elseif ($Configuration.Environment -eq 'production') {
+		if ($allowProductionFull) { @('preflight', 'code', 'full') } else { @('preflight', 'code') }
+	} else {
+		@('preflight', 'code', 'db', 'full')
+	}
 	$assignments = @(
 		@('LOCAL_URL', $Configuration.LocalUrl),
 		@('REMOTE_URL', $Configuration.RemoteUrl),
@@ -155,7 +165,10 @@ function New-RemoteDeployCommand {
 		@('EXPECTED_WP_DIR', $Configuration.ExpectedRemoteWpPath),
 		@('EXPECTED_DB_NAME', $Configuration.ExpectedRemoteDbName),
 		@('SYNC_PATHS', ($Configuration.SyncPaths -join ',')),
+		@('PLUGIN_SYNC_PATHS', ($pluginPaths -join ',')),
+		@('ALLOWED_DEPLOY_MODES', ($effectiveModes -join ',')),
 		@('DEPLOY_MODE', $DeployMode),
+		@('PRODUCTION_FULL_OPT_IN', $productionFullOptIn),
 		@('SQL_FILE', $SqlFile),
 		@('UPLOADS_ZIP', $UploadsFile)
 	)
@@ -220,6 +233,20 @@ function Test-SyncPath {
 	return $true
 }
 
+function Test-CodeSyncPath {
+	param([string] $Value)
+
+	return (Test-SyncPath $Value) -and
+		$Value -match '(?i)^wp-content/themes/.+' -and
+		$Value -notmatch '(?i)^wp-content/themes/divi(/|$)'
+}
+
+function Test-PluginSyncPath {
+	param([string] $Value)
+
+	return (Test-SyncPath $Value) -and $Value -match '(?i)^wp-content/plugins/.+'
+}
+
 function Get-DeployConfigurationErrors {
 	[CmdletBinding()]
 	param(
@@ -259,8 +286,10 @@ function Get-DeployConfigurationErrors {
 		'ExpectedRemoteDbName'
 	)
 	$optionalKeys = @('LocalDbPassword', 'SshKeyPath')
+	$optionalBooleanKeys = @('AllowProductionFull')
+	$optionalArrayKeys = @('PluginSyncPaths', 'AllowedDeployModes')
 	$otherRequiredKeys = @('SshPort', 'KeepBackups', 'MinimumLocalFreeSpaceMB', 'MinimumRemoteFreeSpaceMB', 'SyncPaths')
-	$allowedKeys = $requiredStringKeys + $optionalKeys + $otherRequiredKeys
+	$allowedKeys = $requiredStringKeys + $optionalKeys + $optionalBooleanKeys + $optionalArrayKeys + $otherRequiredKeys
 
 	foreach ($key in $Configuration.Keys) {
 		if ([string] $key -notin $allowedKeys) {
@@ -286,6 +315,14 @@ function Get-DeployConfigurationErrors {
 	foreach ($key in $optionalKeys) {
 		if ($Configuration.Contains($key) -and $null -ne $Configuration[$key] -and $Configuration[$key] -isnot [string]) {
 			Add-ValidationError $errors "Optional configuration value must be a string: $key"
+		}
+	}
+	if ($Configuration.Contains('AllowProductionFull') -and $Configuration.AllowProductionFull -isnot [bool]) {
+		Add-ValidationError $errors 'AllowProductionFull must be a Boolean when configured.'
+	}
+	foreach ($key in $optionalArrayKeys) {
+		if ($Configuration.Contains($key) -and $Configuration[$key] -isnot [Array]) {
+			Add-ValidationError $errors "$key must be an array when configured."
 		}
 	}
 
@@ -391,7 +428,7 @@ function Get-DeployConfigurationErrors {
 		}
 		$seen = @{}
 		foreach ($path in $syncPaths) {
-			if ($path -isnot [string] -or -not (Test-SyncPath $path)) {
+			if ($path -isnot [string] -or -not (Test-CodeSyncPath $path)) {
 				Add-ValidationError $errors "Unsafe SyncPaths value: $path"
 				continue
 			}
@@ -401,6 +438,36 @@ function Get-DeployConfigurationErrors {
 			}
 			$seen[$key] = $true
 		}
+	}
+	$pluginPathCount = 0
+	foreach ($key in @('PluginSyncPaths')) {
+		if (-not $Configuration.Contains($key)) { continue }
+		if ($Configuration[$key] -isnot [Array]) {
+			Add-ValidationError $errors "$key must be an array of wp-content/plugins paths."
+			continue
+		}
+		$seen = @{}
+		foreach ($path in @($Configuration[$key])) {
+			$pluginPathCount++
+			if ($path -isnot [string] -or -not (Test-PluginSyncPath $path)) {
+				Add-ValidationError $errors "Unsafe $key value: $path"
+				continue
+			}
+			$normalized = $path.ToLowerInvariant()
+			if ($seen.ContainsKey($normalized)) { Add-ValidationError $errors "Duplicate $key value: $path" }
+			$seen[$normalized] = $true
+		}
+	}
+	if ($Configuration.Contains('AllowedDeployModes')) {
+		$knownModes = @('code', 'db', 'code-db', 'uploads', 'plugins', 'full', 'preflight')
+		$seen = @{}
+		foreach ($mode in @($Configuration.AllowedDeployModes)) {
+			if ($mode -isnot [string] -or $mode -notin $knownModes) { Add-ValidationError $errors "Unknown AllowedDeployModes value: $mode"; continue }
+			if ($seen.ContainsKey($mode)) { Add-ValidationError $errors "Duplicate AllowedDeployModes value: $mode" }
+			$seen[$mode] = $true
+		}
+		if (-not $seen.ContainsKey('preflight')) { Add-ValidationError $errors 'AllowedDeployModes must include preflight.' }
+		if ($seen.ContainsKey('plugins') -and $pluginPathCount -eq 0) { Add-ValidationError $errors 'PluginSyncPaths must contain at least one path when plugins mode is enabled.' }
 	}
 
 	return $errors.ToArray()
@@ -428,12 +495,28 @@ function Assert-DeployModeAllowed {
 		[string] $Environment,
 
 		[Parameter(Mandatory = $true)]
-		[ValidateSet('full', 'code', 'db')]
-		[string] $Mode
+		[ValidateSet('full', 'code', 'db', 'code-db', 'uploads', 'plugins')]
+		[string] $Mode,
+
+		[object] $AllowProductionFull = $false,
+		[object[]] $AllowedDeployModes = @()
 	)
 
-	if ($Environment -eq 'production' -and $Mode -ne 'code') {
-		throw "Mode '$Mode' is forbidden for production. Use code mode."
+	if ($AllowProductionFull -isnot [bool]) {
+		throw 'AllowProductionFull must be a Boolean.'
+	}
+
+	if ($Environment -eq 'production') {
+		if ($Mode -eq 'full' -and -not $AllowProductionFull) {
+			throw "Mode '$Mode' is forbidden for production until AllowProductionFull is explicitly enabled."
+		}
+	}
+	if ($AllowedDeployModes.Count -gt 0) {
+		if ($Mode -notin $AllowedDeployModes) { throw "Mode '$Mode' is not enabled by this profile." }
+		return
+	}
+	if ($Environment -eq 'production' -and $Mode -eq 'db') {
+		throw "Mode '$Mode' is forbidden for production. Use code mode or an explicitly enabled full mode."
 	}
 }
 
