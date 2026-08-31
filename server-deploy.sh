@@ -518,6 +518,22 @@ normalize_plugin_ownership() {
 	printf '%s\n' "Plugin ownership normalized to $SITE_OWNER:$SITE_GROUP"
 }
 
+normalize_uploads_ownership() {
+	target_path="$1"
+	case "$(id -u)" in
+		0) ;;
+		*) return 0 ;;
+	esac
+	discover_site_owner || return 1
+	canonical_wp_for_ownership="$(CDPATH= cd -P "$WP_DIR" && pwd)" || fail "Could not determine canonical WordPress path"
+	uploads_dir="$canonical_wp_for_ownership/wp-content/uploads"
+	[ "$target_path" = "$uploads_dir" ] || fail "Uploads ownership target escaped uploads directory"
+	[ ! -L "$uploads_dir" ] || fail "Uploads ownership directory must not be a symbolic link"
+	[ -d "$uploads_dir" ] || fail "WordPress uploads directory was not found"
+	chown -R -- "$SITE_OWNER:$SITE_GROUP" "$uploads_dir" || fail "Uploads ownership normalization failed"
+	printf '%s\n' "Uploads ownership normalized to $SITE_OWNER:$SITE_GROUP"
+}
+
 normalize_divi_ownership() {
 	discover_site_owner || return 1
 	canonical_wp_for_ownership="$(CDPATH= cd -P "$WP_DIR" && pwd)" || fail "Could not determine canonical WordPress path"
@@ -792,6 +808,7 @@ sync_uploads() {
 		fail "Atomic uploads replacement failed"
 	fi
 	TRANSIENT_REPLACED=1
+	normalize_uploads_ownership "$current"
 	TRANSIENT_COMMITTED=1
 	rm -rf "$old" 2>/dev/null || fail "Old uploads target cleanup failed"
 	TRANSIENT_NEW=''; TRANSIENT_OLD=''; TRANSIENT_TARGET=''; TRANSIENT_REPLACED=0; TRANSIENT_COMMITTED=0

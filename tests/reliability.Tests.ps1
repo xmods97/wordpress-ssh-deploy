@@ -57,6 +57,13 @@ Describe 'Remote replacement and rollback guards' {
 		$serverSource | Should Match 'Atomic uploads replacement failed'
 	}
 
+	It 'normalizes only the canonical uploads tree before the upload replacement commits' {
+		$serverSource | Should Match 'normalize_uploads_ownership\(\)'
+		$serverSource | Should Match '\[ "\$target_path" = "\$uploads_dir" \]'
+		$serverSource | Should Match 'Uploads ownership directory must not be a symbolic link'
+		$serverSource | Should Match '(?s)TRANSIENT_REPLACED=1\s+normalize_uploads_ownership "\$current"\s+TRANSIENT_COMMITTED=1'
+	}
+
 	It 'validates SQL and ZIP before destructive operations' {
 		$serverSource | Should Match 'assert_sql_dump "\$SQL_FILE"'
 		$serverSource | Should Match 'unzip -tq "\$UPLOADS_ZIP"'
