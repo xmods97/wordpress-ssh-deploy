@@ -600,7 +600,7 @@ copy_paths() {
 }
 
 copy_code() { copy_paths "$SYNC_PATHS" code; }
-copy_plugins() { copy_paths "$PLUGIN_SYNC_PATHS" plugins; }
+copy_plugins() { [ -n "$PLUGIN_SYNC_PATHS" ] || return 0; copy_paths "$PLUGIN_SYNC_PATHS" plugins; }
 
 backup_database() {
 	require_cmd mysqldump

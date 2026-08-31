@@ -9,7 +9,11 @@ SERVER_GIT_SSH_KEY='/tmp/wordpress-ssh-deploy-owner-fixture/id_ed25519'
 SERVER_PHP_BIN='/tmp/wordpress-ssh-deploy-owner-fixture/bin/php'
 SERVER_WP_CLI_BIN='/tmp/wordpress-ssh-deploy-owner-fixture/bin/wp'
 SERVER_SYNC_PATHS='wp-content/themes/bella-maria-child'
-SERVER_PLUGIN_SYNC_PATHS='wp-content/plugins/example-plugin'
+if [ "${FIXTURE_SERVER_PLUGIN_SYNC_PATHS+x}" = x ]; then
+	SERVER_PLUGIN_SYNC_PATHS="$FIXTURE_SERVER_PLUGIN_SYNC_PATHS"
+else
+	SERVER_PLUGIN_SYNC_PATHS='wp-content/plugins/example-plugin'
+fi
 SERVER_ALLOWED_DEPLOY_MODES='preflight,code,db,code-db,uploads,plugins,full'
 SERVER_KEEP_BACKUPS='10'
 SERVER_MIN_FREE_SPACE_MB='1'

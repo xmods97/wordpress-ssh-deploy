@@ -32,6 +32,8 @@ printf '%s\n' 'plugin release' > "$target_root/repo/wp-content/plugins/example-p
 
 run_runner() {
 	mode="$1"
+	plugin_paths='wp-content/plugins/example-plugin'
+	if [ "${FIXTURE_PLUGIN_SYNC_PATHS+x}" = x ]; then plugin_paths="$FIXTURE_PLUGIN_SYNC_PATHS"; fi
 	PATH="$target_root/bin:/usr/bin:/bin" \
 	FIXTURE_ROOT="$target_root" \
 	FIXTURE_EFFECTIVE_UID=1000 \
@@ -41,7 +43,7 @@ run_runner() {
 	ENVIRONMENT='staging' LOCAL_URL='http://owner.local' REMOTE_URL='https://owner.example.com' \
 	WP_DIR="$target_root/wp" REPO_DIR="$target_root/repo" BACKUP_DIR="$target_root/backups" \
 	EXPECTED_WP_DIR="$target_root/wp" EXPECTED_DB_NAME='wordpress_owner_fixture' EXPECTED_REMOTE_DOMAIN='owner.example.com' \
-SYNC_PATHS='wp-content/themes/bella-maria-child' PLUGIN_SYNC_PATHS='wp-content/plugins/example-plugin' \
+SYNC_PATHS='wp-content/themes/bella-maria-child' PLUGIN_SYNC_PATHS="$plugin_paths" \
 	ALLOWED_DEPLOY_MODES='preflight,code,db,code-db,uploads,plugins,full' \
 	GIT_SSH_KEY="$target_root/id_ed25519" PHP_BIN="$target_root/bin/php" WP_CLI_BIN="$target_root/bin/wp" \
 	KEEP_BACKUPS='10' MIN_REMOTE_FREE_SPACE_MB='1' DEPLOY_MODE="$mode" SQL_FILE="${2:-}" UPLOADS_ZIP='' \
@@ -70,6 +72,21 @@ full_output="$(run_runner full "$target_root/tmp/local-db-fixture.sql")"
 case "$full_output" in *'Theme ownership normalized to admin_nadry:admin_nadry'*) ;; *) echo "$full_output" >&2; exit 1 ;; esac
 grep -Fq -- "admin_nadry:admin_nadry $target_root/wp/wp-content/themes/Divi" "$target_root/chown-calls.log"
 [ "$(wc -l < "$target_root/mysql-calls.log")" -eq 1 ] || { echo 'Full mode did not execute database import' >&2; exit 1; }
+
+rm -rf "$target_root/wp/wp-content/plugins/example-plugin"
+: > "$target_root/chown-calls.log"
+: > "$target_root/mysql-calls.log"
+printf '%s\n' '-- MySQL dump 10.13  Distrib fixture' '-- Table structure for table `wp_options`' 'CREATE TABLE `wp_options` (`option_id` bigint NOT NULL);' 'INSERT INTO `wp_options` VALUES (2);' > "$target_root/tmp/local-db-fixture.sql"
+empty_plugin_full_output="$(FIXTURE_PLUGIN_SYNC_PATHS='' FIXTURE_SERVER_PLUGIN_SYNC_PATHS='' run_runner full "$target_root/tmp/local-db-fixture.sql")"
+case "$empty_plugin_full_output" in *'WordPress deployment completed (full)'*) ;; *) echo "$empty_plugin_full_output" >&2; exit 1 ;; esac
+[ "$(wc -l < "$target_root/mysql-calls.log")" -eq 1 ] || { echo 'Full mode with empty plugin paths did not execute database import' >&2; exit 1; }
+[ ! -e "$target_root/wp/wp-content/plugins/example-plugin" ] || { echo 'Full mode with empty plugin paths copied plugins unexpectedly' >&2; exit 1; }
+
+if empty_plugins_output="$(FIXTURE_PLUGIN_SYNC_PATHS='' FIXTURE_SERVER_PLUGIN_SYNC_PATHS='' run_runner plugins)"; then
+	echo 'Plugins mode must reject an empty plugin allowlist' >&2
+	exit 1
+fi
+case "$empty_plugins_output" in *'Plugins mode requires configured plugin sync paths'*) ;; *) echo "$empty_plugins_output" >&2; exit 1 ;; esac
 
 : > "$target_root/chown-calls.log"
 : > "$target_root/mysql-calls.log"
