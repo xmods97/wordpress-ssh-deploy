@@ -14,6 +14,32 @@ function Write-Ok([string] $Text) { Write-Host "OK  $Text" -ForegroundColor Gree
 function Assert-Path([string] $Path, [string] $Label) {
 	if (-not (Test-Path -LiteralPath $Path)) { throw "$Label not found: $Path" }
 }
+function Invoke-CheckedCommandRetry {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory = $true)] [string] $FilePath,
+		[Parameter(Mandatory = $true)] [string[]] $Arguments,
+		[Parameter(Mandatory = $true)] [string] $WorkingDirectory,
+		[int] $Attempts = 3,
+		[int] $DelaySeconds = 5
+	)
+
+	if ($Attempts -lt 1) { throw 'Retry attempts must be at least 1.' }
+	$lastError = $null
+	for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+		try {
+			Invoke-CheckedCommand $FilePath $Arguments $WorkingDirectory
+			return
+		} catch {
+			$lastError = $_
+			if ($attempt -lt $Attempts) {
+				Write-Warning "Command failed on attempt $attempt/$Attempts; retrying in $DelaySeconds seconds."
+				Start-Sleep -Seconds $DelaySeconds
+			}
+		}
+	}
+	throw $lastError
+}
 function New-Zip([string] $SourceDirectory, [string] $DestinationZip) {
 	Add-Type -AssemblyName System.IO.Compression.FileSystem
 	if (Test-Path -LiteralPath $DestinationZip) { Remove-Item -LiteralPath $DestinationZip -Force }
@@ -73,8 +99,9 @@ $remoteSql = "$($DeployConfig.RemoteTmpPath)/local-db-$stamp.sql"
 $remoteUploads = "$($DeployConfig.RemoteTmpPath)/uploads-$stamp.zip"
 $target = "$($DeployConfig.SshUser)@$($DeployConfig.SshHost)"
 $remoteCleanupNeeded = $false
-$sshArgs = @('-p', [string]$DeployConfig.SshPort)
-$scpArgs = @('-P', [string]$DeployConfig.SshPort)
+$localArtifactsCommitted = $false
+$sshArgs = @('-p', [string]$DeployConfig.SshPort, '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=10', '-o', 'ConnectTimeout=20')
+$scpArgs = @('-O', '-P', [string]$DeployConfig.SshPort, '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=10', '-o', 'ConnectTimeout=20')
 if ($DeployConfig.SshKeyPath) {
 	$sshArgs += @('-i', $DeployConfig.SshKeyPath, '-o', 'IdentitiesOnly=yes')
 	$scpArgs += @('-i', $DeployConfig.SshKeyPath, '-o', 'IdentitiesOnly=yes')
@@ -142,7 +169,9 @@ try {
 		Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, "mkdir -p $(ConvertTo-ShSingleQuotedString $DeployConfig.RemoteTmpPath)")) $repoRoot
 		$remoteCleanupNeeded = $true
 		if ($hasDatabase) { Invoke-CheckedCommand 'scp' ($scpArgs + @($sqlPath, "$target`:$remoteSql")) $repoRoot }
-		if ($hasUploads) { Invoke-CheckedCommand 'scp' ($scpArgs + @($uploadsZip, "$target`:$remoteUploads")) $repoRoot }
+		if ($hasUploads) {
+			Invoke-CheckedCommandRetry 'scp' ($scpArgs + @($uploadsZip, "$target`:$remoteUploads")) $repoRoot
+		}
 	}
 
 	Write-Step 'Run remote deployment'
@@ -150,6 +179,7 @@ try {
 	$uploadsArg = if ($hasUploads) { $remoteUploads } else { '' }
 	Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, (New-RemoteDeployCommand $DeployConfig $Mode $sqlArg $uploadsArg))) $repoRoot
 	$remoteCleanupNeeded = $false
+	$localArtifactsCommitted = $true
 
 	Write-Host "`nDeploy completed: $($DeployConfig.LocalUrl) -> $($DeployConfig.RemoteUrl)" -ForegroundColor Green
 } finally {
@@ -162,6 +192,10 @@ try {
 		}
 	}
 	if (Test-Path -LiteralPath $buildDir) {
-		Remove-Item -LiteralPath $buildDir -Recurse -Force -ErrorAction SilentlyContinue
+		if ($localArtifactsCommitted -or -not ($hasDatabase -or $hasUploads)) {
+			Remove-Item -LiteralPath $buildDir -Recurse -Force -ErrorAction SilentlyContinue
+		} else {
+			Write-Warning "Local deployment artifacts retained at $buildDir because remote deployment did not complete."
+		}
 	}
 }

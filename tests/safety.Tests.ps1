@@ -44,6 +44,14 @@ Describe 'Production deployment policy' {
 		$moduleSource | Should Match 'RemoteRunnerPath'
 		$deploySource | Should Not Match 'RemoteRepoPath\)/server-deploy\.sh'
 	}
+
+	It 'uses resilient legacy SCP transport for long-lived transfers' {
+		$deploySource | Should Match "'-O'"
+		$deploySource | Should Match 'ServerAliveInterval=30'
+		$deploySource | Should Match 'ServerAliveCountMax=10'
+		$deploySource | Should Match 'ConnectTimeout=20'
+		$deploySource | Should Match 'Invoke-CheckedCommandRetry.*scp'
+	}
 }
 
 Describe 'Secrets and cleanup guards' {
@@ -55,6 +63,7 @@ Describe 'Secrets and cleanup guards' {
 	It 'contains local finally cleanup and remote traps' {
 		$deploySource | Should Match 'finally \{'
 		$deploySource | Should Match 'Remote temporary file cleanup could not be confirmed'
+		$deploySource | Should Match 'Local deployment artifacts retained at'
 		$serverSource | Should Match 'trap cleanup_exit 0 1 2 15'
 		$serverSource | Should Match 'cleanup_stale_temp_files'
 	}
