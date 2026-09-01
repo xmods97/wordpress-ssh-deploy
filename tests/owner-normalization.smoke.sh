@@ -113,4 +113,12 @@ case "$mu_file_output" in *'Mu-plugin ownership normalized to admin_nadry:admin_
 grep -Fq 'mu file release' "$target_root/wp/wp-content/mu-plugins/example-file.php"
 grep -Fq -- "admin_nadry:admin_nadry $target_root/wp/wp-content/mu-plugins/example-file.php" "$target_root/chown-calls.log"
 
+printf '%s\n' 'mu file release after failure' > "$target_root/repo/wp-content/mu-plugins/example-file.php"
+if mu_file_failure_output="$(FIXTURE_EFFECTIVE_UID=0 FIXTURE_MU_PLUGIN_SYNC_PATHS='wp-content/mu-plugins/example-file.php' FIXTURE_SERVER_MU_PLUGIN_SYNC_PATHS='wp-content/mu-plugins/example-file.php' FIXTURE_CHOWN_FAIL=1 run_runner mu-plugins)"; then
+	echo 'MU-plugin file chown failure must fail the deployment' >&2
+	exit 1
+fi
+case "$mu_file_failure_output" in *'AUTOMATIC_CODE_ROLLBACK=completed'*) ;; *) echo "$mu_file_failure_output" >&2; exit 1 ;; esac
+grep -Fq 'mu file release' "$target_root/wp/wp-content/mu-plugins/example-file.php"
+
 echo 'Owner normalization code/plugin/MU/full: OK'

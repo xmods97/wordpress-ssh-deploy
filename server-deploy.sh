@@ -652,6 +652,7 @@ copy_plugins() { [ -n "$PLUGIN_SYNC_PATHS" ] || return 0; copy_paths "$PLUGIN_SY
 copy_mu_plugin_files() {
 	paths="$1"
 	canonical_wp_for_mu_plugins="$(CDPATH= cd -P "$WP_DIR" && pwd)" || fail "Could not determine canonical WordPress path"
+	CANONICAL_WP_DIR="$canonical_wp_for_mu_plugins"
 	old_ifs="$IFS"
 	IFS=','
 	for relative in $paths; do
