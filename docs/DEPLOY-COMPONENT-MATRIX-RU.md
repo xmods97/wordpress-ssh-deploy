@@ -22,6 +22,12 @@
 - Production `full` дополнительно сохраняет existing dual opt-in. Другие компоненты разрешаются только после явной миграции обоих policy layers.
 - `-SkipUploads` удалён из нового contract: `code-db` однозначно означает код + БД без uploads.
 
+## Bella SSH transport contract
+
+Bella wrapper принимает тот же assignment-протокол, который формирует клиент: `SYNC_PATHS`, `PLUGIN_SYNC_PATHS`, `ALLOWED_DEPLOY_MODES`, `DEPLOY_MODE`, `PRODUCTION_FULL_OPT_IN`, `SQL_FILE` и `UPLOADS_ZIP` вместе с общими site/path параметрами. Пустой `PLUGIN_SYNC_PATHS=''` допустим для режимов без plugin sync и проверяется как отдельное значение.
+
+Wrapper проверяет single-quoted values, уникальность assignments, режимы, plugin paths, production full opt-in и фиксированный runner path; неподдержанные токены отклоняются до запуска runner. Client/runner отклоняют `mu-plugins`, и wrapper не предоставляет им скрытого разрешения.
+
 ## Rollout
 
 Bella Maria — пилот. После independent review для неё создаётся отдельная migration/install задача с новой парой approvals. Остальные сайты мигрируются по одному: profile capability, private server policy, runner SHA install, preflight, затем отдельное production approval для выбранного режима.

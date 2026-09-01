@@ -16,7 +16,7 @@ Describe 'Remote POSIX safety' {
 	}
 
 	It 'passes shell syntax checks' {
-		foreach ($file in @('server-deploy.sh', 'server.config.example.sh', 'tests/server-safety.smoke.sh', 'tests/owner-normalization.smoke.sh', 'tests/uploads-ownership.smoke.sh', 'tests/database-rollback.smoke.sh', 'tests/url-rewrite-rollback.smoke.sh', 'tests/fixtures/server.config.production.sh', 'tests/fixtures/server.config.staging.sh', 'tests/fixtures/server.config.owner.sh', 'tests/fixtures/fake-php.sh', 'tests/fixtures/fake-id.sh', 'tests/fixtures/fake-stat.sh', 'tests/fixtures/fake-chown.sh', 'tests/fixtures/fake-du.sh', 'tests/fixtures/fake-git.sh', 'tests/fixtures/fake-mysqldump.sh', 'tests/fixtures/fake-mysql.sh', 'tests/fixtures/fake-df.sh', 'tests/fixtures/fake-runuser.sh', 'tests/fixtures/fake-unzip.sh')) {
+		foreach ($file in @('server-deploy.sh', 'server.config.example.sh', 'root-ssh-wrapper.sh', 'root-ssh-wrapper.config.example.sh', 'tests/server-safety.smoke.sh', 'tests/owner-normalization.smoke.sh', 'tests/uploads-ownership.smoke.sh', 'tests/root-ssh-wrapper.smoke.sh', 'tests/database-rollback.smoke.sh', 'tests/url-rewrite-rollback.smoke.sh', 'tests/fixtures/server.config.production.sh', 'tests/fixtures/server.config.staging.sh', 'tests/fixtures/server.config.owner.sh', 'tests/fixtures/fake-php.sh', 'tests/fixtures/fake-id.sh', 'tests/fixtures/fake-stat.sh', 'tests/fixtures/fake-chown.sh', 'tests/fixtures/fake-du.sh', 'tests/fixtures/fake-git.sh', 'tests/fixtures/fake-mysqldump.sh', 'tests/fixtures/fake-mysql.sh', 'tests/fixtures/fake-df.sh', 'tests/fixtures/fake-runuser.sh', 'tests/fixtures/fake-unzip.sh', 'tools/bella-root-wrapper-install.sh', 'tools/bella-runner-install.sh')) {
 			& $shPath -n (Join-Path $repoRoot $file)
 			$LASTEXITCODE | Should Be 0
 		}
@@ -54,6 +54,18 @@ Describe 'Remote POSIX safety' {
 			$output = & $shPath -c 'PATH=/usr/bin:/bin; export PATH; sh ./tests/owner-normalization.smoke.sh' 2>&1
 			$LASTEXITCODE | Should Be 0
 			$output -join "`n" | Should Match 'Owner normalization code-only/full: OK'
+		} finally {
+			Pop-Location
+		}
+	}
+
+	It 'accepts the client component protocol through the Bella wrapper' {
+		Push-Location $repoRoot
+		try {
+			$wrapperSh = if (Test-Path -LiteralPath 'D:\laragon\bin\git\bin\sh.exe') { 'D:\laragon\bin\git\bin\sh.exe' } else { $shPath }
+			$output = & $wrapperSh -c 'PATH=/usr/bin:/bin; export PATH; sh ./tests/root-ssh-wrapper.smoke.sh' 2>&1
+			$LASTEXITCODE | Should Be 0
+			$output -join "`n" | Should Match 'Root SSH wrapper smoke: OK'
 		} finally {
 			Pop-Location
 		}
