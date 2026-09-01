@@ -109,6 +109,14 @@ wrapper_stage="$RUNTIME/root-ssh-wrapper.sh.install.$stamp"
 config_stage="$DATA/wrapper.config.install.$stamp"
 authorized_stage="/root/.ssh/authorized_keys.install.$stamp"
 
+existing_restrict_count=$(awk -v target="$TARGET" '
+index($0, target) && $0 ~ /(^|,)restrict(,|[[:space:]])/ { count++ }
+END { print count + 0 }
+' "$AUTHORIZED")
+[ "$existing_restrict_count" -le 1 ] || fail 'authorized_keys contains duplicate Bella restrict target entries'
+restrict_added=0
+[ "$existing_restrict_count" = 1 ] || restrict_added=1
+
 install -o root -g root -m 700 "$NEW_WRAPPER" "$wrapper_stage"
 
 install -o root -g root -m 600 "$CONFIG" "$config_stage"
@@ -136,10 +144,10 @@ END { print count + 0 }
 [ "$restrict_count" = 1 ] || fail 'staged Bella key does not have restrict'
 
 authorized_check="$DATA/authorized_keys.check.$stamp"
-awk -v target="$TARGET" '
+awk -v target="$TARGET" -v restrict_added="$restrict_added" '
 {
     line = $0
-    if (index(line, target) && line ~ /^restrict,/) {
+    if (index(line, target) && restrict_added == 1 && line ~ /^restrict,/) {
         sub(/^restrict,/, "", line)
     }
     print line
