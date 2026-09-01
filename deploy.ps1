@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
 	[Parameter(Position = 0)] [string] $Message = '',
-	[ValidateSet('full', 'code', 'db', 'code-db', 'uploads', 'plugins')] [string] $Mode = 'code',
+	[ValidateSet('full', 'code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins')] [string] $Mode = 'code',
 	[switch] $SkipGit,
 	[switch] $SkipUploads,
 	[switch] $PreflightOnly
@@ -23,7 +23,7 @@ function New-Zip([string] $SourceDirectory, [string] $DestinationZip) {
 }
 function Test-ModeComponent([string] $SelectedMode, [string] $Component) {
 	$matrix = @{
-		code = @('code'); db = @('db'); 'code-db' = @('code','db'); uploads = @('uploads'); plugins = @('plugins'); full = @('code','db','uploads','plugins')
+		code = @('code'); db = @('db'); 'code-db' = @('code','db'); uploads = @('uploads'); plugins = @('plugins'); 'mu-plugins' = @('mu-plugins'); full = @('code','db','uploads','plugins','mu-plugins')
 	}
 	return $matrix[$SelectedMode] -contains $Component
 }
@@ -54,14 +54,15 @@ $hasCode = Test-ModeComponent $Mode 'code'
 $hasDatabase = Test-ModeComponent $Mode 'db'
 $hasUploads = Test-ModeComponent $Mode 'uploads'
 $hasPlugins = Test-ModeComponent $Mode 'plugins'
+$hasMuPlugins = Test-ModeComponent $Mode 'mu-plugins'
 if ($Message) {
 	throw 'Automatic Git commit/push was removed. Commit and push separately, then run deploy without Message.'
 }
 if ($SkipUploads) {
 	throw '-SkipUploads is retired. Use code-db for code plus database without uploads.'
 }
-if ($SkipGit -and ($hasCode -or $hasPlugins)) {
-	throw '-SkipGit is not supported for code or plugins. These components require a clean, pushed Git checkout.'
+if ($SkipGit -and ($hasCode -or $hasPlugins -or $hasMuPlugins)) {
+	throw '-SkipGit is not supported for code, plugins or mu-plugins. These components require a clean, pushed Git checkout.'
 }
 
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -83,7 +84,7 @@ try {
 	Write-Step 'Local preflight'
 	Assert-Path $DeployConfig.LocalWpPath 'Local WordPress'
 	Assert-Path (Join-Path $DeployConfig.LocalWpPath 'wp-config.php') 'wp-config.php'
-	if ($hasCode -or $hasPlugins) { Assert-Path $DeployConfig.GitPath 'Git' }
+	if ($hasCode -or $hasPlugins -or $hasMuPlugins) { Assert-Path $DeployConfig.GitPath 'Git' }
 	if ($hasDatabase) {
 		Assert-Path $DeployConfig.MysqldumpPath 'mysqldump'
 	}
@@ -95,7 +96,7 @@ try {
 	Assert-AvailableDiskSpace $repoRoot $requiredLocalBytes 'Local deployment workspace'
 	New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
 
-	if ($hasCode -or $hasPlugins) {
+	if ($hasCode -or $hasPlugins -or $hasMuPlugins) {
 		Write-Step 'Verify Git checkout'
 		$status = @(Invoke-CommandOutput $DeployConfig.GitPath @('status','--porcelain','--untracked-files=all') $repoRoot)
 		if ($status.Count -gt 0) {

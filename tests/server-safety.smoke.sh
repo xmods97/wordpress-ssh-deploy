@@ -29,6 +29,7 @@ run_server() {
 	EXPECTED_REMOTE_DOMAIN='example.com' \
 	SYNC_PATHS='wp-content/themes/example-theme' \
 	PLUGIN_SYNC_PATHS='' \
+	MU_PLUGIN_SYNC_PATHS='' \
 	ALLOWED_DEPLOY_MODES="${FIXTURE_ALLOWED_DEPLOY_MODES:-preflight,code,full}" \
 	GIT_SSH_KEY='/tmp/wordpress-ssh-deploy-fixture/id_ed25519' \
 	PHP_BIN='/tmp/wordpress-ssh-deploy-fixture/bin/php' \
@@ -66,6 +67,12 @@ output="$(FIXTURE_ALLOWED_DEPLOY_MODES='preflight,code,db,code-db,uploads,plugin
 case "$output" in
 	*'Plugins mode requires configured plugin sync paths'*) ;;
 	*) echo "Plugins mode did not reject an empty plugin allowlist" >&2; exit 1 ;
+esac
+
+output="$(FIXTURE_ALLOWED_DEPLOY_MODES='preflight,code,db,code-db,uploads,plugins,mu-plugins,full' run_server production mu-plugins || true)"
+case "$output" in
+	*'Mu-plugins mode requires configured mu-plugin sync paths'*) ;;
+	*) echo "MU-plugins mode did not reject an empty MU-plugin allowlist" >&2; exit 1 ;;
 esac
 
 output="$(FIXTURE_ALLOWED_DEPLOY_MODES='preflight,code,unknown' run_server production code || true)"

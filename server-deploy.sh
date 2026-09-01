@@ -32,6 +32,7 @@ SERVER_CONFIG="$SCRIPT_DIR/server.config.sh"
 : "${SERVER_WP_CLI_BIN:?SERVER_WP_CLI_BIN is required in server.config.sh}"
 : "${SERVER_SYNC_PATHS:?SERVER_SYNC_PATHS is required in server.config.sh}"
 : "${SERVER_PLUGIN_SYNC_PATHS:=}"
+: "${SERVER_MU_PLUGIN_SYNC_PATHS:=}"
 if [ -z "${SERVER_ALLOWED_DEPLOY_MODES+x}" ]; then
 	case "$SERVER_ENVIRONMENT" in
 		production) SERVER_ALLOWED_DEPLOY_MODES='preflight,code,full' ;;
@@ -63,6 +64,7 @@ SERVER_GIT_SSH_PORT="${SERVER_GIT_SSH_PORT:-22}"
 
 DEPLOY_MODE="${DEPLOY_MODE:-code}"
 PLUGIN_SYNC_PATHS="${PLUGIN_SYNC_PATHS:-}"
+MU_PLUGIN_SYNC_PATHS="${MU_PLUGIN_SYNC_PATHS:-}"
 ALLOWED_DEPLOY_MODES="${ALLOWED_DEPLOY_MODES:-}"
 PRODUCTION_FULL_OPT_IN="${PRODUCTION_FULL_OPT_IN:-0}"
 KEEP_BACKUPS="${KEEP_BACKUPS:-10}"
@@ -199,14 +201,14 @@ wp_cli_manual_prefix() {
 wp_config_value() { wp_cli config get "$1" --type=constant; }
 
 assert_mode() {
-	case "$DEPLOY_MODE" in preflight|code|db|code-db|uploads|plugins|full) ;; *) fail "Unknown DEPLOY_MODE" ;; esac
+	case "$DEPLOY_MODE" in preflight|code|db|code-db|uploads|plugins|mu-plugins|full) ;; *) fail "Unknown DEPLOY_MODE" ;; esac
 	case ",$ALLOWED_DEPLOY_MODES," in *,$DEPLOY_MODE,*) ;; *) fail "Deploy mode is not enabled by profile policy" ;; esac
 	case ",$SERVER_ALLOWED_DEPLOY_MODES," in *,$DEPLOY_MODE,*) ;; *) fail "Deploy mode is not enabled by server policy" ;; esac
 	case "$PRODUCTION_FULL_OPT_IN" in 0|1) ;; *) fail "Invalid production full-mode client opt-in" ;; esac
 	case "${SERVER_ALLOW_PRODUCTION_FULL:-0}" in 0|1) ;; *) fail "Invalid server production full-mode policy" ;; esac
 	if [ "$SERVER_ENVIRONMENT" = production ]; then
 		case "$DEPLOY_MODE" in
-			preflight|code|db|code-db|uploads|plugins) ;;
+			preflight|code|db|code-db|uploads|plugins|mu-plugins) ;;
 			full)
 				[ "$PRODUCTION_FULL_OPT_IN" = 1 ] || fail "Production full mode requires an explicit client profile opt-in"
 				[ "${SERVER_ALLOW_PRODUCTION_FULL:-0}" = 1 ] || fail "Production full mode is disabled by server policy"
@@ -215,6 +217,9 @@ assert_mode() {
 	fi
 	if [ "$DEPLOY_MODE" = plugins ] && [ -z "$PLUGIN_SYNC_PATHS" ]; then
 		fail "Plugins mode requires configured plugin sync paths"
+	fi
+	if [ "$DEPLOY_MODE" = mu-plugins ] && [ -z "$MU_PLUGIN_SYNC_PATHS" ]; then
+		fail "Mu-plugins mode requires configured mu-plugin sync paths"
 	fi
 }
 
@@ -225,7 +230,7 @@ assert_allowed_modes_subset() {
 	IFS=','
 	for mode in $requested; do
 		IFS="$old_ifs"
-		case "$mode" in preflight|code|db|code-db|uploads|plugins|full) ;; *) fail "Invalid profile deploy mode policy" ;; esac
+		case "$mode" in preflight|code|db|code-db|uploads|plugins|mu-plugins|full) ;; *) fail "Invalid profile deploy mode policy" ;; esac
 		case ",$allowed," in *,$mode,*) ;; *) fail "Profile deploy mode is outside server policy" ;; esac
 		IFS=','
 	done
@@ -245,6 +250,7 @@ assert_server_policy() {
 	[ "$WP_CLI_BIN" = "$SERVER_WP_CLI_BIN" ] || fail "WP-CLI path does not match server policy"
 	[ "$SYNC_PATHS" = "$SERVER_SYNC_PATHS" ] || fail "Sync paths do not match server policy"
 	[ "$PLUGIN_SYNC_PATHS" = "$SERVER_PLUGIN_SYNC_PATHS" ] || fail "Plugin sync paths do not match server policy"
+	[ "$MU_PLUGIN_SYNC_PATHS" = "$SERVER_MU_PLUGIN_SYNC_PATHS" ] || fail "Mu-plugin sync paths do not match server policy"
 	assert_allowed_modes_subset "$ALLOWED_DEPLOY_MODES" "$SERVER_ALLOWED_DEPLOY_MODES"
 	[ "$KEEP_BACKUPS" = "$SERVER_KEEP_BACKUPS" ] || fail "Backup retention does not match server policy"
 	[ "$MIN_REMOTE_FREE_SPACE_MB" = "$SERVER_MIN_FREE_SPACE_MB" ] || fail "Free-space policy does not match server policy"
@@ -461,6 +467,9 @@ assert_sync_path() {
 		plugins)
 			case "$relative" in wp-content/plugins/*) ;; *) fail "Plugin sync path must be inside wp-content/plugins" ;; esac
 			;;
+		mu-plugins)
+			case "$relative" in wp-content/mu-plugins/*) ;; *) fail "Mu-plugin sync path must be inside wp-content/mu-plugins" ;; esac
+			;;
 		*) fail "Unknown sync component" ;;
 	esac
 }
@@ -516,6 +525,27 @@ normalize_plugin_ownership() {
 	[ -e "$target_path" ] || fail "Synchronized plugin target was not found"
 	chown -R -- "$SITE_OWNER:$SITE_GROUP" "$target_path" || fail "Synchronized plugin ownership normalization failed"
 	printf '%s\n' "Plugin ownership normalized to $SITE_OWNER:$SITE_GROUP"
+}
+
+normalize_mu_plugin_ownership() {
+	target_path="$1"
+	case "$(id -u)" in
+		0) ;;
+		*) return 0 ;;
+	esac
+	discover_site_owner || return 1
+	canonical_wp_for_ownership="$(CDPATH= cd -P "$WP_DIR" && pwd)" || fail "Could not determine canonical WordPress path"
+	mu_plugins_dir="$canonical_wp_for_ownership/wp-content/mu-plugins"
+	case "$target_path" in
+		"$mu_plugins_dir"|"$mu_plugins_dir"/*) ;;
+		*) fail "Synchronized mu-plugin target escaped mu-plugins directory" ;;
+	esac
+	[ ! -L "$mu_plugins_dir" ] || fail "WordPress mu-plugins directory must not be a symbolic link"
+	[ -d "$mu_plugins_dir" ] || fail "WordPress mu-plugins directory was not found"
+	chown -- "$SITE_OWNER:$SITE_GROUP" "$mu_plugins_dir" || fail "Mu-plugins directory ownership normalization failed"
+	[ -e "$target_path" ] || fail "Synchronized mu-plugin target was not found"
+	chown -R -- "$SITE_OWNER:$SITE_GROUP" "$target_path" || fail "Synchronized mu-plugin ownership normalization failed"
+	printf '%s\n' "Mu-plugin ownership normalized to $SITE_OWNER:$SITE_GROUP"
 }
 
 normalize_uploads_ownership() {
@@ -606,6 +636,7 @@ copy_paths() {
 		TRANSIENT_REPLACED=1
 		normalize_theme_ownership "$target_path"
 		if [ "$component_label" = plugins ]; then normalize_plugin_ownership "$target_path"; fi
+		if [ "$component_label" = mu-plugins ]; then normalize_mu_plugin_ownership "$target_path"; fi
 		TRANSIENT_COMMITTED=1
 		rm -rf "$TRANSIENT_OLD" 2>/dev/null || fail "Old code target cleanup failed"
 		TRANSIENT_NEW=''; TRANSIENT_OLD=''; TRANSIENT_TARGET=''; TRANSIENT_REPLACED=0; TRANSIENT_COMMITTED=0
@@ -617,6 +648,7 @@ copy_paths() {
 
 copy_code() { copy_paths "$SYNC_PATHS" code; }
 copy_plugins() { [ -n "$PLUGIN_SYNC_PATHS" ] || return 0; copy_paths "$PLUGIN_SYNC_PATHS" plugins; }
+copy_mu_plugins() { [ -n "$MU_PLUGIN_SYNC_PATHS" ] || return 0; copy_paths "$MU_PLUGIN_SYNC_PATHS" mu-plugins; }
 
 backup_database() {
 	require_cmd mysqldump
@@ -864,7 +896,7 @@ case "$DEPLOY_MODE" in
 		[ -f "$SERVER_GIT_SSH_KEY" ] || fail "Server Git SSH key was not found"
 		wp_cli --info
 		;;
-	code|db|code-db|uploads|plugins|full)
+	code|db|code-db|uploads|plugins|mu-plugins|full)
 		cleanup_artifacts=1
 		acquire_lock
 		cleanup_stale_temp_files
@@ -873,13 +905,16 @@ case "$DEPLOY_MODE" in
 		assert_free_space_kb "$BACKUP_DIR" 0 "Backup filesystem"
 
 		case "$DEPLOY_MODE" in
-			code|plugins|code-db|full) update_repository ;;
+			code|plugins|mu-plugins|code-db|full) update_repository ;;
 		esac
 		case "$DEPLOY_MODE" in
 			code|code-db|full) copy_code ;;
 		esac
 		case "$DEPLOY_MODE" in
 			plugins|full) copy_plugins ;;
+		esac
+		case "$DEPLOY_MODE" in
+			mu-plugins|full) copy_mu_plugins ;;
 		esac
 		case "$DEPLOY_MODE" in
 			code) refresh_wordpress_runtime_cache ;;

@@ -14,7 +14,12 @@ if [ "${FIXTURE_SERVER_PLUGIN_SYNC_PATHS+x}" = x ]; then
 else
 	SERVER_PLUGIN_SYNC_PATHS='wp-content/plugins/example-plugin'
 fi
-SERVER_ALLOWED_DEPLOY_MODES='preflight,code,db,code-db,uploads,plugins,full'
+if [ "${FIXTURE_SERVER_MU_PLUGIN_SYNC_PATHS+x}" = x ]; then
+	SERVER_MU_PLUGIN_SYNC_PATHS="$FIXTURE_SERVER_MU_PLUGIN_SYNC_PATHS"
+else
+	SERVER_MU_PLUGIN_SYNC_PATHS=''
+fi
+SERVER_ALLOWED_DEPLOY_MODES='preflight,code,db,code-db,uploads,plugins,mu-plugins,full'
 SERVER_KEEP_BACKUPS='10'
 SERVER_MIN_FREE_SPACE_MB='1'
 SERVER_LOCK_DIR='/tmp/wordpress-ssh-deploy-owner-fixture/lock/deploy.lock'

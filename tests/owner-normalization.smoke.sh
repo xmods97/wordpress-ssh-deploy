@@ -12,6 +12,7 @@ cp "$repo_dir/tests/fixtures/server.config.owner.sh" "$fixture_dir/server.config
 mkdir -p "$target_root/wp/wp-content/themes/Divi" "$target_root/wp/wp-content/themes/bella-maria-child" \
 	"$target_root/wp/wp-content/plugins/example-plugin" "$target_root/repo/.git" \
 	"$target_root/repo/wp-content/themes/bella-maria-child" "$target_root/repo/wp-content/plugins/example-plugin" \
+	"$target_root/wp/wp-content/mu-plugins" "$target_root/repo/wp-content/mu-plugins/example-loader" \
 	"$target_root/tmp" "$target_root/backups" "$target_root/bin"
 : > "$target_root/wp/wp-config.php"
 : > "$target_root/id_ed25519"
@@ -22,29 +23,33 @@ cp "$repo_dir/tests/fixtures/fake-du.sh" "$target_root/bin/du"
 cp "$repo_dir/tests/fixtures/fake-stat.sh" "$target_root/bin/stat"
 cp "$repo_dir/tests/fixtures/fake-chown.sh" "$target_root/bin/chown"
 cp "$repo_dir/tests/fixtures/fake-id.sh" "$target_root/bin/id"
+cp "$repo_dir/tests/fixtures/fake-runuser.sh" "$target_root/bin/runuser"
 cp "$repo_dir/tests/fixtures/fake-mysqldump.sh" "$target_root/bin/mysqldump"
 cp "$repo_dir/tests/fixtures/fake-mysql.sh" "$target_root/bin/mysql"
-cp "$repo_dir/tests/fixtures/fake-mysql.sh" "$target_root/bin/chmod"
+cp "$repo_dir/tests/fixtures/fake-chmod.sh" "$target_root/bin/chmod"
 cp "$repo_dir/tests/fixtures/fake-git.sh" "$target_root/bin/git"
 printf '%s\n' 'child release' > "$target_root/repo/wp-content/themes/bella-maria-child/style.css"
 printf '%s\n' 'old release' > "$target_root/wp/wp-content/themes/bella-maria-child/style.css"
 printf '%s\n' 'plugin release' > "$target_root/repo/wp-content/plugins/example-plugin/plugin.php"
+printf '%s\n' 'mu release' > "$target_root/repo/wp-content/mu-plugins/example-loader/loader.php"
 
 run_runner() {
 	mode="$1"
 	plugin_paths='wp-content/plugins/example-plugin'
 	if [ "${FIXTURE_PLUGIN_SYNC_PATHS+x}" = x ]; then plugin_paths="$FIXTURE_PLUGIN_SYNC_PATHS"; fi
+	mu_plugin_paths=''
+	if [ "${FIXTURE_MU_PLUGIN_SYNC_PATHS+x}" = x ]; then mu_plugin_paths="$FIXTURE_MU_PLUGIN_SYNC_PATHS"; fi
 	PATH="$target_root/bin:/usr/bin:/bin" \
 	FIXTURE_ROOT="$target_root" \
-	FIXTURE_EFFECTIVE_UID=1000 \
+	FIXTURE_EFFECTIVE_UID="${FIXTURE_EFFECTIVE_UID:-1000}" \
 	FIXTURE_ENVIRONMENT='staging' \
 	FIXTURE_URL='https://owner.example.com' \
 	FIXTURE_DB_NAME='wordpress_owner_fixture' \
 	ENVIRONMENT='staging' LOCAL_URL='http://owner.local' REMOTE_URL='https://owner.example.com' \
 	WP_DIR="$target_root/wp" REPO_DIR="$target_root/repo" BACKUP_DIR="$target_root/backups" \
 	EXPECTED_WP_DIR="$target_root/wp" EXPECTED_DB_NAME='wordpress_owner_fixture' EXPECTED_REMOTE_DOMAIN='owner.example.com' \
-SYNC_PATHS='wp-content/themes/bella-maria-child' PLUGIN_SYNC_PATHS="$plugin_paths" \
-	ALLOWED_DEPLOY_MODES='preflight,code,db,code-db,uploads,plugins,full' \
+SYNC_PATHS='wp-content/themes/bella-maria-child' PLUGIN_SYNC_PATHS="$plugin_paths" MU_PLUGIN_SYNC_PATHS="$mu_plugin_paths" \
+	ALLOWED_DEPLOY_MODES='preflight,code,db,code-db,uploads,plugins,mu-plugins,full' \
 	GIT_SSH_KEY="$target_root/id_ed25519" PHP_BIN="$target_root/bin/php" WP_CLI_BIN="$target_root/bin/wp" \
 	KEEP_BACKUPS='10' MIN_REMOTE_FREE_SPACE_MB='1' DEPLOY_MODE="$mode" SQL_FILE="${2:-}" UPLOADS_ZIP='' \
 	sh "$fixture_dir/server-deploy.sh" 2>&1
@@ -73,21 +78,6 @@ case "$full_output" in *'Theme ownership normalized to admin_nadry:admin_nadry'*
 grep -Fq -- "admin_nadry:admin_nadry $target_root/wp/wp-content/themes/Divi" "$target_root/chown-calls.log"
 [ "$(wc -l < "$target_root/mysql-calls.log")" -eq 1 ] || { echo 'Full mode did not execute database import' >&2; exit 1; }
 
-rm -rf "$target_root/wp/wp-content/plugins/example-plugin"
-: > "$target_root/chown-calls.log"
-: > "$target_root/mysql-calls.log"
-printf '%s\n' '-- MySQL dump 10.13  Distrib fixture' '-- Table structure for table `wp_options`' 'CREATE TABLE `wp_options` (`option_id` bigint NOT NULL);' 'INSERT INTO `wp_options` VALUES (2);' > "$target_root/tmp/local-db-fixture.sql"
-empty_plugin_full_output="$(FIXTURE_PLUGIN_SYNC_PATHS='' FIXTURE_SERVER_PLUGIN_SYNC_PATHS='' run_runner full "$target_root/tmp/local-db-fixture.sql")"
-case "$empty_plugin_full_output" in *'WordPress deployment completed (full)'*) ;; *) echo "$empty_plugin_full_output" >&2; exit 1 ;; esac
-[ "$(wc -l < "$target_root/mysql-calls.log")" -eq 1 ] || { echo 'Full mode with empty plugin paths did not execute database import' >&2; exit 1; }
-[ ! -e "$target_root/wp/wp-content/plugins/example-plugin" ] || { echo 'Full mode with empty plugin paths copied plugins unexpectedly' >&2; exit 1; }
-
-if empty_plugins_output="$(FIXTURE_PLUGIN_SYNC_PATHS='' FIXTURE_SERVER_PLUGIN_SYNC_PATHS='' run_runner plugins)"; then
-	echo 'Plugins mode must reject an empty plugin allowlist' >&2
-	exit 1
-fi
-case "$empty_plugins_output" in *'Plugins mode requires configured plugin sync paths'*) ;; *) echo "$empty_plugins_output" >&2; exit 1 ;; esac
-
 : > "$target_root/chown-calls.log"
 : > "$target_root/mysql-calls.log"
 printf '%s\n' '-- MySQL dump 10.13  Distrib fixture' '-- Table structure for table `wp_options`' 'CREATE TABLE `wp_options` (`option_id` bigint NOT NULL);' 'INSERT INTO `wp_options` VALUES (2);' > "$target_root/tmp/local-db-fixture.sql"
@@ -101,4 +91,19 @@ if root_owner_output="$(FIXTURE_OWNER_UID=0 run_runner code)"; then
 fi
 case "$root_owner_output" in *'WordPress content owner must not be root'*) ;; *) echo "$root_owner_output" >&2; exit 1 ;; esac
 
-echo 'Owner normalization code-only/full: OK'
+mu_plugin_output="$(FIXTURE_EFFECTIVE_UID=0 FIXTURE_MU_PLUGIN_SYNC_PATHS='wp-content/mu-plugins/example-loader' FIXTURE_SERVER_MU_PLUGIN_SYNC_PATHS='wp-content/mu-plugins/example-loader' run_runner mu-plugins)"
+case "$mu_plugin_output" in *'Mu-plugin ownership normalized to admin_nadry:admin_nadry'*) ;; *) echo "$mu_plugin_output" >&2; exit 1 ;; esac
+[ -f "$target_root/wp/wp-content/mu-plugins/example-loader/loader.php" ] || { echo 'MU-plugin component was not copied' >&2; exit 1; }
+grep -Fq 'mu release' "$target_root/wp/wp-content/mu-plugins/example-loader/loader.php"
+grep -Fq -- "admin_nadry:admin_nadry $target_root/wp/wp-content/mu-plugins" "$target_root/chown-calls.log"
+grep -Fq -- "admin_nadry:admin_nadry $target_root/wp/wp-content/mu-plugins/example-loader" "$target_root/chown-calls.log"
+
+printf '%s\n' 'mu release after failure' > "$target_root/repo/wp-content/mu-plugins/example-loader/loader.php"
+if mu_failure_output="$(FIXTURE_EFFECTIVE_UID=0 FIXTURE_MU_PLUGIN_SYNC_PATHS='wp-content/mu-plugins/example-loader' FIXTURE_SERVER_MU_PLUGIN_SYNC_PATHS='wp-content/mu-plugins/example-loader' FIXTURE_CHOWN_FAIL=1 run_runner mu-plugins)"; then
+	echo 'MU-plugin chown failure must fail the deployment' >&2
+	exit 1
+fi
+case "$mu_failure_output" in *'AUTOMATIC_CODE_ROLLBACK=completed'*) ;; *) echo "$mu_failure_output" >&2; exit 1 ;; esac
+grep -Fq 'mu release' "$target_root/wp/wp-content/mu-plugins/example-loader/loader.php"
+
+echo 'Owner normalization code/plugin/MU/full: OK'

@@ -134,7 +134,7 @@ function New-RemoteDeployCommand {
 	[CmdletBinding()]
 	param(
 		[Parameter(Mandatory = $true)] [System.Collections.IDictionary] $Configuration,
-		[Parameter(Mandatory = $true)] [ValidateSet('preflight', 'full', 'code', 'db', 'code-db', 'uploads', 'plugins')] [string] $DeployMode,
+		[Parameter(Mandatory = $true)] [ValidateSet('preflight', 'full', 'code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins')] [string] $DeployMode,
 		[string] $SqlFile = '',
 		[string] $UploadsFile = ''
 	)
@@ -142,6 +142,7 @@ function New-RemoteDeployCommand {
 	$allowProductionFull = $Configuration.Contains('AllowProductionFull') -and $Configuration.AllowProductionFull -is [bool] -and $Configuration.AllowProductionFull
 	$productionFullOptIn = if ($Configuration.Environment -eq 'production' -and $DeployMode -eq 'full' -and $allowProductionFull) { '1' } else { '0' }
 	$pluginPaths = if ($Configuration.Contains('PluginSyncPaths')) { @($Configuration.PluginSyncPaths) } else { @() }
+	$muPluginPaths = if ($Configuration.Contains('MuPluginSyncPaths')) { @($Configuration.MuPluginSyncPaths) } else { @() }
 	$effectiveModes = if ($Configuration.Contains('AllowedDeployModes')) {
 		@($Configuration.AllowedDeployModes)
 	} elseif ($Configuration.Environment -eq 'production') {
@@ -166,6 +167,7 @@ function New-RemoteDeployCommand {
 		@('EXPECTED_DB_NAME', $Configuration.ExpectedRemoteDbName),
 		@('SYNC_PATHS', ($Configuration.SyncPaths -join ',')),
 		@('PLUGIN_SYNC_PATHS', ($pluginPaths -join ',')),
+		@('MU_PLUGIN_SYNC_PATHS', ($muPluginPaths -join ',')),
 		@('ALLOWED_DEPLOY_MODES', ($effectiveModes -join ',')),
 		@('DEPLOY_MODE', $DeployMode),
 		@('PRODUCTION_FULL_OPT_IN', $productionFullOptIn),
@@ -247,6 +249,12 @@ function Test-PluginSyncPath {
 	return (Test-SyncPath $Value) -and $Value -match '(?i)^wp-content/plugins/.+'
 }
 
+function Test-MuPluginSyncPath {
+	param([string] $Value)
+
+	return (Test-SyncPath $Value) -and $Value -match '(?i)^wp-content/mu-plugins/.+'
+}
+
 function Get-DeployConfigurationErrors {
 	[CmdletBinding()]
 	param(
@@ -287,7 +295,7 @@ function Get-DeployConfigurationErrors {
 	)
 	$optionalKeys = @('LocalDbPassword', 'SshKeyPath')
 	$optionalBooleanKeys = @('AllowProductionFull')
-	$optionalArrayKeys = @('PluginSyncPaths', 'AllowedDeployModes')
+	$optionalArrayKeys = @('PluginSyncPaths', 'MuPluginSyncPaths', 'AllowedDeployModes')
 	$otherRequiredKeys = @('SshPort', 'KeepBackups', 'MinimumLocalFreeSpaceMB', 'MinimumRemoteFreeSpaceMB', 'SyncPaths')
 	$allowedKeys = $requiredStringKeys + $optionalKeys + $optionalBooleanKeys + $optionalArrayKeys + $otherRequiredKeys
 
@@ -458,8 +466,26 @@ function Get-DeployConfigurationErrors {
 			$seen[$normalized] = $true
 		}
 	}
+	$muPluginPathCount = 0
+	if ($Configuration.Contains('MuPluginSyncPaths')) {
+		if ($Configuration.MuPluginSyncPaths -isnot [Array]) {
+			Add-ValidationError $errors 'MuPluginSyncPaths must be an array of wp-content/mu-plugins paths.'
+		} else {
+			$seen = @{}
+			foreach ($path in @($Configuration.MuPluginSyncPaths)) {
+				$muPluginPathCount++
+				if ($path -isnot [string] -or -not (Test-MuPluginSyncPath $path)) {
+					Add-ValidationError $errors "Unsafe MuPluginSyncPaths value: $path"
+					continue
+				}
+				$normalized = $path.ToLowerInvariant()
+				if ($seen.ContainsKey($normalized)) { Add-ValidationError $errors "Duplicate MuPluginSyncPaths value: $path" }
+				$seen[$normalized] = $true
+			}
+		}
+	}
 	if ($Configuration.Contains('AllowedDeployModes')) {
-		$knownModes = @('code', 'db', 'code-db', 'uploads', 'plugins', 'full', 'preflight')
+		$knownModes = @('code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins', 'full', 'preflight')
 		$seen = @{}
 		foreach ($mode in @($Configuration.AllowedDeployModes)) {
 			if ($mode -isnot [string] -or $mode -notin $knownModes) { Add-ValidationError $errors "Unknown AllowedDeployModes value: $mode"; continue }
@@ -468,6 +494,7 @@ function Get-DeployConfigurationErrors {
 		}
 		if (-not $seen.ContainsKey('preflight')) { Add-ValidationError $errors 'AllowedDeployModes must include preflight.' }
 		if ($seen.ContainsKey('plugins') -and $pluginPathCount -eq 0) { Add-ValidationError $errors 'PluginSyncPaths must contain at least one path when plugins mode is enabled.' }
+		if ($seen.ContainsKey('mu-plugins') -and $muPluginPathCount -eq 0) { Add-ValidationError $errors 'MuPluginSyncPaths must contain at least one path when mu-plugins mode is enabled.' }
 	}
 
 	return $errors.ToArray()
@@ -495,7 +522,7 @@ function Assert-DeployModeAllowed {
 		[string] $Environment,
 
 		[Parameter(Mandatory = $true)]
-		[ValidateSet('full', 'code', 'db', 'code-db', 'uploads', 'plugins')]
+		[ValidateSet('full', 'code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins')]
 		[string] $Mode,
 
 		[object] $AllowProductionFull = $false,

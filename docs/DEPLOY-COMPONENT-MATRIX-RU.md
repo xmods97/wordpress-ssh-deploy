@@ -9,10 +9,11 @@
 | `code-db` | код, затем БД |
 | `uploads` | только `wp-content/uploads` |
 | `plugins` | только `PluginSyncPaths` |
-| `full` | код, БД, uploads и настроенные plugin paths |
+| `mu-plugins` | только `MuPluginSyncPaths` под `wp-content/mu-plugins` |
+| `full` | код, БД, uploads, настроенные plugin paths и настроенные MU-plugin paths |
 | `preflight` | проверка без deploy-веток |
 
-`SyncPaths` и `PluginSyncPaths` разделены и ограничены runner-ом: code допускает только дочерние темы в `wp-content/themes`, plugins — только `wp-content/plugins`. `wp-config.php`, Divi и mu-plugins отвергаются до копирования; для них нужен отдельный будущий компонент и site-specific approval.
+`SyncPaths`, `PluginSyncPaths` и `MuPluginSyncPaths` разделены и ограничены runner-ом: code допускает только дочерние темы в `wp-content/themes`, plugins — только `wp-content/plugins`, а `mu-plugins` — только явно перечисленные дочерние пути в `wp-content/mu-plugins`. `wp-config.php`, Divi и широкие/неявные content paths отвергаются до копирования.
 
 ## Политика
 
@@ -24,9 +25,9 @@
 
 ## Bella SSH transport contract
 
-Bella wrapper принимает тот же assignment-протокол, который формирует клиент: `SYNC_PATHS`, `PLUGIN_SYNC_PATHS`, `ALLOWED_DEPLOY_MODES`, `DEPLOY_MODE`, `PRODUCTION_FULL_OPT_IN`, `SQL_FILE` и `UPLOADS_ZIP` вместе с общими site/path параметрами. Пустой `PLUGIN_SYNC_PATHS=''` допустим для режимов без plugin sync и проверяется как отдельное значение.
+Bella wrapper принимает тот же assignment-протокол, который формирует клиент: `SYNC_PATHS`, `PLUGIN_SYNC_PATHS`, `MU_PLUGIN_SYNC_PATHS`, `ALLOWED_DEPLOY_MODES`, `DEPLOY_MODE`, `PRODUCTION_FULL_OPT_IN`, `SQL_FILE` и `UPLOADS_ZIP` вместе с общими site/path параметрами. Пустые `PLUGIN_SYNC_PATHS=''` и `MU_PLUGIN_SYNC_PATHS=''` допустимы для режимов без соответствующего sync и проверяются как отдельные значения.
 
-Wrapper проверяет single-quoted values, уникальность assignments, режимы, plugin paths, production full opt-in и фиксированный runner path; неподдержанные токены отклоняются до запуска runner. Client/runner отклоняют `mu-plugins`, и wrapper не предоставляет им скрытого разрешения.
+Wrapper проверяет single-quoted values, уникальность assignments, режимы, plugin/MU-plugin paths, production full opt-in и фиксированный runner path; неподдержанные токены отклоняются до запуска runner. MU-plugins не получают скрытого разрешения: и клиент, и wrapper, и runner требуют отдельный режим, явный allowlist и согласованный server policy.
 
 ## Rollout
 

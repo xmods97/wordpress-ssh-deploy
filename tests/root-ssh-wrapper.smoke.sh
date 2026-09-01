@@ -10,7 +10,7 @@ trap 'rm -rf "$tmp"' EXIT
 runner=$tmp/runner.sh
 cat > "$runner" <<'EOF'
 #!/bin/sh
-printf '%s|%s|%s|%s\n' "${DEPLOY_MODE-}" "${PRODUCTION_FULL_OPT_IN-}" "${PLUGIN_SYNC_PATHS-}" "${ALLOWED_DEPLOY_MODES-}" >> "$RUNNER_RECORD"
+printf '%s|%s|%s|%s|%s\n' "${DEPLOY_MODE-}" "${PRODUCTION_FULL_OPT_IN-}" "${PLUGIN_SYNC_PATHS-}" "${MU_PLUGIN_SYNC_PATHS-}" "${ALLOWED_DEPLOY_MODES-}" >> "$RUNNER_RECORD"
 exit 0
 EOF
 
@@ -36,7 +36,7 @@ export SCP_RECORD="$tmp/scp-record"
 SSH_ORIGINAL_COMMAND="ENVIRONMENT='staging' DEPLOY_MODE='preflight' sh '$runner'" \
     "$wrapper" "$config"
 
-SSH_ORIGINAL_COMMAND="ENVIRONMENT='production' PLUGIN_SYNC_PATHS='' ALLOWED_DEPLOY_MODES='preflight,code,db,code-db,uploads,plugins,full' DEPLOY_MODE='full' PRODUCTION_FULL_OPT_IN='1' sh '$runner'" \
+SSH_ORIGINAL_COMMAND="ENVIRONMENT='production' PLUGIN_SYNC_PATHS='' MU_PLUGIN_SYNC_PATHS='' ALLOWED_DEPLOY_MODES='preflight,code,db,code-db,uploads,plugins,full' DEPLOY_MODE='full' PRODUCTION_FULL_OPT_IN='1' sh '$runner'" \
     "$wrapper" "$config"
 grep -F -- 'full|1' "$RUNNER_RECORD" >/dev/null
 
@@ -44,7 +44,7 @@ SSH_ORIGINAL_COMMAND="ENVIRONMENT='production' DEPLOY_MODE='preflight' PRODUCTIO
     "$wrapper" "$config"
 grep -F -- 'preflight|0' "$RUNNER_RECORD" >/dev/null
 
-SSH_ORIGINAL_COMMAND="LOCAL_URL='http://local.example.test' REMOTE_URL='https://staging.example.test' ENVIRONMENT='staging' EXPECTED_REMOTE_DOMAIN='staging.example.test' WP_DIR='/srv/www/site' REPO_DIR='/srv/repo/site' BACKUP_DIR='/srv/backups/site' KEEP_BACKUPS='5' MIN_REMOTE_FREE_SPACE_MB='100' GIT_SSH_KEY='/root/.ssh/git' PHP_BIN='/usr/bin/php' WP_CLI_BIN='/usr/local/bin/wp' EXPECTED_WP_DIR='/srv/www/site' EXPECTED_DB_NAME='user_db' EXPECTED_DB_TABLE_PREFIX='wp_' EXPECTED_DB_TABLE_COUNT='2' SYNC_PATHS='wp-content' PLUGIN_SYNC_PATHS='wp-content/plugins/example-plugin' ALLOWED_DEPLOY_MODES='preflight,code,db,code-db,uploads,plugins,full' FULL_SYNC_PATHS='wp-content' PROTECTED_PATHS='' PROTECTED_ARCHIVE='' REPLACE_PROTECTED='0' DEPLOY_MODE='preflight' SQL_FILE='' UPLOADS_ZIP='' sh '$runner'" \
+SSH_ORIGINAL_COMMAND="LOCAL_URL='http://local.example.test' REMOTE_URL='https://staging.example.test' ENVIRONMENT='staging' EXPECTED_REMOTE_DOMAIN='staging.example.test' WP_DIR='/srv/www/site' REPO_DIR='/srv/repo/site' BACKUP_DIR='/srv/backups/site' KEEP_BACKUPS='5' MIN_REMOTE_FREE_SPACE_MB='100' GIT_SSH_KEY='/root/.ssh/git' PHP_BIN='/usr/bin/php' WP_CLI_BIN='/usr/local/bin/wp' EXPECTED_WP_DIR='/srv/www/site' EXPECTED_DB_NAME='user_db' EXPECTED_DB_TABLE_PREFIX='wp_' EXPECTED_DB_TABLE_COUNT='2' SYNC_PATHS='wp-content' PLUGIN_SYNC_PATHS='wp-content/plugins/example-plugin' MU_PLUGIN_SYNC_PATHS='wp-content/mu-plugins/example-loader' ALLOWED_DEPLOY_MODES='preflight,code,db,code-db,uploads,plugins,mu-plugins,full' FULL_SYNC_PATHS='wp-content' PROTECTED_PATHS='' PROTECTED_ARCHIVE='' REPLACE_PROTECTED='0' DEPLOY_MODE='preflight' SQL_FILE='' UPLOADS_ZIP='' sh '$runner'" \
     "$wrapper" "$config"
 
 SSH_ORIGINAL_COMMAND="ENVIRONMENT='staging' DEPLOY_MODE='code' sh '$runner'" \
@@ -52,16 +52,19 @@ SSH_ORIGINAL_COMMAND="ENVIRONMENT='staging' DEPLOY_MODE='code' sh '$runner'" \
 SSH_ORIGINAL_COMMAND="ENVIRONMENT='staging' DEPLOY_MODE='db' sh '$runner'" \
     "$wrapper" "$config"
 
-component_policy='preflight,code,db,code-db,uploads,plugins,full'
-SSH_ORIGINAL_COMMAND="ENVIRONMENT='production' PLUGIN_SYNC_PATHS='' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='code-db' PRODUCTION_FULL_OPT_IN='0' sh '$runner'" \
+component_policy='preflight,code,db,code-db,uploads,plugins,mu-plugins,full'
+SSH_ORIGINAL_COMMAND="ENVIRONMENT='production' PLUGIN_SYNC_PATHS='' MU_PLUGIN_SYNC_PATHS='' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='code-db' PRODUCTION_FULL_OPT_IN='0' sh '$runner'" \
     "$wrapper" "$config"
-SSH_ORIGINAL_COMMAND="ENVIRONMENT='production' PLUGIN_SYNC_PATHS='' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='uploads' PRODUCTION_FULL_OPT_IN='0' sh '$runner'" \
+SSH_ORIGINAL_COMMAND="ENVIRONMENT='production' PLUGIN_SYNC_PATHS='' MU_PLUGIN_SYNC_PATHS='' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='uploads' PRODUCTION_FULL_OPT_IN='0' sh '$runner'" \
     "$wrapper" "$config"
-SSH_ORIGINAL_COMMAND="ENVIRONMENT='production' PLUGIN_SYNC_PATHS='wp-content/plugins/example-plugin,wp-content/plugins/second-plugin' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='plugins' PRODUCTION_FULL_OPT_IN='0' sh '$runner'" \
+SSH_ORIGINAL_COMMAND="ENVIRONMENT='production' PLUGIN_SYNC_PATHS='wp-content/plugins/example-plugin,wp-content/plugins/second-plugin' MU_PLUGIN_SYNC_PATHS='' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='plugins' PRODUCTION_FULL_OPT_IN='0' sh '$runner'" \
     "$wrapper" "$config"
-grep -F -- "code-db|0||$component_policy" "$RUNNER_RECORD" >/dev/null
-grep -F -- "uploads|0||$component_policy" "$RUNNER_RECORD" >/dev/null
-grep -F -- "plugins|0|wp-content/plugins/example-plugin,wp-content/plugins/second-plugin|$component_policy" "$RUNNER_RECORD" >/dev/null
+SSH_ORIGINAL_COMMAND="ENVIRONMENT='production' PLUGIN_SYNC_PATHS='' MU_PLUGIN_SYNC_PATHS='wp-content/mu-plugins/example-loader' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='mu-plugins' PRODUCTION_FULL_OPT_IN='0' sh '$runner'" \
+    "$wrapper" "$config"
+grep -F -- "code-db|0|||$component_policy" "$RUNNER_RECORD" >/dev/null
+grep -F -- "uploads|0|||$component_policy" "$RUNNER_RECORD" >/dev/null
+grep -F -- "plugins|0|wp-content/plugins/example-plugin,wp-content/plugins/second-plugin||$component_policy" "$RUNNER_RECORD" >/dev/null
+grep -F -- "mu-plugins|0||wp-content/mu-plugins/example-loader|$component_policy" "$RUNNER_RECORD" >/dev/null
 
 SSH_ORIGINAL_COMMAND="mkdir -p '$tmp/tmp'" \
     "$wrapper" "$config"
@@ -105,6 +108,11 @@ expect_reject "ENVIRONMENT='production' PLUGIN_SYNC_PATHS='../plugins/example-pl
 expect_reject "ENVIRONMENT='production' PLUGIN_SYNC_PATHS='wp-content/themes/example-theme' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='plugins' sh '$runner'"
 expect_reject "ENVIRONMENT='production' PLUGIN_SYNC_PATHS='wp-content/plugins/example plugin' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='plugins' sh '$runner'"
 expect_reject "ENVIRONMENT='production' PLUGIN_SYNC_PATHS='wp-content/plugins/example-plugin,,wp-content/plugins/second-plugin' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='plugins' sh '$runner'"
+expect_reject "ENVIRONMENT='production' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='mu-plugins' sh '$runner'"
+expect_reject "ENVIRONMENT='production' MU_PLUGIN_SYNC_PATHS='wp-content/mu-plugins/example-loader,,wp-content/mu-plugins/second-loader' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='mu-plugins' sh '$runner'"
+expect_reject "ENVIRONMENT='production' MU_PLUGIN_SYNC_PATHS='wp-content/plugins/example-plugin' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='mu-plugins' sh '$runner'"
+expect_reject "ENVIRONMENT='production' MU_PLUGIN_SYNC_PATHS='../mu-plugins/example-loader' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='mu-plugins' sh '$runner'"
+expect_reject "ENVIRONMENT='production' MU_PLUGIN_SYNC_PATHS='wp-content/mu-plugins/example-loader,wp-content/plugins/example-plugin' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='mu-plugins' sh '$runner'"
 expect_reject "ENVIRONMENT='production' DEPLOY_MODE='code' PRODUCTION_FULL_OPT_IN='1' sh '$runner'"
 expect_reject "ENVIRONMENT='staging' DEPLOY_MODE='full' PRODUCTION_FULL_OPT_IN='1' sh '$runner'"
 expect_reject "ENVIRONMENT='production' DEPLOY_MODE='full' PRODUCTION_FULL_OPT_IN='0' sh '$runner'"

@@ -29,11 +29,13 @@ Describe 'POSIX shell quoting' {
 	It 'sends separate code, plugin, and capability policies' {
 		$config = $validConfiguration.Clone()
 		$config.PluginSyncPaths = @('wp-content/plugins/example-plugin')
-		$config.AllowedDeployModes = @('preflight', 'code', 'db', 'code-db', 'uploads', 'plugins', 'full')
+		$config.MuPluginSyncPaths = @('wp-content/mu-plugins/example-loader')
+		$config.AllowedDeployModes = @('preflight', 'code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins', 'full')
 		$command = New-RemoteDeployCommand $config 'code-db' '/srv/tmp/example-deploy/database.sql' ''
 		$command | Should Match "SYNC_PATHS='wp-content/themes/example-theme'"
 		$command | Should Match "PLUGIN_SYNC_PATHS='wp-content/plugins/example-plugin'"
-		$command | Should Match "ALLOWED_DEPLOY_MODES='preflight,code,db,code-db,uploads,plugins,full'"
+		$command | Should Match "MU_PLUGIN_SYNC_PATHS='wp-content/mu-plugins/example-loader'"
+		$command | Should Match "ALLOWED_DEPLOY_MODES='preflight,code,db,code-db,uploads,plugins,mu-plugins,full'"
 		$command | Should Match "DEPLOY_MODE='code-db'"
 	}
 

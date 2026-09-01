@@ -4,7 +4,7 @@
 $DeployConfig = @{
 	# Required: development, staging, or production.
 	# Explicit per-profile component capability. Existing profiles without this key retain their legacy policy until migrated.
-	AllowedDeployModes = @('preflight', 'code', 'db', 'code-db', 'uploads', 'plugins', 'full')
+	AllowedDeployModes = @('preflight', 'code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins', 'full')
 	Environment = 'staging'
 
 	LocalWpPath      = 'C:\Sites\example.test'
@@ -39,11 +39,12 @@ $DeployConfig = @{
 	ExpectedRemoteWpPath = '/var/www/staging.example.com'
 	ExpectedRemoteDbName = 'wordpress_staging'
 
-	# Code and plugin paths are separate components. Keep wp-config.php, Divi and mu-plugins out unless a separate profile policy allows them.
+	# Code, ordinary plugins and mu-plugins are separate components. Keep wp-config.php and Divi out unless a separate profile policy allows them.
 	SyncPaths = @(
 		'wp-content/themes/example-theme'
 	)
 	PluginSyncPaths = @('wp-content/plugins/example-plugin')
+	MuPluginSyncPaths = @('wp-content/mu-plugins/example-loader')
 
 	KeepBackups = 10
 	MinimumLocalFreeSpaceMB  = 1024

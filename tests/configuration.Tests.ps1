@@ -39,8 +39,9 @@ Describe 'Deploy configuration validation' {
 
 	It 'accepts explicit independent component capabilities' {
 		$config = $validConfiguration.Clone()
-		$config.AllowedDeployModes = @('preflight', 'code', 'db', 'code-db', 'uploads', 'plugins', 'full')
+		$config.AllowedDeployModes = @('preflight', 'code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins', 'full')
 		$config.PluginSyncPaths = @('wp-content/plugins/example-plugin')
+		$config.MuPluginSyncPaths = @('wp-content/mu-plugins/example-loader')
 		@(Get-DeployConfigurationErrors $config).Count | Should Be 0
 	}
 
@@ -63,12 +64,21 @@ Describe 'Deploy configuration validation' {
 		$config = $validConfiguration.Clone()
 		$config.PluginSyncPaths = @('wp-content/mu-plugins/example-loader')
 		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'Unsafe PluginSyncPaths'
+		$config = $validConfiguration.Clone()
+		$config.MuPluginSyncPaths = @('wp-content/plugins/example-plugin')
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'Unsafe MuPluginSyncPaths'
 	}
 
 	It 'requires plugin paths for explicit plugins mode' {
 		$config = $validConfiguration.Clone()
 		$config.PluginSyncPaths = @()
 		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'PluginSyncPaths must contain at least one path'
+	}
+
+	It 'requires mu-plugin paths for explicit mu-plugins mode' {
+		$config = $validConfiguration.Clone()
+		$config.MuPluginSyncPaths = @()
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'MuPluginSyncPaths must contain at least one path'
 	}
 
 	It 'rejects a remote URL with a different domain' {
