@@ -648,7 +648,84 @@ copy_paths() {
 
 copy_code() { copy_paths "$SYNC_PATHS" code; }
 copy_plugins() { [ -n "$PLUGIN_SYNC_PATHS" ] || return 0; copy_paths "$PLUGIN_SYNC_PATHS" plugins; }
-copy_mu_plugins() { [ -n "$MU_PLUGIN_SYNC_PATHS" ] || return 0; copy_paths "$MU_PLUGIN_SYNC_PATHS" mu-plugins; }
+
+copy_mu_plugin_files() {
+	paths="$1"
+	canonical_wp_for_mu_plugins="$(CDPATH= cd -P "$WP_DIR" && pwd)" || fail "Could not determine canonical WordPress path"
+	old_ifs="$IFS"
+	IFS=','
+	for relative in $paths; do
+		IFS="$old_ifs"
+		source_path="$REPO_DIR/$relative"
+		target_path="$canonical_wp_for_mu_plugins/$relative"
+		[ -f "$source_path" ] || fail "Configured mu-plugin sync source was not found"
+		[ ! -L "$source_path" ] || fail "Configured mu-plugin sync source must not be a symbolic link"
+		assert_no_symlink_components "$REPO_DIR" "$relative"
+		assert_no_symlink_components "$canonical_wp_for_mu_plugins" "$relative"
+		source_kb="$(du -sk "$source_path" | awk 'NR==1 { print $1 }')"
+		case "$source_kb" in ''|*[!0-9]*) fail "Mu-plugin size check failed" ;; esac
+		assert_free_space_kb "$WP_DIR" "$source_kb" "WordPress filesystem"
+		transient_root="$canonical_wp_for_mu_plugins/wp-content/.deploy-transient"
+		[ ! -L "$transient_root" ] || fail "Transient directory must not be a symbolic link"
+		mkdir -p "$transient_root"
+		target_name="${target_path##*/}"
+		TRANSIENT_TARGET="$target_path"
+		TRANSIENT_NEW="$transient_root/$target_name.__new__.$timestamp.$$"
+		TRANSIENT_OLD="$transient_root/$target_name.__old__.$timestamp.$$"
+		rm -rf "$TRANSIENT_NEW" "$TRANSIENT_OLD"
+		cp -- "$source_path" "$TRANSIENT_NEW"
+		[ -f "$TRANSIENT_NEW" ] || fail "Atomic MU-plugin staging failed"
+		if [ -e "$target_path" ]; then mv "$target_path" "$TRANSIENT_OLD"; fi
+		if ! mv "$TRANSIENT_NEW" "$target_path"; then
+			[ ! -e "$TRANSIENT_OLD" ] || mv "$TRANSIENT_OLD" "$target_path"
+			fail "Atomic MU-plugin replacement failed"
+		fi
+		TRANSIENT_REPLACED=1
+		normalize_mu_plugin_ownership "$target_path"
+		TRANSIENT_COMMITTED=1
+		rm -rf "$TRANSIENT_OLD" 2>/dev/null || fail "Old MU-plugin target cleanup failed"
+		TRANSIENT_NEW=''; TRANSIENT_OLD=''; TRANSIENT_TARGET=''; TRANSIENT_REPLACED=0; TRANSIENT_COMMITTED=0
+		IFS=','
+	done
+	IFS="$old_ifs"
+}
+
+copy_mu_plugins() {
+	[ -n "$MU_PLUGIN_SYNC_PATHS" ] || return 0
+	require_cmd du
+	canonical_wp_for_mu_plugins="$(CDPATH= cd -P "$WP_DIR" && pwd)" || fail "Could not determine canonical WordPress path"
+	mu_plugins_dir="$canonical_wp_for_mu_plugins/wp-content/mu-plugins"
+	[ ! -L "$mu_plugins_dir" ] || fail "WordPress mu-plugins directory must not be a symbolic link"
+	[ -d "$mu_plugins_dir" ] || fail "WordPress mu-plugins directory was not found"
+
+	# Validate all configured sources before replacing any MU-plugin target.
+	directory_paths=''
+	file_paths=''
+	old_ifs="$IFS"
+	IFS=','
+	for relative in $MU_PLUGIN_SYNC_PATHS; do
+		IFS="$old_ifs"
+		assert_sync_path "$relative" mu-plugins
+		source_path="$REPO_DIR/$relative"
+		target_path="$canonical_wp_for_mu_plugins/$relative"
+		if [ -d "$source_path" ]; then
+			directory_paths="${directory_paths}${directory_paths:+,}$relative"
+		elif [ -f "$source_path" ]; then
+			file_paths="${file_paths}${file_paths:+,}$relative"
+		else
+			fail "Configured mu-plugin sync source was not found"
+		fi
+		[ ! -L "$source_path" ] || fail "Configured mu-plugin sync source must not be a symbolic link"
+		assert_no_symlink_components "$REPO_DIR" "$relative"
+		case "$target_path" in "$canonical_wp_for_mu_plugins"/*) ;; *) fail "Mu-plugin sync target escaped WordPress directory" ;; esac
+		assert_no_symlink_components "$canonical_wp_for_mu_plugins" "$relative"
+		IFS=','
+	done
+	IFS="$old_ifs"
+
+	[ -z "$directory_paths" ] || copy_paths "$directory_paths" mu-plugins
+	[ -z "$file_paths" ] || copy_mu_plugin_files "$file_paths"
+}
 
 backup_database() {
 	require_cmd mysqldump
