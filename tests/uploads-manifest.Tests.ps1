@@ -65,13 +65,21 @@ Describe 'Uploads manifest and delta package' {
 		$thrown = $false; try { Read-UploadsManifest $manifestPath | Out-Null } catch { $thrown = $true }; $thrown | Should Be $true
 	}
 
-	It 'keeps remote drift fail-closed with an automatic full snapshot fallback' {
+	It 'keeps remote drift fail-closed without an automatic full snapshot fallback' {
 		$deploy = Get-Content (Join-Path $repoRoot 'deploy.ps1') -Raw
 		$server = Get-Content (Join-Path $repoRoot 'server-deploy.sh') -Raw
 		$deploy | Should Match 'UPLOADS_DELTA_FALLBACK_REQUIRED'
-		$deploy | Should Match 'New-Zip \$DeployConfig\.LocalUploadsPath \$uploadsZip'
+		$deploy | Should Match 'remote baseline is missing or drifted'
+		$deploy | Should Match 'Uploads delta preflight stopped'
+		$deploy | Should Match 'ConfirmUploadsDeletes'
 		$server | Should Match 'UPLOADS_DELTA_FALLBACK_REQUIRED'
 		$server | Should Match 'commit_uploads_manifest'
+	}
+
+	It 'requires explicit confirmation before packaging local upload deletions' {
+		$deploy = Get-Content (Join-Path $repoRoot 'deploy.ps1') -Raw
+		$deploy | Should Match 'UPLOADS DELETE WARNING'
+		$deploy | Should Match 'rerun with -ConfirmUploadsDeletes'
 	}
 
 	It 'detects stale full-deploy source before any remote command' {

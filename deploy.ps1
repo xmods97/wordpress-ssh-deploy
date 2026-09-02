@@ -3,6 +3,7 @@ param(
 	[Parameter(Position = 0)] [string] $Message = '',
 	[ValidateSet('full', 'code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins')] [string] $Mode = 'code',
 	[ValidateSet('auto', 'full')] [string] $UploadsTransferMode = 'auto',
+	[switch] $ConfirmUploadsDeletes,
 	[switch] $SkipGit,
 	[switch] $SkipUploads,
 	[switch] $PreflightOnly
@@ -186,14 +187,18 @@ try {
 			try {
 				$baselineUploadsManifest = @(Read-UploadsManifest $uploadsManifestState)
 				$comparison = Compare-UploadsManifests $baselineUploadsManifest $currentUploadsManifest
+				if ($comparison.Deleted.Count -gt 0 -and -not $ConfirmUploadsDeletes) {
+					$deletedPaths = @($comparison.Deleted) -join ', '
+					Write-Warning ("UPLOADS DELETE WARNING: {0} local file(s) would be removed from production: {1}" -f $comparison.Deleted.Count, $deletedPaths)
+					throw 'Uploads deploy stopped: rerun with -ConfirmUploadsDeletes after reviewing the exact delete list.'
+				}
 				New-UploadsDeltaPackage -SourceDirectory $DeployConfig.LocalUploadsPath -CurrentManifest $currentUploadsManifest -BaselineManifest $baselineUploadsManifest -DestinationZip $uploadsDeltaZip | Out-Null
 				$useUploadsDelta = $true
 				$uploadsTransferKind = 'delta'
 				Write-Ok ("Uploads delta prepared: added={0}, changed={1}, deleted={2}, bytes={3}" -f $comparison.Added.Count, $comparison.Changed.Count, $comparison.Deleted.Count, (Get-Item -LiteralPath $uploadsDeltaZip).Length)
 			} catch {
-				Write-Warning "Uploads baseline is invalid; falling back to full snapshot: $($_.Exception.Message)"
-				$useUploadsDelta = $false
-				$uploadsTransferKind = 'full'
+				if ($_.Exception.Message -like 'Uploads deploy stopped:*') { throw }
+				throw "Uploads delta preflight stopped: $($_.Exception.Message). Run an explicit -UploadsTransferMode full only after reviewing the drift/baseline state."
 			}
 		}
 	}
@@ -263,16 +268,10 @@ try {
 	if ($hasUploads -and $useUploadsDelta) {
 		$result = Invoke-RemoteCommandCapture 'ssh' ($sshArgs + @($target, $remoteCommand)) $repoRoot
 		if ($result.ExitCode -ne 0) {
-			if ($result.Output -notmatch 'UPLOADS_DELTA_FALLBACK_REQUIRED') { throw "Command failed ($($result.ExitCode)): ssh" }
-			Write-Warning 'Remote uploads baseline/drift requires full snapshot fallback.'
-			$useUploadsDelta = $false
-			$uploadsTransferKind = 'full'
-			$uploadsDeltaArg = ''
-			New-Zip $DeployConfig.LocalUploadsPath $uploadsZip
-			Assert-ZipArchiveFile $uploadsZip
-			Invoke-CheckedCommandRetry 'scp' ($scpArgs + @($uploadsZip, "$target`:$remoteUploads")) $repoRoot
-			$remoteCommand = New-RemoteDeployCommand $DeployConfig $Mode $sqlArg $remoteUploads $uploadsDeltaArg $uploadsManifestArg
-			Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, $remoteCommand)) $repoRoot
+			if ($result.Output -match 'UPLOADS_DELTA_FALLBACK_REQUIRED') {
+				throw 'Uploads deploy stopped: remote baseline is missing or drifted. Review the remote manifest and rerun an explicit full snapshot only after approval.'
+			}
+			throw "Command failed ($($result.ExitCode)): ssh"
 		}
 	} else {
 		Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, $remoteCommand)) $repoRoot
