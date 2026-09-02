@@ -103,6 +103,8 @@ UPLOADS_MANIFEST_NEW=''
 UPLOADS_MANIFEST_OLD=''
 UPLOADS_MANIFEST_REPLACED=0
 UPLOADS_TRANSACTION_LOG_NEW=''
+UPLOADS_TRANSACTION_LOG_OLD=''
+UPLOADS_TRANSACTION_LOG_REPLACED=0
 UPLOADS_TRANSACTION_KIND='full'
 
 normalize_url() {
@@ -352,6 +354,18 @@ cleanup_exit() {
 		fi
 		if [ -n "$UPLOADS_TRANSACTION_LOG_NEW" ]; then
 			case "$UPLOADS_TRANSACTION_LOG_NEW" in "$BACKUP_DIR"/*) rm -f "$UPLOADS_TRANSACTION_LOG_NEW" 2>/dev/null || true ;; esac
+		fi
+		if [ "$UPLOADS_TRANSACTION_LOG_REPLACED" -eq 1 ] && [ "$TRANSIENT_COMMITTED" -eq 0 ]; then
+			if [ -n "$UPLOADS_TRANSACTION_LOG_OLD" ] && [ -e "$UPLOADS_TRANSACTION_LOG_OLD" ]; then
+				mv -f "$UPLOADS_TRANSACTION_LOG_OLD" "$UPLOADS_TRANSACTION_LOG" 2>/dev/null || true
+			else
+				rm -f "$UPLOADS_TRANSACTION_LOG" 2>/dev/null || true
+			fi
+			UPLOADS_TRANSACTION_LOG_OLD=''
+			UPLOADS_TRANSACTION_LOG_REPLACED=0
+		fi
+		if [ -n "$UPLOADS_TRANSACTION_LOG_OLD" ]; then
+			case "$UPLOADS_TRANSACTION_LOG_OLD" in "$BACKUP_DIR"/*) rm -f "$UPLOADS_TRANSACTION_LOG_OLD" 2>/dev/null || true ;; esac
 		fi
 		if [ -n "$ARCHIVE_LISTING" ]; then
 			case "$ARCHIVE_LISTING" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$ARCHIVE_LISTING" 2>/dev/null || true ;; esac
@@ -971,13 +985,14 @@ install_uploads_manifest() {
 }
 
 commit_uploads_manifest() {
-	if [ -n "$UPLOADS_MANIFEST_OLD" ]; then
-		rm -f "$UPLOADS_MANIFEST_OLD" 2>/dev/null || fail "Old uploads manifest cleanup failed"
-		UPLOADS_MANIFEST_OLD=''
-	fi
-	UPLOADS_MANIFEST_REPLACED=0
 	[ ! -L "$UPLOADS_TRANSACTION_LOG" ] || fail "Uploads transaction log must not be a symbolic link"
 	[ ! -e "$UPLOADS_TRANSACTION_LOG" ] || [ -f "$UPLOADS_TRANSACTION_LOG" ] || fail "Uploads transaction log must be a regular file"
+	if [ -f "$UPLOADS_TRANSACTION_LOG" ]; then
+		UPLOADS_TRANSACTION_LOG_OLD="$BACKUP_DIR/uploads-transactions.log.old.$timestamp.$$"
+		cp -- "$UPLOADS_TRANSACTION_LOG" "$UPLOADS_TRANSACTION_LOG_OLD" || fail "Uploads transaction log backup failed"
+		chmod 600 "$UPLOADS_TRANSACTION_LOG_OLD" || fail "Uploads transaction log backup mode update failed"
+		chown root:root "$UPLOADS_TRANSACTION_LOG_OLD" || fail "Uploads transaction log backup ownership normalization failed"
+	fi
 	UPLOADS_TRANSACTION_LOG_NEW="$BACKUP_DIR/uploads-transactions.log.new.$timestamp.$$"
 	if [ -f "$UPLOADS_TRANSACTION_LOG" ]; then cp -- "$UPLOADS_TRANSACTION_LOG" "$UPLOADS_TRANSACTION_LOG_NEW" || fail "Uploads transaction log staging failed"; else : > "$UPLOADS_TRANSACTION_LOG_NEW"; fi
 	printf 'release=%s mode=%s manifest_sha256=%s\n' "$timestamp" "$UPLOADS_TRANSACTION_KIND" "$(sha256sum "$UPLOADS_MANIFEST_PATH" | awk '{print toupper($1)}')" >> "$UPLOADS_TRANSACTION_LOG_NEW" || fail "Uploads transaction log write failed"
@@ -985,6 +1000,11 @@ commit_uploads_manifest() {
 	chown root:root "$UPLOADS_TRANSACTION_LOG_NEW" || fail "Uploads transaction log ownership normalization failed"
 	mv -f "$UPLOADS_TRANSACTION_LOG_NEW" "$UPLOADS_TRANSACTION_LOG" || fail "Uploads transaction log replacement failed"
 	UPLOADS_TRANSACTION_LOG_NEW=''
+	UPLOADS_TRANSACTION_LOG_REPLACED=1
+	if [ -n "$UPLOADS_MANIFEST_OLD" ]; then rm -f "$UPLOADS_MANIFEST_OLD" 2>/dev/null || true; UPLOADS_MANIFEST_OLD=''; fi
+	if [ -n "$UPLOADS_TRANSACTION_LOG_OLD" ]; then rm -f "$UPLOADS_TRANSACTION_LOG_OLD" 2>/dev/null || true; UPLOADS_TRANSACTION_LOG_OLD=''; fi
+	UPLOADS_MANIFEST_REPLACED=0
+	UPLOADS_TRANSACTION_LOG_REPLACED=0
 	printf 'UPLOADS_MANIFEST_RELEASE=%s\n' "$timestamp"
 	printf 'UPLOADS_MANIFEST_SHA256=%s\n' "$(sha256sum "$UPLOADS_MANIFEST_PATH" | awk '{print toupper($1)}')"
 }
@@ -1030,6 +1050,11 @@ sync_uploads_delta() {
 	[ -f "$UPLOADS_DELTA_STAGE/manifest.tsv" ] && [ -f "$UPLOADS_DELTA_STAGE/delete.list" ] || fail "Uploads delta metadata is incomplete"
 	cmp -s "$UPLOADS_DELTA_STAGE/manifest.tsv" "$UPLOADS_MANIFEST_FILE" || fail "Uploads delta manifest does not match sidecar"
 	if [ -n "$(find "$UPLOADS_DELTA_STAGE" -type l -print -quit)" ]; then fail "Uploads delta archive contains a symbolic link"; fi
+	require_cmd du
+	base_uploads_kb="$(du -sk "$current" | awk 'NR==1 { print $1 }')"
+	payload_uploads_kb="$(du -sk "$UPLOADS_DELTA_STAGE/payload" 2>/dev/null | awk 'NR==1 { print $1 }')"
+	case "$base_uploads_kb:$payload_uploads_kb" in *[!0-9:]*|:*) fail "Uploads delta size check failed" ;; esac
+	assert_free_space_kb "$WP_DIR" "$((base_uploads_kb + payload_uploads_kb))" "WordPress filesystem"
 	rm -rf "$new" "$old"
 	TRANSIENT_TARGET="$current"; TRANSIENT_NEW="$new"; TRANSIENT_OLD="$old"
 	mkdir -p "$new"

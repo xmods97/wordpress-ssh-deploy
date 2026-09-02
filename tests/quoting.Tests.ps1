@@ -62,6 +62,17 @@ Describe 'POSIX shell quoting' {
 		$command | Should Match 'SQL_FILE='
 		$command | Should Not Match "SQL_FILE='x'; touch"
 	}
+
+	It 'keeps every generated artifact token in the Bella wrapper allowlist' {
+		$wrapper = Get-Content (Join-Path $repoRoot 'root-ssh-wrapper.sh') -Raw
+		foreach ($mode in @('preflight', 'code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins', 'full')) {
+			$command = New-RemoteDeployCommand $validConfiguration $mode '/srv/tmp/example-deploy/database.sql' '/srv/tmp/example-deploy/uploads.zip' '/srv/tmp/example-deploy/uploads-delta.zip' '/srv/tmp/example-deploy/uploads-manifest.tsv'
+			$command | Should Match "UPLOADS_DELTA_ZIP='"
+			$command | Should Match "UPLOADS_MANIFEST_FILE='"
+			$wrapper | Should Match 'UPLOADS_DELTA_ZIP='
+			$wrapper | Should Match 'UPLOADS_MANIFEST_FILE='
+		}
+	}
 }
 
 Describe 'External command handling' {

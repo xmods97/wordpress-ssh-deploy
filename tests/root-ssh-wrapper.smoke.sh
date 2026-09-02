@@ -57,6 +57,8 @@ SSH_ORIGINAL_COMMAND="ENVIRONMENT='production' PLUGIN_SYNC_PATHS='' MU_PLUGIN_SY
     "$wrapper" "$config"
 SSH_ORIGINAL_COMMAND="ENVIRONMENT='production' PLUGIN_SYNC_PATHS='' MU_PLUGIN_SYNC_PATHS='' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='uploads' PRODUCTION_FULL_OPT_IN='0' sh '$runner'" \
     "$wrapper" "$config"
+SSH_ORIGINAL_COMMAND="ENVIRONMENT='production' PLUGIN_SYNC_PATHS='' MU_PLUGIN_SYNC_PATHS='' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='uploads' PRODUCTION_FULL_OPT_IN='0' UPLOADS_ZIP='' UPLOADS_DELTA_ZIP='$tmp/tmp/uploads-delta.zip' UPLOADS_MANIFEST_FILE='$tmp/tmp/uploads-manifest.tsv' sh '$runner'" \
+    "$wrapper" "$config"
 SSH_ORIGINAL_COMMAND="ENVIRONMENT='production' PLUGIN_SYNC_PATHS='wp-content/plugins/example-plugin,wp-content/plugins/second-plugin' MU_PLUGIN_SYNC_PATHS='' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='plugins' PRODUCTION_FULL_OPT_IN='0' sh '$runner'" \
     "$wrapper" "$config"
 SSH_ORIGINAL_COMMAND="ENVIRONMENT='production' PLUGIN_SYNC_PATHS='' MU_PLUGIN_SYNC_PATHS='wp-content/mu-plugins/example-loader' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='mu-plugins' PRODUCTION_FULL_OPT_IN='0' sh '$runner'" \
