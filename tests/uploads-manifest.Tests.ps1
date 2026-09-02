@@ -73,4 +73,29 @@ Describe 'Uploads manifest and delta package' {
 		$server | Should Match 'UPLOADS_DELTA_FALLBACK_REQUIRED'
 		$server | Should Match 'commit_uploads_manifest'
 	}
+
+	It 'detects stale full-deploy source before any remote command' {
+		$localRoot = Join-Path $root 'local-wp'
+		$sourceRoot = Join-Path $root 'deployment-source'
+		foreach ($base in @($localRoot, $sourceRoot)) {
+			New-Item -ItemType Directory -Force -Path (Join-Path $base 'wp-content/themes/bella-maria-child') | Out-Null
+			New-Item -ItemType Directory -Force -Path (Join-Path $base 'wp-content/plugins/example') | Out-Null
+			New-Item -ItemType Directory -Force -Path (Join-Path $base 'wp-content/mu-plugins') | Out-Null
+		}
+		[IO.File]::WriteAllText((Join-Path $localRoot 'wp-content/themes/bella-maria-child/style.css'), 'same')
+		[IO.File]::WriteAllText((Join-Path $sourceRoot 'wp-content/themes/bella-maria-child/style.css'), 'same')
+		[IO.File]::WriteAllText((Join-Path $localRoot 'wp-content/plugins/example/plugin.php'), 'same')
+		[IO.File]::WriteAllText((Join-Path $sourceRoot 'wp-content/plugins/example/plugin.php'), 'same')
+		[IO.File]::WriteAllText((Join-Path $localRoot 'wp-content/mu-plugins/loader.php'), 'same')
+		[IO.File]::WriteAllText((Join-Path $sourceRoot 'wp-content/mu-plugins/loader.php'), 'same')
+		$paths = @('wp-content/themes/bella-maria-child', 'wp-content/plugins/example', 'wp-content/mu-plugins/loader.php')
+		$baseline = @(Get-DeploymentSourceManifest -RootPath $sourceRoot -RelativePaths $paths)
+		$current = @(Get-DeploymentSourceManifest -RootPath $localRoot -RelativePaths $paths)
+		(Compare-UploadsManifests $baseline $current).Changed.Count | Should Be 0
+		[IO.File]::WriteAllText((Join-Path $localRoot 'wp-content/themes/bella-maria-child/style.css'), 'stale')
+		$changed = Compare-UploadsManifests $baseline @(Get-DeploymentSourceManifest -RootPath $localRoot -RelativePaths $paths)
+		$changed.Changed.Count | Should Be 1
+		$deploy = Get-Content (Join-Path $repoRoot 'deploy.ps1') -Raw
+		$deploy | Should Match 'Full deploy stopped: synchronize, commit and push'
+	}
 }

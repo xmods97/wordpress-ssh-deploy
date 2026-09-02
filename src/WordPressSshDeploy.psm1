@@ -97,6 +97,36 @@ function Get-UploadsManifest {
 	return @($result | Sort-Object -Property Path)
 }
 
+function Get-DeploymentSourceManifest {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory = $true)] [string] $RootPath,
+		[Parameter(Mandatory = $true)] [string[]] $RelativePaths
+	)
+
+	$root = (Get-Item -LiteralPath $RootPath -Force).FullName.TrimEnd('\')
+	$entries = @{}
+	foreach ($relativeRoot in $RelativePaths) {
+		$normalizedRoot = ([string]$relativeRoot).Replace('\', '/')
+		if (-not (Test-UploadsManifestPath $normalizedRoot)) { throw "Unsafe deployment source path: $normalizedRoot" }
+		$source = Join-Path $root ($normalizedRoot -replace '/', '\')
+		if (-not (Test-Path -LiteralPath $source)) { throw "Deployment source path not found: $normalizedRoot" }
+		$item = Get-Item -LiteralPath $source -Force
+		if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Deployment source path is a symbolic link: $normalizedRoot" }
+		if ($item.PSIsContainer) {
+			foreach ($entry in @(Get-UploadsManifest $source)) {
+				$path = "$normalizedRoot/$($entry.Path)"
+				if ($entries.ContainsKey($path)) { throw "Duplicate deployment source path: $path" }
+				$entries[$path] = [pscustomobject]@{ Path = $path; Size = [long]$entry.Size; Sha256 = $entry.Sha256 }
+			}
+		} else {
+			$hash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+			$entries[$normalizedRoot] = [pscustomobject]@{ Path = $normalizedRoot; Size = [long]$item.Length; Sha256 = $hash }
+		}
+	}
+	return @($entries.Values | Sort-Object Path)
+}
+
 function Write-UploadsManifest {
 	[CmdletBinding()]
 	param(
@@ -678,4 +708,4 @@ function Assert-DeployModeAllowed {
 	}
 }
 
-Export-ModuleMember -Function Get-DeployConfigurationErrors, Assert-DeployConfiguration, Assert-DeployModeAllowed, ConvertTo-ShSingleQuotedString, New-RemoteDeployCommand, Invoke-CheckedCommand, Invoke-CommandOutput, Get-DirectoryContentSizeBytes, Get-UploadsManifest, Write-UploadsManifest, Read-UploadsManifest, Compare-UploadsManifests, New-UploadsDeltaPackage, Assert-AvailableDiskSpace, Assert-SqlDumpFile, Assert-ZipArchiveFile
+Export-ModuleMember -Function Get-DeployConfigurationErrors, Assert-DeployConfiguration, Assert-DeployModeAllowed, ConvertTo-ShSingleQuotedString, New-RemoteDeployCommand, Invoke-CheckedCommand, Invoke-CommandOutput, Get-DirectoryContentSizeBytes, Get-UploadsManifest, Get-DeploymentSourceManifest, Write-UploadsManifest, Read-UploadsManifest, Compare-UploadsManifests, New-UploadsDeltaPackage, Assert-AvailableDiskSpace, Assert-SqlDumpFile, Assert-ZipArchiveFile

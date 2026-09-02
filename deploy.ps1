@@ -153,6 +153,25 @@ try {
 		Assert-Path $DeployConfig.MysqldumpPath 'mysqldump'
 	}
 	if ($hasUploads) { Assert-Path $DeployConfig.LocalUploadsPath 'Uploads' }
+	if ($Mode -eq 'full') {
+		Write-Step 'Verify full deployment source freshness'
+		$sourcePaths = @($DeployConfig.SyncPaths) + @($DeployConfig.PluginSyncPaths) + @($DeployConfig.MuPluginSyncPaths)
+		try {
+			$localSourceManifest = @(Get-DeploymentSourceManifest -RootPath $DeployConfig.LocalWpPath -RelativePaths $sourcePaths)
+			$deploymentSourceManifest = @(Get-DeploymentSourceManifest -RootPath $repoRoot -RelativePaths $sourcePaths)
+			$sourceComparison = Compare-UploadsManifests $deploymentSourceManifest $localSourceManifest
+			$sourceChanges = @($sourceComparison.Added) + @($sourceComparison.Changed) + @($sourceComparison.Deleted)
+			if ($sourceChanges.Count -gt 0) {
+				$sample = @($sourceChanges | Select-Object -First 5 | ForEach-Object { $_.Path }) -join ', '
+				Write-Warning ("FULL SOURCE WARNING: local source differs from deployment source ({0} path changes). Sample: {1}" -f $sourceChanges.Count, $sample)
+				throw 'Full deploy stopped: synchronize, commit and push the current local source before retrying.'
+			}
+			Write-Ok 'Full deployment source matches the current local WordPress tree.'
+		} catch {
+			if ($_.Exception.Message -like 'Full deploy stopped:*') { throw }
+			throw "Full deploy source freshness check failed: $($_.Exception.Message)"
+		}
+	}
 	$requiredLocalBytes = [long] $DeployConfig.MinimumLocalFreeSpaceMB * 1MB
 	if ($hasUploads) {
 		$requiredLocalBytes += Get-DirectoryContentSizeBytes $DeployConfig.LocalUploadsPath
