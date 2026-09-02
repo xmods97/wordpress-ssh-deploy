@@ -70,6 +70,10 @@ PRODUCTION_FULL_OPT_IN="${PRODUCTION_FULL_OPT_IN:-0}"
 KEEP_BACKUPS="${KEEP_BACKUPS:-10}"
 SQL_FILE="${SQL_FILE:-}"
 UPLOADS_ZIP="${UPLOADS_ZIP:-}"
+UPLOADS_DELTA_ZIP="${UPLOADS_DELTA_ZIP:-}"
+UPLOADS_MANIFEST_FILE="${UPLOADS_MANIFEST_FILE:-}"
+UPLOADS_MANIFEST_PATH="$BACKUP_DIR/uploads-manifest.tsv"
+UPLOADS_TRANSACTION_LOG="$BACKUP_DIR/uploads-transactions.log"
 PHP_BIN="${PHP_BIN:-php}"
 WP_CLI_BIN="${WP_CLI_BIN:-wp}"
 timestamp="$(date +%Y%m%d-%H%M%S)"
@@ -94,6 +98,12 @@ MANUAL_RECOVERY_BACKUP=''
 MANUAL_RECOVERY_MARKER=''
 MANUAL_RECOVERY_BACKUP_HARDENED=0
 MANUAL_RECOVERY_BACKUP_VALID=0
+UPLOADS_DELTA_STAGE=''
+UPLOADS_MANIFEST_NEW=''
+UPLOADS_MANIFEST_OLD=''
+UPLOADS_MANIFEST_REPLACED=0
+UPLOADS_TRANSACTION_LOG_NEW=''
+UPLOADS_TRANSACTION_KIND='full'
 
 normalize_url() {
 	value="$1"
@@ -274,6 +284,8 @@ assert_server_policy() {
 	assert_remote_path "$WP_CLI_BIN" WP_CLI_BIN
 	assert_temp_file "$SQL_FILE" SQL_FILE
 	assert_temp_file "$UPLOADS_ZIP" UPLOADS_ZIP
+	assert_temp_file "$UPLOADS_DELTA_ZIP" UPLOADS_DELTA_ZIP
+	assert_temp_file "$UPLOADS_MANIFEST_FILE" UPLOADS_MANIFEST_FILE
 }
 
 assert_wordpress_target() {
@@ -313,6 +325,33 @@ cleanup_exit() {
 		fi
 		if [ -n "$UPLOADS_ZIP" ]; then
 			case "$UPLOADS_ZIP" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$UPLOADS_ZIP" 2>/dev/null || true ;; esac
+		fi
+		if [ -n "$UPLOADS_DELTA_ZIP" ]; then
+			case "$UPLOADS_DELTA_ZIP" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$UPLOADS_DELTA_ZIP" 2>/dev/null || true ;; esac
+		fi
+		if [ -n "$UPLOADS_MANIFEST_FILE" ]; then
+			case "$UPLOADS_MANIFEST_FILE" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$UPLOADS_MANIFEST_FILE" 2>/dev/null || true ;; esac
+		fi
+		if [ -n "$UPLOADS_DELTA_STAGE" ]; then
+			case "$UPLOADS_DELTA_STAGE" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -rf "$UPLOADS_DELTA_STAGE" 2>/dev/null || true ;; esac
+		fi
+		if [ -n "$UPLOADS_MANIFEST_NEW" ]; then
+			case "$UPLOADS_MANIFEST_NEW" in "$BACKUP_DIR"/*) rm -f "$UPLOADS_MANIFEST_NEW" 2>/dev/null || true ;; esac
+		fi
+		if [ "$UPLOADS_MANIFEST_REPLACED" -eq 1 ] && [ "$TRANSIENT_COMMITTED" -eq 0 ]; then
+			if [ -n "$UPLOADS_MANIFEST_OLD" ] && [ -e "$UPLOADS_MANIFEST_OLD" ]; then
+				mv -f "$UPLOADS_MANIFEST_OLD" "$UPLOADS_MANIFEST_PATH" 2>/dev/null || true
+			else
+				rm -f "$UPLOADS_MANIFEST_PATH" 2>/dev/null || true
+			fi
+			UPLOADS_MANIFEST_OLD=''
+			UPLOADS_MANIFEST_REPLACED=0
+		fi
+		if [ -n "$UPLOADS_MANIFEST_OLD" ]; then
+			case "$UPLOADS_MANIFEST_OLD" in "$BACKUP_DIR"/*) rm -f "$UPLOADS_MANIFEST_OLD" 2>/dev/null || true ;; esac
+		fi
+		if [ -n "$UPLOADS_TRANSACTION_LOG_NEW" ]; then
+			case "$UPLOADS_TRANSACTION_LOG_NEW" in "$BACKUP_DIR"/*) rm -f "$UPLOADS_TRANSACTION_LOG_NEW" 2>/dev/null || true ;; esac
 		fi
 		if [ -n "$ARCHIVE_LISTING" ]; then
 			case "$ARCHIVE_LISTING" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$ARCHIVE_LISTING" 2>/dev/null || true ;; esac
@@ -363,7 +402,7 @@ acquire_lock() {
 
 cleanup_stale_temp_files() {
 	mkdir -p "$SERVER_EXPECTED_TMP_DIR"
-	find "$SERVER_EXPECTED_TMP_DIR" -type f \( -name 'local-db-*.sql' -o -name 'uploads-*.zip' -o -name 'uploads-*.list' \) -mtime +0 -exec rm -f {} \;
+	find "$SERVER_EXPECTED_TMP_DIR" -type f \( -name 'local-db-*.sql' -o -name 'uploads-*.zip' -o -name 'uploads-delta-*.zip' -o -name 'uploads-manifest-*.tsv' -o -name 'uploads-*.list' \) -mtime +0 -exec rm -f {} \;
 }
 
 assert_free_space_kb() {
@@ -884,7 +923,150 @@ rewrite_wordpress_urls() {
 	esac
 }
 
+validate_uploads_manifest_tree() {
+	manifest="$1"
+	root="$2"
+	[ -f "$manifest" ] || return 1
+	[ -d "$root" ] && [ ! -L "$root" ] || return 1
+	if [ -n "$(find "$root" -type l -print -quit)" ]; then return 1; fi
+	count=0
+	previous=''
+	while IFS="$(printf '\t')" read -r sha size relative extra; do
+		[ -n "$relative" ] || return 1
+		[ -z "${extra:-}" ] || return 1
+		[ "${#sha}" -eq 64 ] || return 1
+		case "$sha" in *[!0-9A-Fa-f]*) return 1 ;; esac
+		case "$size" in ''|*[!0-9]*) return 1 ;; esac
+		case "$relative" in ''|/*|../*|*/../*|*/..|*//*|*'\t'*) return 1 ;; esac
+		[ -z "$previous" ] || [ "$relative" \> "$previous" ] || return 1
+		file="$root/$relative"
+		[ -f "$file" ] && [ ! -L "$file" ] || return 1
+		[ "$(stat -c '%s' "$file")" = "$size" ] || return 1
+		[ "$(sha256sum "$file" | awk '{print tolower($1)}')" = "$(printf '%s' "$sha" | tr '[:upper:]' '[:lower:]')" ] || return 1
+		previous="$relative"
+		count=$((count + 1))
+	done < "$manifest"
+	actual_count="$(find "$root" -type f | wc -l | tr -d ' ')"
+	[ "$actual_count" = "$count" ] || return 1
+}
+
+install_uploads_manifest() {
+	source_manifest="$1"
+	[ -f "$source_manifest" ] || fail "Uploads manifest was not found"
+	[ ! -L "$UPLOADS_MANIFEST_PATH" ] || fail "Uploads manifest target must not be a symbolic link"
+	[ ! -e "$UPLOADS_MANIFEST_PATH" ] || [ -f "$UPLOADS_MANIFEST_PATH" ] || fail "Uploads manifest target must be a regular file"
+	if [ -f "$UPLOADS_MANIFEST_PATH" ]; then
+		UPLOADS_MANIFEST_OLD="$BACKUP_DIR/uploads-manifest.tsv.old.$timestamp.$$"
+		cp -- "$UPLOADS_MANIFEST_PATH" "$UPLOADS_MANIFEST_OLD" || fail "Uploads manifest backup failed"
+		chmod 600 "$UPLOADS_MANIFEST_OLD" || fail "Uploads manifest backup mode update failed"
+		chown root:root "$UPLOADS_MANIFEST_OLD" || fail "Uploads manifest backup ownership normalization failed"
+	fi
+	UPLOADS_MANIFEST_NEW="$BACKUP_DIR/uploads-manifest.tsv.new.$timestamp.$$"
+	cp -- "$source_manifest" "$UPLOADS_MANIFEST_NEW" || fail "Uploads manifest staging failed"
+	chmod 600 "$UPLOADS_MANIFEST_NEW" || fail "Uploads manifest mode update failed"
+	chown root:root "$UPLOADS_MANIFEST_NEW" || fail "Uploads manifest ownership normalization failed"
+	mv -f "$UPLOADS_MANIFEST_NEW" "$UPLOADS_MANIFEST_PATH" || fail "Uploads manifest replacement failed"
+	UPLOADS_MANIFEST_NEW=''
+	UPLOADS_MANIFEST_REPLACED=1
+}
+
+commit_uploads_manifest() {
+	if [ -n "$UPLOADS_MANIFEST_OLD" ]; then
+		rm -f "$UPLOADS_MANIFEST_OLD" 2>/dev/null || fail "Old uploads manifest cleanup failed"
+		UPLOADS_MANIFEST_OLD=''
+	fi
+	UPLOADS_MANIFEST_REPLACED=0
+	[ ! -L "$UPLOADS_TRANSACTION_LOG" ] || fail "Uploads transaction log must not be a symbolic link"
+	[ ! -e "$UPLOADS_TRANSACTION_LOG" ] || [ -f "$UPLOADS_TRANSACTION_LOG" ] || fail "Uploads transaction log must be a regular file"
+	UPLOADS_TRANSACTION_LOG_NEW="$BACKUP_DIR/uploads-transactions.log.new.$timestamp.$$"
+	if [ -f "$UPLOADS_TRANSACTION_LOG" ]; then cp -- "$UPLOADS_TRANSACTION_LOG" "$UPLOADS_TRANSACTION_LOG_NEW" || fail "Uploads transaction log staging failed"; else : > "$UPLOADS_TRANSACTION_LOG_NEW"; fi
+	printf 'release=%s mode=%s manifest_sha256=%s\n' "$timestamp" "$UPLOADS_TRANSACTION_KIND" "$(sha256sum "$UPLOADS_MANIFEST_PATH" | awk '{print toupper($1)}')" >> "$UPLOADS_TRANSACTION_LOG_NEW" || fail "Uploads transaction log write failed"
+	chmod 600 "$UPLOADS_TRANSACTION_LOG_NEW" || fail "Uploads transaction log mode update failed"
+	chown root:root "$UPLOADS_TRANSACTION_LOG_NEW" || fail "Uploads transaction log ownership normalization failed"
+	mv -f "$UPLOADS_TRANSACTION_LOG_NEW" "$UPLOADS_TRANSACTION_LOG" || fail "Uploads transaction log replacement failed"
+	UPLOADS_TRANSACTION_LOG_NEW=''
+	printf 'UPLOADS_MANIFEST_RELEASE=%s\n' "$timestamp"
+	printf 'UPLOADS_MANIFEST_SHA256=%s\n' "$(sha256sum "$UPLOADS_MANIFEST_PATH" | awk '{print toupper($1)}')"
+}
+
+assert_uploads_delta_baseline() {
+	canonical_wp_for_uploads="$(CDPATH= cd -P "$WP_DIR" && pwd)" || return 1
+	current_uploads="$canonical_wp_for_uploads/wp-content/uploads"
+	[ ! -L "$current_uploads" ] && [ -d "$current_uploads" ] || return 1
+	[ -f "$UPLOADS_MANIFEST_PATH" ] && [ ! -L "$UPLOADS_MANIFEST_PATH" ] || return 1
+	validate_uploads_manifest_tree "$UPLOADS_MANIFEST_PATH" "$current_uploads"
+}
+
+sync_uploads_delta() {
+	UPLOADS_TRANSACTION_KIND='delta'
+	[ -f "$UPLOADS_DELTA_ZIP" ] || fail "Uploads delta archive was not found"
+	[ -f "$UPLOADS_MANIFEST_FILE" ] || fail "Uploads manifest file was not found"
+	require_cmd unzip
+	require_cmd sha256sum
+	require_cmd cmp
+	assert_uploads_delta_baseline || fail 'UPLOADS_DELTA_FALLBACK_REQUIRED: uploads baseline is missing or drifted'
+	canonical_wp_for_uploads="$(CDPATH= cd -P "$WP_DIR" && pwd)" || fail "Could not determine canonical WordPress path"
+	CANONICAL_WP_DIR="$canonical_wp_for_uploads"
+	transient_root="$canonical_wp_for_uploads/wp-content/.deploy-transient"
+	[ ! -L "$transient_root" ] || fail "Transient directory must not be a symbolic link"
+	mkdir -p "$transient_root"
+	new="$transient_root/uploads.__new__"
+	old="$transient_root/uploads.__old__"
+	current="$canonical_wp_for_uploads/wp-content/uploads"
+	[ ! -L "$new" ] && [ ! -L "$old" ] && [ ! -L "$current" ] || fail "Uploads paths must not be symbolic links"
+	unzip -tq "$UPLOADS_DELTA_ZIP" >/dev/null || fail "Uploads delta archive integrity check failed"
+	UPLOADS_DELTA_STAGE="$SERVER_EXPECTED_TMP_DIR/uploads-delta-$timestamp.$$"
+	rm -rf "$UPLOADS_DELTA_STAGE"
+	mkdir -p "$UPLOADS_DELTA_STAGE"
+	ARCHIVE_LISTING="$SERVER_EXPECTED_TMP_DIR/uploads-delta-$timestamp.list"
+	unzip -Z1 "$UPLOADS_DELTA_ZIP" > "$ARCHIVE_LISTING"
+	while IFS= read -r entry; do
+		case "$entry" in manifest.tsv|delete.list|payload/|payload/*) ;; *) fail "Uploads delta archive contains an unsafe entry" ;; esac
+		case "$entry" in *'..'*|/*|*'//'*) fail "Uploads delta archive contains an unsafe path" ;; esac
+	done < "$ARCHIVE_LISTING"
+	rm -f "$ARCHIVE_LISTING"
+	ARCHIVE_LISTING=''
+	unzip -q "$UPLOADS_DELTA_ZIP" -d "$UPLOADS_DELTA_STAGE"
+	[ -f "$UPLOADS_DELTA_STAGE/manifest.tsv" ] && [ -f "$UPLOADS_DELTA_STAGE/delete.list" ] || fail "Uploads delta metadata is incomplete"
+	cmp -s "$UPLOADS_DELTA_STAGE/manifest.tsv" "$UPLOADS_MANIFEST_FILE" || fail "Uploads delta manifest does not match sidecar"
+	if [ -n "$(find "$UPLOADS_DELTA_STAGE" -type l -print -quit)" ]; then fail "Uploads delta archive contains a symbolic link"; fi
+	rm -rf "$new" "$old"
+	TRANSIENT_TARGET="$current"; TRANSIENT_NEW="$new"; TRANSIENT_OLD="$old"
+	mkdir -p "$new"
+	cp -a "$current/." "$new/" || fail "Uploads delta base staging failed"
+	while IFS= read -r relative; do
+		[ -z "$relative" ] && continue
+		case "$relative" in ''|/*|../*|*/../*|*/..|*//*|*'\t'*) fail "Uploads delta delete list contains an unsafe path" ;; esac
+		rm -f "$new/$relative"
+	done < "$UPLOADS_DELTA_STAGE/delete.list"
+	find "$UPLOADS_DELTA_STAGE/payload" -type f -print > "$UPLOADS_DELTA_STAGE/payload.list" 2>/dev/null || true
+	while IFS= read -r payload_file; do
+		[ -z "$payload_file" ] && continue
+		relative="${payload_file#"$UPLOADS_DELTA_STAGE/payload/"}"
+		case "$relative" in ''|/*|../*|*/../*|*/..|*//*|*'\t'*) fail "Uploads delta payload contains an unsafe path" ;; esac
+		destination="$new/$relative"
+		mkdir -p "$(dirname "$destination")"
+		cp -- "$payload_file" "$destination" || fail "Uploads delta payload copy failed"
+	done < "$UPLOADS_DELTA_STAGE/payload.list"
+	validate_uploads_manifest_tree "$UPLOADS_MANIFEST_FILE" "$new" || fail "Uploads delta final manifest verification failed"
+	[ -d "$current" ] || fail "WordPress uploads directory was not found"
+	mv "$current" "$old" || fail "Atomic uploads delta staging failed"
+	if ! mv "$new" "$current"; then
+		[ ! -e "$old" ] || mv "$old" "$current"
+		fail "Atomic uploads delta replacement failed"
+	fi
+	TRANSIENT_REPLACED=1
+	normalize_uploads_ownership "$current"
+	install_uploads_manifest "$UPLOADS_MANIFEST_FILE"
+	commit_uploads_manifest
+	TRANSIENT_COMMITTED=1
+	rm -rf "$old" 2>/dev/null || fail "Old uploads target cleanup failed"
+	rm -rf "$UPLOADS_DELTA_STAGE"
+	UPLOADS_DELTA_STAGE=''; TRANSIENT_NEW=''; TRANSIENT_OLD=''; TRANSIENT_TARGET=''; TRANSIENT_REPLACED=0; TRANSIENT_COMMITTED=0
+}
+
 sync_uploads() {
+	UPLOADS_TRANSACTION_KIND='full'
 	[ -f "$UPLOADS_ZIP" ] || fail "Uploads archive was not found"
 	require_cmd unzip
 	canonical_wp_for_uploads="$(CDPATH= cd -P "$WP_DIR" && pwd)" || fail "Could not determine canonical WordPress path"
@@ -912,6 +1094,9 @@ sync_uploads() {
 	mkdir -p "$new"
 	unzip -q "$UPLOADS_ZIP" -d "$new"
 	find "$new" -type f -print | grep -q . || fail "Uploads archive contains no files"
+	if [ -n "$UPLOADS_MANIFEST_FILE" ]; then
+		validate_uploads_manifest_tree "$UPLOADS_MANIFEST_FILE" "$new" || fail "Uploads manifest verification failed"
+	fi
 	[ ! -d "$current" ] || mv "$current" "$old"
 	if ! mv "$new" "$current"; then
 		[ ! -d "$old" ] || mv "$old" "$current"
@@ -919,6 +1104,8 @@ sync_uploads() {
 	fi
 	TRANSIENT_REPLACED=1
 	normalize_uploads_ownership "$current"
+	if [ -n "$UPLOADS_MANIFEST_FILE" ]; then install_uploads_manifest "$UPLOADS_MANIFEST_FILE"; fi
+	if [ -n "$UPLOADS_MANIFEST_FILE" ]; then commit_uploads_manifest; fi
 	TRANSIENT_COMMITTED=1
 	rm -rf "$old" 2>/dev/null || fail "Old uploads target cleanup failed"
 	TRANSIENT_NEW=''; TRANSIENT_OLD=''; TRANSIENT_TARGET=''; TRANSIENT_REPLACED=0; TRANSIENT_COMMITTED=0
@@ -981,6 +1168,9 @@ case "$DEPLOY_MODE" in
 		mkdir -p "$BACKUP_DIR"
 		assert_free_space_kb "$WP_DIR" 0 "WordPress filesystem"
 		assert_free_space_kb "$BACKUP_DIR" 0 "Backup filesystem"
+		if [ -n "$UPLOADS_DELTA_ZIP" ]; then
+			assert_uploads_delta_baseline || fail 'UPLOADS_DELTA_FALLBACK_REQUIRED: uploads baseline is missing or drifted'
+		fi
 
 		case "$DEPLOY_MODE" in
 			code|plugins|mu-plugins|code-db|full) update_repository ;;
@@ -998,7 +1188,9 @@ case "$DEPLOY_MODE" in
 			code) refresh_wordpress_runtime_cache ;;
 		esac
 		case "$DEPLOY_MODE" in
-			uploads) sync_uploads ;;
+			uploads)
+				if [ -n "$UPLOADS_DELTA_ZIP" ]; then sync_uploads_delta; else sync_uploads; fi
+				;;
 		esac
 		case "$DEPLOY_MODE" in
 			db|code-db|full)
@@ -1011,7 +1203,7 @@ case "$DEPLOY_MODE" in
 				database_mutation_active=1
 				import_database
 				rewrite_wordpress_urls
-				[ -z "$UPLOADS_ZIP" ] || sync_uploads
+				if [ -n "$UPLOADS_DELTA_ZIP" ]; then sync_uploads_delta; elif [ -n "$UPLOADS_ZIP" ]; then sync_uploads; fi
 				cleanup_wordpress
 				database_mutation_active=0
 				finalize_database_backup

@@ -64,6 +64,133 @@ function Get-DirectoryContentSizeBytes {
 	return $total
 }
 
+function Test-UploadsManifestPath {
+	[CmdletBinding()]
+	param([Parameter(Mandatory = $true)] [string] $Path)
+
+	if ([string]::IsNullOrWhiteSpace($Path) -or [IO.Path]::IsPathRooted($Path)) { return $false }
+	if ($Path.Contains('\') -or $Path.Contains("`t") -or $Path.Contains("`r") -or $Path.Contains("`n")) { return $false }
+	if ($Path -match '(^|/)\.\.?(/|$)' -or $Path -match '(^|/)\.git(/|$)') { return $false }
+	return $true
+}
+
+function Get-UploadsManifest {
+	[CmdletBinding()]
+	param([Parameter(Mandatory = $true)] [string] $Path)
+
+	if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+		throw "Uploads directory not found: $Path"
+	}
+	$root = (Get-Item -LiteralPath $Path -Force).FullName.TrimEnd('\')
+	$items = @(Get-ChildItem -LiteralPath $root -File -Recurse -Force -ErrorAction Stop)
+	foreach ($item in @(Get-ChildItem -LiteralPath $root -Recurse -Force -ErrorAction Stop)) {
+		if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+			throw "Uploads tree contains a symbolic link or reparse point: $($item.FullName)"
+		}
+	}
+	$result = foreach ($item in $items) {
+		$relative = $item.FullName.Substring($root.Length).TrimStart('\').Replace('\', '/')
+		if (-not (Test-UploadsManifestPath $relative)) { throw "Unsafe uploads manifest path: $relative" }
+		$hash = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+		[pscustomobject]@{ Path = $relative; Size = [long]$item.Length; Sha256 = $hash }
+	}
+	return @($result | Sort-Object -Property Path)
+}
+
+function Write-UploadsManifest {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory = $true)] [object[]] $Manifest,
+		[Parameter(Mandatory = $true)] [string] $Path
+	)
+
+	$lines = New-Object System.Collections.Generic.List[string]
+	$previous = $null
+	foreach ($entry in @($Manifest | Sort-Object -Property Path)) {
+		if ($entry.Path -isnot [string] -or -not (Test-UploadsManifestPath $entry.Path)) { throw "Unsafe uploads manifest path: $($entry.Path)" }
+		if ($null -ne $previous -and [string]::CompareOrdinal($previous, $entry.Path) -ge 0) { throw "Duplicate or unsorted uploads manifest path: $($entry.Path)" }
+		if ([long]$entry.Size -lt 0 -or $entry.Sha256 -notmatch '^[0-9a-fA-F]{64}$') { throw "Invalid uploads manifest entry: $($entry.Path)" }
+		$lines.Add(('{0}{3}{1}{3}{2}' -f $entry.Sha256.ToLowerInvariant(), [long]$entry.Size, $entry.Path, [char]9))
+		$previous = $entry.Path
+	}
+	$parent = Split-Path -Parent $Path
+	if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+	[IO.File]::WriteAllLines($Path, $lines, (New-Object Text.UTF8Encoding($false)))
+}
+
+function Read-UploadsManifest {
+	[CmdletBinding()]
+	param([Parameter(Mandatory = $true)] [string] $Path)
+
+	if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Uploads manifest not found: $Path" }
+	$previous = $null
+	$result = foreach ($line in @(Get-Content -LiteralPath $Path -Encoding UTF8)) {
+		if ([string]::IsNullOrWhiteSpace($line)) { continue }
+		$parts = [regex]::Split([string]$line, "`t", 3)
+		if ($parts.Count -ne 3 -or $parts[0] -notmatch '^[0-9a-fA-F]{64}$' -or $parts[1] -notmatch '^[0-9]+$' -or -not (Test-UploadsManifestPath $parts[2])) {
+			throw "Invalid uploads manifest line: $line"
+		}
+		if ($null -ne $previous -and [string]::CompareOrdinal($previous, $parts[2]) -ge 0) { throw "Uploads manifest is not strictly sorted" }
+		$previous = $parts[2]
+		[pscustomobject]@{ Path = $parts[2]; Size = [long]$parts[1]; Sha256 = $parts[0].ToLowerInvariant() }
+	}
+	return @($result)
+}
+
+function Compare-UploadsManifests {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory = $true)] [object[]] $Baseline,
+		[Parameter(Mandatory = $true)] [object[]] $Current
+	)
+
+	$old = @{}; foreach ($entry in @($Baseline)) { $old[$entry.Path] = $entry }
+	$new = @{}; foreach ($entry in @($Current)) { $new[$entry.Path] = $entry }
+	$added = @(); $changed = @(); $deleted = @()
+	foreach ($path in @($new.Keys | Sort-Object)) {
+		if (-not $old.ContainsKey($path)) { $added += $new[$path]; continue }
+		if ($old[$path].Size -ne $new[$path].Size -or $old[$path].Sha256 -ne $new[$path].Sha256) { $changed += $new[$path] }
+	}
+	foreach ($path in @($old.Keys | Sort-Object)) { if (-not $new.ContainsKey($path)) { $deleted += $path } }
+	[pscustomobject]@{ Added = @($added); Changed = @($changed); Deleted = @($deleted); UnchangedCount = $new.Count - $added.Count - $changed.Count }
+}
+
+function New-UploadsDeltaPackage {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory = $true)] [string] $SourceDirectory,
+		[Parameter(Mandatory = $true)] [object[]] $CurrentManifest,
+		[Parameter(Mandatory = $true)] [object[]] $BaselineManifest,
+		[Parameter(Mandatory = $true)] [string] $DestinationZip
+	)
+
+	$comparison = Compare-UploadsManifests $BaselineManifest $CurrentManifest
+	$stage = Join-Path ([IO.Path]::GetTempPath()) ('uploads-delta-' + [guid]::NewGuid().ToString('N'))
+	try {
+		$payload = Join-Path $stage 'payload'
+		New-Item -ItemType Directory -Force -Path $payload | Out-Null
+		foreach ($entry in @($comparison.Added + $comparison.Changed)) {
+			$source = Join-Path $SourceDirectory ($entry.Path -replace '/', '\')
+			if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Uploads source file not found: $($entry.Path)" }
+			$item = Get-Item -LiteralPath $source -Force
+			if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Uploads source file is a symbolic link: $($entry.Path)" }
+			$destination = Join-Path $payload ($entry.Path -replace '/', '\')
+			New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+			Copy-Item -LiteralPath $source -Destination $destination -Force
+		}
+		Write-UploadsManifest $CurrentManifest (Join-Path $stage 'manifest.tsv')
+		[IO.File]::WriteAllLines((Join-Path $stage 'delete.list'), @($comparison.Deleted), (New-Object Text.UTF8Encoding($false)))
+		if (Test-Path -LiteralPath $DestinationZip) { Remove-Item -LiteralPath $DestinationZip -Force }
+		$destinationParent = Split-Path -Parent $DestinationZip
+		if ($destinationParent) { New-Item -ItemType Directory -Force -Path $destinationParent | Out-Null }
+		Add-Type -AssemblyName System.IO.Compression.FileSystem
+		[IO.Compression.ZipFile]::CreateFromDirectory($stage, $DestinationZip, [IO.Compression.CompressionLevel]::Optimal, $false)
+		return [pscustomobject]@{ Package = $DestinationZip; Added = @($comparison.Added); Changed = @($comparison.Changed); Deleted = @($comparison.Deleted); TotalBytes = [long](Get-Item -LiteralPath $DestinationZip).Length }
+	} finally {
+		if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
+	}
+}
+
 function Assert-AvailableDiskSpace {
 	[CmdletBinding()]
 	param(
@@ -136,7 +263,9 @@ function New-RemoteDeployCommand {
 		[Parameter(Mandatory = $true)] [System.Collections.IDictionary] $Configuration,
 		[Parameter(Mandatory = $true)] [ValidateSet('preflight', 'full', 'code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins')] [string] $DeployMode,
 		[string] $SqlFile = '',
-		[string] $UploadsFile = ''
+		[string] $UploadsFile = '',
+		[string] $UploadsDeltaFile = '',
+		[string] $UploadsManifestFile = ''
 	)
 
 	$allowProductionFull = $Configuration.Contains('AllowProductionFull') -and $Configuration.AllowProductionFull -is [bool] -and $Configuration.AllowProductionFull
@@ -172,7 +301,9 @@ function New-RemoteDeployCommand {
 		@('DEPLOY_MODE', $DeployMode),
 		@('PRODUCTION_FULL_OPT_IN', $productionFullOptIn),
 		@('SQL_FILE', $SqlFile),
-		@('UPLOADS_ZIP', $UploadsFile)
+		@('UPLOADS_ZIP', $UploadsFile),
+		@('UPLOADS_DELTA_ZIP', $UploadsDeltaFile),
+		@('UPLOADS_MANIFEST_FILE', $UploadsManifestFile)
 	)
 
 	$parts = @()
@@ -547,4 +678,4 @@ function Assert-DeployModeAllowed {
 	}
 }
 
-Export-ModuleMember -Function Get-DeployConfigurationErrors, Assert-DeployConfiguration, Assert-DeployModeAllowed, ConvertTo-ShSingleQuotedString, New-RemoteDeployCommand, Invoke-CheckedCommand, Invoke-CommandOutput, Get-DirectoryContentSizeBytes, Assert-AvailableDiskSpace, Assert-SqlDumpFile, Assert-ZipArchiveFile
+Export-ModuleMember -Function Get-DeployConfigurationErrors, Assert-DeployConfiguration, Assert-DeployModeAllowed, ConvertTo-ShSingleQuotedString, New-RemoteDeployCommand, Invoke-CheckedCommand, Invoke-CommandOutput, Get-DirectoryContentSizeBytes, Get-UploadsManifest, Write-UploadsManifest, Read-UploadsManifest, Compare-UploadsManifests, New-UploadsDeltaPackage, Assert-AvailableDiskSpace, Assert-SqlDumpFile, Assert-ZipArchiveFile

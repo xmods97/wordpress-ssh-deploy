@@ -2,6 +2,7 @@
 param(
 	[Parameter(Position = 0)] [string] $Message = '',
 	[ValidateSet('full', 'code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins')] [string] $Mode = 'code',
+	[ValidateSet('auto', 'full')] [string] $UploadsTransferMode = 'auto',
 	[switch] $SkipGit,
 	[switch] $SkipUploads,
 	[switch] $PreflightOnly
@@ -97,14 +98,50 @@ $sqlPath = Join-Path $buildDir 'local-db.sql'
 $uploadsZip = Join-Path $buildDir 'uploads.zip'
 $remoteSql = "$($DeployConfig.RemoteTmpPath)/local-db-$stamp.sql"
 $remoteUploads = "$($DeployConfig.RemoteTmpPath)/uploads-$stamp.zip"
+$remoteUploadsDelta = "$($DeployConfig.RemoteTmpPath)/uploads-delta-$stamp.zip"
+$remoteUploadsManifest = "$($DeployConfig.RemoteTmpPath)/uploads-manifest-$stamp.tsv"
+$uploadsManifest = Join-Path $buildDir 'uploads-manifest.tsv'
+$uploadsDeltaZip = Join-Path $buildDir 'uploads-delta.zip'
+$uploadsManifestState = Join-Path $repoRoot ('.deploy-state\uploads-' + (($DeployConfig.ExpectedRemoteDomain -replace '[^A-Za-z0-9._-]', '_')) + '.tsv')
 $target = "$($DeployConfig.SshUser)@$($DeployConfig.SshHost)"
 $remoteCleanupNeeded = $false
 $localArtifactsCommitted = $false
+$uploadsTransferKind = 'full'
+$useUploadsDelta = $false
+$currentUploadsManifest = @()
 $sshArgs = @('-p', [string]$DeployConfig.SshPort, '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=10', '-o', 'ConnectTimeout=20')
 $scpArgs = @('-O', '-P', [string]$DeployConfig.SshPort, '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=10', '-o', 'ConnectTimeout=20')
 if ($DeployConfig.SshKeyPath) {
 	$sshArgs += @('-i', $DeployConfig.SshKeyPath, '-o', 'IdentitiesOnly=yes')
 	$scpArgs += @('-i', $DeployConfig.SshKeyPath, '-o', 'IdentitiesOnly=yes')
+}
+
+function Publish-UploadsManifestState([string] $SourcePath, [string] $DestinationPath) {
+	$parent = Split-Path -Parent $DestinationPath
+	if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+	$temp = "$DestinationPath.new.$PID"
+	try {
+		Copy-Item -LiteralPath $SourcePath -Destination $temp -Force
+		Move-Item -LiteralPath $temp -Destination $DestinationPath -Force
+	} finally {
+		if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
+	}
+}
+
+function Invoke-RemoteCommandCapture {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory = $true)] [string] $FilePath,
+		[Parameter(Mandatory = $true)] [string[]] $Arguments,
+		[Parameter(Mandatory = $true)] [string] $WorkingDirectory
+	)
+	Push-Location $WorkingDirectory
+	try {
+		$output = @(& $FilePath @Arguments 2>&1)
+		$exitCode = $LASTEXITCODE
+		$output | ForEach-Object { Write-Host ([string]$_) }
+		return [pscustomobject]@{ ExitCode = $exitCode; Output = ($output -join "`n") }
+	} finally { Pop-Location }
 }
 
 try {
@@ -122,6 +159,25 @@ try {
 	}
 	Assert-AvailableDiskSpace $repoRoot $requiredLocalBytes 'Local deployment workspace'
 	New-Item -ItemType Directory -Force -Path $buildDir | Out-Null
+	if ($hasUploads) {
+		Write-Step 'Build uploads manifest'
+		$currentUploadsManifest = @(Get-UploadsManifest $DeployConfig.LocalUploadsPath)
+		Write-UploadsManifest $currentUploadsManifest $uploadsManifest
+		if ($UploadsTransferMode -eq 'auto' -and (Test-Path -LiteralPath $uploadsManifestState -PathType Leaf)) {
+			try {
+				$baselineUploadsManifest = @(Read-UploadsManifest $uploadsManifestState)
+				$comparison = Compare-UploadsManifests $baselineUploadsManifest $currentUploadsManifest
+				New-UploadsDeltaPackage -SourceDirectory $DeployConfig.LocalUploadsPath -CurrentManifest $currentUploadsManifest -BaselineManifest $baselineUploadsManifest -DestinationZip $uploadsDeltaZip | Out-Null
+				$useUploadsDelta = $true
+				$uploadsTransferKind = 'delta'
+				Write-Ok ("Uploads delta prepared: added={0}, changed={1}, deleted={2}, bytes={3}" -f $comparison.Added.Count, $comparison.Changed.Count, $comparison.Deleted.Count, (Get-Item -LiteralPath $uploadsDeltaZip).Length)
+			} catch {
+				Write-Warning "Uploads baseline is invalid; falling back to full snapshot: $($_.Exception.Message)"
+				$useUploadsDelta = $false
+				$uploadsTransferKind = 'full'
+			}
+		}
+	}
 
 	if ($hasCode -or $hasPlugins -or $hasMuPlugins) {
 		Write-Step 'Verify Git checkout'
@@ -161,31 +217,56 @@ try {
 		}
 	}
 	if ($hasUploads) {
-		Write-Step 'Pack uploads'
-		New-Zip $DeployConfig.LocalUploadsPath $uploadsZip
-		Assert-ZipArchiveFile $uploadsZip
+		if (-not $useUploadsDelta) {
+			Write-Step 'Pack full uploads snapshot'
+			New-Zip $DeployConfig.LocalUploadsPath $uploadsZip
+			Assert-ZipArchiveFile $uploadsZip
+		}
 	}
 	if ($hasDatabase -or $hasUploads) {
 		Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, "mkdir -p $(ConvertTo-ShSingleQuotedString $DeployConfig.RemoteTmpPath)")) $repoRoot
 		$remoteCleanupNeeded = $true
 		if ($hasDatabase) { Invoke-CheckedCommand 'scp' ($scpArgs + @($sqlPath, "$target`:$remoteSql")) $repoRoot }
 		if ($hasUploads) {
-			Invoke-CheckedCommandRetry 'scp' ($scpArgs + @($uploadsZip, "$target`:$remoteUploads")) $repoRoot
+			$uploadsSource = if ($useUploadsDelta) { $uploadsDeltaZip } else { $uploadsZip }
+			$uploadsDestination = if ($useUploadsDelta) { $remoteUploadsDelta } else { $remoteUploads }
+			Invoke-CheckedCommandRetry 'scp' ($scpArgs + @($uploadsSource, "$target`:$uploadsDestination")) $repoRoot
+			Invoke-CheckedCommand 'scp' ($scpArgs + @($uploadsManifest, "$target`:$remoteUploadsManifest")) $repoRoot
 		}
 	}
 
 	Write-Step 'Run remote deployment'
 	$sqlArg = if ($hasDatabase) { $remoteSql } else { '' }
-	$uploadsArg = if ($hasUploads) { $remoteUploads } else { '' }
-	Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, (New-RemoteDeployCommand $DeployConfig $Mode $sqlArg $uploadsArg))) $repoRoot
+	$uploadsArg = if ($hasUploads -and -not $useUploadsDelta) { $remoteUploads } else { '' }
+	$uploadsDeltaArg = if ($hasUploads -and $useUploadsDelta) { $remoteUploadsDelta } else { '' }
+	$uploadsManifestArg = if ($hasUploads) { $remoteUploadsManifest } else { '' }
+	$remoteCommand = New-RemoteDeployCommand $DeployConfig $Mode $sqlArg $uploadsArg $uploadsDeltaArg $uploadsManifestArg
+	if ($hasUploads -and $useUploadsDelta) {
+		$result = Invoke-RemoteCommandCapture 'ssh' ($sshArgs + @($target, $remoteCommand)) $repoRoot
+		if ($result.ExitCode -ne 0) {
+			if ($result.Output -notmatch 'UPLOADS_DELTA_FALLBACK_REQUIRED') { throw "Command failed ($($result.ExitCode)): ssh" }
+			Write-Warning 'Remote uploads baseline/drift requires full snapshot fallback.'
+			$useUploadsDelta = $false
+			$uploadsTransferKind = 'full'
+			$uploadsDeltaArg = ''
+			New-Zip $DeployConfig.LocalUploadsPath $uploadsZip
+			Assert-ZipArchiveFile $uploadsZip
+			Invoke-CheckedCommandRetry 'scp' ($scpArgs + @($uploadsZip, "$target`:$remoteUploads")) $repoRoot
+			$remoteCommand = New-RemoteDeployCommand $DeployConfig $Mode $sqlArg $remoteUploads $uploadsDeltaArg $uploadsManifestArg
+			Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, $remoteCommand)) $repoRoot
+		}
+	} else {
+		Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, $remoteCommand)) $repoRoot
+	}
 	$remoteCleanupNeeded = $false
 	$localArtifactsCommitted = $true
+	if ($hasUploads) { Publish-UploadsManifestState $uploadsManifest $uploadsManifestState }
 
 	Write-Host "`nDeploy completed: $($DeployConfig.LocalUrl) -> $($DeployConfig.RemoteUrl)" -ForegroundColor Green
 } finally {
 	if ($remoteCleanupNeeded) {
 		try {
-			$cleanupCommand = "rm -f $(ConvertTo-ShSingleQuotedString $remoteSql) $(ConvertTo-ShSingleQuotedString $remoteUploads)"
+			$cleanupCommand = "rm -f $(ConvertTo-ShSingleQuotedString $remoteSql) $(ConvertTo-ShSingleQuotedString $remoteUploads) $(ConvertTo-ShSingleQuotedString $remoteUploadsDelta) $(ConvertTo-ShSingleQuotedString $remoteUploadsManifest)"
 			Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, $cleanupCommand)) $repoRoot
 		} catch {
 			Write-Warning 'Remote temporary file cleanup could not be confirmed. Run preflight after SSH is restored.'

@@ -1,6 +1,7 @@
 deploy.config.ps1
 server.config.sh
 .deploy/
+.deploy-state/
 *.local.ps1
 .DS_Store
 Thumbs.db
