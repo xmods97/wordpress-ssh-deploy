@@ -106,6 +106,9 @@ UPLOADS_TRANSACTION_LOG_NEW=''
 UPLOADS_TRANSACTION_LOG_OLD=''
 UPLOADS_TRANSACTION_LOG_REPLACED=0
 UPLOADS_TRANSACTION_KIND='full'
+COMPONENT_SOURCE_MANIFEST=''
+COMPONENT_TARGET_MANIFEST=''
+COMPONENT_EXTRAS_MANIFEST=''
 
 normalize_url() {
 	value="$1"
@@ -373,6 +376,15 @@ cleanup_exit() {
 		if [ -n "$GIT_SSH_WRAPPER" ]; then
 			case "$GIT_SSH_WRAPPER" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$GIT_SSH_WRAPPER" 2>/dev/null || true ;; esac
 		fi
+		if [ -n "$COMPONENT_SOURCE_MANIFEST" ]; then
+			case "$COMPONENT_SOURCE_MANIFEST" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$COMPONENT_SOURCE_MANIFEST" 2>/dev/null || true ;; esac
+		fi
+		if [ -n "$COMPONENT_TARGET_MANIFEST" ]; then
+			case "$COMPONENT_TARGET_MANIFEST" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$COMPONENT_TARGET_MANIFEST" 2>/dev/null || true ;; esac
+		fi
+		if [ -n "$COMPONENT_EXTRAS_MANIFEST" ]; then
+			case "$COMPONENT_EXTRAS_MANIFEST" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$COMPONENT_EXTRAS_MANIFEST" 2>/dev/null || true ;; esac
+		fi
 		if [ -n "$MYSQL_DEFAULTS_FILE" ]; then
 			case "$MYSQL_DEFAULTS_FILE" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$MYSQL_DEFAULTS_FILE" 2>/dev/null || true ;; esac
 		fi
@@ -542,6 +554,41 @@ assert_no_symlink_components() {
 	IFS="$old_ifs"
 }
 
+# Stop before a managed directory replacement can delete regular files that
+# exist only on production. The exact list is printed for explicit review.
+assert_no_production_extra_files() {
+	source_path="$1"
+	target_path="$2"
+	component_label="$3"
+	[ -d "$source_path" ] || return 0
+	[ -e "$target_path" ] || return 0
+	[ -d "$target_path" ] || fail "$component_label production target is not a directory"
+	require_cmd find
+	require_cmd sort
+	require_cmd comm
+	COMPONENT_SOURCE_MANIFEST="$SERVER_EXPECTED_TMP_DIR/.component-source.$$.manifest"
+	COMPONENT_TARGET_MANIFEST="$SERVER_EXPECTED_TMP_DIR/.component-target.$$.manifest"
+	COMPONENT_EXTRAS_MANIFEST="$SERVER_EXPECTED_TMP_DIR/.component-extra.$$.manifest"
+	(
+		cd "$source_path" || exit 1
+		find . -type f -print | sed 's#^\./##' | sort
+	) > "$COMPONENT_SOURCE_MANIFEST" || fail "$component_label source manifest failed"
+	(
+		cd "$target_path" || exit 1
+		find . -type f -print | sed 's#^\./##' | sort
+	) > "$COMPONENT_TARGET_MANIFEST" || fail "$component_label production manifest failed"
+	comm -23 "$COMPONENT_TARGET_MANIFEST" "$COMPONENT_SOURCE_MANIFEST" > "$COMPONENT_EXTRAS_MANIFEST" || fail "$component_label production manifest comparison failed"
+	if [ -s "$COMPONENT_EXTRAS_MANIFEST" ]; then
+		printf '%s\n' "PRODUCTION_EXTRA_FILES component=$component_label target=$target_path" >&2
+		sed 's#^#PRODUCTION_EXTRA_FILE=#' "$COMPONENT_EXTRAS_MANIFEST" >&2
+		fail "$component_label production contains files absent from deployment source; explicit deletion confirmation is required"
+	fi
+	rm -f "$COMPONENT_SOURCE_MANIFEST" "$COMPONENT_TARGET_MANIFEST" "$COMPONENT_EXTRAS_MANIFEST"
+	COMPONENT_SOURCE_MANIFEST=''
+	COMPONENT_TARGET_MANIFEST=''
+	COMPONENT_EXTRAS_MANIFEST=''
+}
+
 assert_theme_ownership_prerequisites() {
 	require_cmd stat
 	require_cmd chown
@@ -662,6 +709,7 @@ copy_paths() {
 		target_path="$canonical_wp/$relative"
 		[ -d "$source_path" ] || fail "Configured sync source was not found"
 		assert_no_symlink_components "$canonical_wp" "$relative"
+		assert_no_production_extra_files "$source_path" "$target_path" "$component_label"
 		case "$target_path" in "$canonical_wp"/*) ;; *) fail "Sync target escaped WordPress directory" ;; esac
 		mkdir -p "$(dirname "$target_path")"
 		source_kb="$(du -sk "$source_path" | awk 'NR==1 { print $1 }')"

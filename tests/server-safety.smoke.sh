@@ -109,6 +109,7 @@ cp "$repo_dir/tests/fixtures/fake-php.sh" "$target_root/bin/php"
 cp "$repo_dir/tests/fixtures/fake-id.sh" "$target_root/bin/id"
 cp "$repo_dir/tests/fixtures/fake-stat.sh" "$target_root/bin/stat"
 cp "$repo_dir/tests/fixtures/fake-chown.sh" "$target_root/bin/chown"
+cp "$repo_dir/tests/fixtures/fake-git.sh" "$target_root/bin/git"
 : > "$target_root/bin/wp"
 
 output="$(FIXTURE_EFFECTIVE_UID=1000 FIXTURE_SQL_FILE="$target_root/tmp/preflight-input.sql" run_server production preflight)"
@@ -120,6 +121,16 @@ esac
 [ -f "$target_root/tmp/preflight-input.sql" ] || { echo 'Preflight exit cleanup removed an input artifact' >&2; exit 1; }
 [ ! -e "$target_root/lock" ] || { echo 'Preflight created a lock directory' >&2; exit 1; }
 [ ! -e "$target_root/backups" ] || { echo 'Preflight created a backup directory' >&2; exit 1; }
+
+mkdir -p "$target_root/repo/wp-content/themes/example-theme"
+printf '%s\n' 'managed source' > "$target_root/repo/wp-content/themes/example-theme/style.css"
+printf '%s\n' 'production-only' > "$target_root/wp/wp-content/themes/example-theme/production-only.txt"
+output="$(FIXTURE_EFFECTIVE_UID=1000 run_server production code || true)"
+case "$output" in
+	*'PRODUCTION_EXTRA_FILES component=code'*'PRODUCTION_EXTRA_FILE=production-only.txt'*) ;;
+	*) echo 'Production-only code file did not fail closed with an exact warning' >&2; exit 1 ;;
+esac
+[ -f "$target_root/wp/wp-content/themes/example-theme/production-only.txt" ] || { echo 'Production-only file was removed during warning' >&2; exit 1; }
 
 output="$(FIXTURE_EFFECTIVE_UID=1000 run_server production preflight)"
 case "$output" in
