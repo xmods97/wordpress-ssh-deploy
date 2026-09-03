@@ -109,6 +109,8 @@ UPLOADS_TRANSACTION_KIND='full'
 COMPONENT_SOURCE_MANIFEST=''
 COMPONENT_TARGET_MANIFEST=''
 COMPONENT_EXTRAS_MANIFEST=''
+COMPONENT_SOURCE_RAW=''
+COMPONENT_TARGET_RAW=''
 
 normalize_url() {
 	value="$1"
@@ -385,6 +387,12 @@ cleanup_exit() {
 		if [ -n "$COMPONENT_EXTRAS_MANIFEST" ]; then
 			case "$COMPONENT_EXTRAS_MANIFEST" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$COMPONENT_EXTRAS_MANIFEST" 2>/dev/null || true ;; esac
 		fi
+		if [ -n "$COMPONENT_SOURCE_RAW" ]; then
+			case "$COMPONENT_SOURCE_RAW" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$COMPONENT_SOURCE_RAW" 2>/dev/null || true ;; esac
+		fi
+		if [ -n "$COMPONENT_TARGET_RAW" ]; then
+			case "$COMPONENT_TARGET_RAW" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$COMPONENT_TARGET_RAW" 2>/dev/null || true ;; esac
+		fi
 		if [ -n "$MYSQL_DEFAULTS_FILE" ]; then
 			case "$MYSQL_DEFAULTS_FILE" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$MYSQL_DEFAULTS_FILE" 2>/dev/null || true ;; esac
 		fi
@@ -569,24 +577,30 @@ assert_no_production_extra_files() {
 	COMPONENT_SOURCE_MANIFEST="$SERVER_EXPECTED_TMP_DIR/.component-source.$$.manifest"
 	COMPONENT_TARGET_MANIFEST="$SERVER_EXPECTED_TMP_DIR/.component-target.$$.manifest"
 	COMPONENT_EXTRAS_MANIFEST="$SERVER_EXPECTED_TMP_DIR/.component-extra.$$.manifest"
+	COMPONENT_SOURCE_RAW="$SERVER_EXPECTED_TMP_DIR/.component-source.$$.raw"
+	COMPONENT_TARGET_RAW="$SERVER_EXPECTED_TMP_DIR/.component-target.$$.raw"
 	(
 		cd "$source_path" || exit 1
-		find . -type f -print | sed 's#^\./##' | sort
-	) > "$COMPONENT_SOURCE_MANIFEST" || fail "$component_label source manifest failed"
+		find . -type f -print > "$COMPONENT_SOURCE_RAW"
+		LC_ALL=C sed 's#^\./##' "$COMPONENT_SOURCE_RAW" | LC_ALL=C sort > "$COMPONENT_SOURCE_MANIFEST"
+	) || fail "$component_label source manifest failed"
 	(
 		cd "$target_path" || exit 1
-		find . -type f -print | sed 's#^\./##' | sort
-	) > "$COMPONENT_TARGET_MANIFEST" || fail "$component_label production manifest failed"
-	comm -23 "$COMPONENT_TARGET_MANIFEST" "$COMPONENT_SOURCE_MANIFEST" > "$COMPONENT_EXTRAS_MANIFEST" || fail "$component_label production manifest comparison failed"
+		find . -type f -print > "$COMPONENT_TARGET_RAW"
+		LC_ALL=C sed 's#^\./##' "$COMPONENT_TARGET_RAW" | LC_ALL=C sort > "$COMPONENT_TARGET_MANIFEST"
+	) || fail "$component_label production manifest failed"
+	LC_ALL=C comm -23 "$COMPONENT_TARGET_MANIFEST" "$COMPONENT_SOURCE_MANIFEST" > "$COMPONENT_EXTRAS_MANIFEST" || fail "$component_label production manifest comparison failed"
 	if [ -s "$COMPONENT_EXTRAS_MANIFEST" ]; then
 		printf '%s\n' "PRODUCTION_EXTRA_FILES component=$component_label target=$target_path" >&2
-		sed 's#^#PRODUCTION_EXTRA_FILE=#' "$COMPONENT_EXTRAS_MANIFEST" >&2
-		fail "$component_label production contains files absent from deployment source; explicit deletion confirmation is required"
+		LC_ALL=C sed 's#^#PRODUCTION_EXTRA_FILE=#' "$COMPONENT_EXTRAS_MANIFEST" >&2
+		fail "$component_label production contains files absent from deployment source; deployment is blocked pending a separately approved deletion-confirmation flow"
 	fi
-	rm -f "$COMPONENT_SOURCE_MANIFEST" "$COMPONENT_TARGET_MANIFEST" "$COMPONENT_EXTRAS_MANIFEST"
+	rm -f "$COMPONENT_SOURCE_MANIFEST" "$COMPONENT_TARGET_MANIFEST" "$COMPONENT_EXTRAS_MANIFEST" "$COMPONENT_SOURCE_RAW" "$COMPONENT_TARGET_RAW"
 	COMPONENT_SOURCE_MANIFEST=''
 	COMPONENT_TARGET_MANIFEST=''
 	COMPONENT_EXTRAS_MANIFEST=''
+	COMPONENT_SOURCE_RAW=''
+	COMPONENT_TARGET_RAW=''
 }
 
 assert_theme_ownership_prerequisites() {
