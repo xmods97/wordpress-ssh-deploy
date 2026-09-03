@@ -110,6 +110,7 @@ cp "$repo_dir/tests/fixtures/fake-id.sh" "$target_root/bin/id"
 cp "$repo_dir/tests/fixtures/fake-stat.sh" "$target_root/bin/stat"
 cp "$repo_dir/tests/fixtures/fake-chown.sh" "$target_root/bin/chown"
 cp "$repo_dir/tests/fixtures/fake-git.sh" "$target_root/bin/git"
+cp "$repo_dir/tests/fixtures/fake-find.sh" "$target_root/bin/find"
 : > "$target_root/bin/wp"
 
 output="$(FIXTURE_EFFECTIVE_UID=1000 FIXTURE_SQL_FILE="$target_root/tmp/preflight-input.sql" run_server production preflight)"
@@ -131,6 +132,13 @@ case "$output" in
 	*) echo 'Production-only code file did not fail closed with an exact warning' >&2; exit 1 ;;
 esac
 [ -f "$target_root/wp/wp-content/themes/example-theme/production-only.txt" ] || { echo 'Production-only file was removed during warning' >&2; exit 1; }
+
+output="$(FIXTURE_EFFECTIVE_UID=1000 FIXTURE_FIND_FAIL=1 FIXTURE_FIND_FAIL_DIR="$target_root/wp/wp-content/themes/example-theme" run_server production code || true)"
+case "$output" in
+	*'production manifest failed'*) ;;
+	*) echo 'find failure did not fail closed before replacement' >&2; exit 1 ;;
+esac
+[ -f "$target_root/wp/wp-content/themes/example-theme/production-only.txt" ] || { echo 'Production-only file was removed after find failure' >&2; exit 1; }
 
 output="$(FIXTURE_EFFECTIVE_UID=1000 run_server production preflight)"
 case "$output" in

@@ -111,6 +111,8 @@ COMPONENT_TARGET_MANIFEST=''
 COMPONENT_EXTRAS_MANIFEST=''
 COMPONENT_SOURCE_RAW=''
 COMPONENT_TARGET_RAW=''
+COMPONENT_SOURCE_UNSORTED=''
+COMPONENT_TARGET_UNSORTED=''
 
 normalize_url() {
 	value="$1"
@@ -393,6 +395,12 @@ cleanup_exit() {
 		if [ -n "$COMPONENT_TARGET_RAW" ]; then
 			case "$COMPONENT_TARGET_RAW" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$COMPONENT_TARGET_RAW" 2>/dev/null || true ;; esac
 		fi
+		if [ -n "$COMPONENT_SOURCE_UNSORTED" ]; then
+			case "$COMPONENT_SOURCE_UNSORTED" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$COMPONENT_SOURCE_UNSORTED" 2>/dev/null || true ;; esac
+		fi
+		if [ -n "$COMPONENT_TARGET_UNSORTED" ]; then
+			case "$COMPONENT_TARGET_UNSORTED" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$COMPONENT_TARGET_UNSORTED" 2>/dev/null || true ;; esac
+		fi
 		if [ -n "$MYSQL_DEFAULTS_FILE" ]; then
 			case "$MYSQL_DEFAULTS_FILE" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$MYSQL_DEFAULTS_FILE" 2>/dev/null || true ;; esac
 		fi
@@ -579,28 +587,32 @@ assert_no_production_extra_files() {
 	COMPONENT_EXTRAS_MANIFEST="$SERVER_EXPECTED_TMP_DIR/.component-extra.$$.manifest"
 	COMPONENT_SOURCE_RAW="$SERVER_EXPECTED_TMP_DIR/.component-source.$$.raw"
 	COMPONENT_TARGET_RAW="$SERVER_EXPECTED_TMP_DIR/.component-target.$$.raw"
+	COMPONENT_SOURCE_UNSORTED="$SERVER_EXPECTED_TMP_DIR/.component-source.$$.unsorted"
+	COMPONENT_TARGET_UNSORTED="$SERVER_EXPECTED_TMP_DIR/.component-target.$$.unsorted"
 	(
-		cd "$source_path" || exit 1
-		find . -type f -print > "$COMPONENT_SOURCE_RAW"
-		LC_ALL=C sed 's#^\./##' "$COMPONENT_SOURCE_RAW" | LC_ALL=C sort > "$COMPONENT_SOURCE_MANIFEST"
-	) || fail "$component_label source manifest failed"
+		cd "$source_path" && find . -type f -print
+	) > "$COMPONENT_SOURCE_RAW" || fail "$component_label source manifest failed"
+	LC_ALL=C sed 's#^\./##' "$COMPONENT_SOURCE_RAW" > "$COMPONENT_SOURCE_UNSORTED" || fail "$component_label source manifest normalization failed"
+	LC_ALL=C sort "$COMPONENT_SOURCE_UNSORTED" > "$COMPONENT_SOURCE_MANIFEST" || fail "$component_label source manifest sort failed"
 	(
-		cd "$target_path" || exit 1
-		find . -type f -print > "$COMPONENT_TARGET_RAW"
-		LC_ALL=C sed 's#^\./##' "$COMPONENT_TARGET_RAW" | LC_ALL=C sort > "$COMPONENT_TARGET_MANIFEST"
-	) || fail "$component_label production manifest failed"
+		cd "$target_path" && find . -type f -print
+	) > "$COMPONENT_TARGET_RAW" || fail "$component_label production manifest failed"
+	LC_ALL=C sed 's#^\./##' "$COMPONENT_TARGET_RAW" > "$COMPONENT_TARGET_UNSORTED" || fail "$component_label production manifest normalization failed"
+	LC_ALL=C sort "$COMPONENT_TARGET_UNSORTED" > "$COMPONENT_TARGET_MANIFEST" || fail "$component_label production manifest sort failed"
 	LC_ALL=C comm -23 "$COMPONENT_TARGET_MANIFEST" "$COMPONENT_SOURCE_MANIFEST" > "$COMPONENT_EXTRAS_MANIFEST" || fail "$component_label production manifest comparison failed"
 	if [ -s "$COMPONENT_EXTRAS_MANIFEST" ]; then
 		printf '%s\n' "PRODUCTION_EXTRA_FILES component=$component_label target=$target_path" >&2
 		LC_ALL=C sed 's#^#PRODUCTION_EXTRA_FILE=#' "$COMPONENT_EXTRAS_MANIFEST" >&2
 		fail "$component_label production contains files absent from deployment source; deployment is blocked pending a separately approved deletion-confirmation flow"
 	fi
-	rm -f "$COMPONENT_SOURCE_MANIFEST" "$COMPONENT_TARGET_MANIFEST" "$COMPONENT_EXTRAS_MANIFEST" "$COMPONENT_SOURCE_RAW" "$COMPONENT_TARGET_RAW"
+	rm -f "$COMPONENT_SOURCE_MANIFEST" "$COMPONENT_TARGET_MANIFEST" "$COMPONENT_EXTRAS_MANIFEST" "$COMPONENT_SOURCE_RAW" "$COMPONENT_TARGET_RAW" "$COMPONENT_SOURCE_UNSORTED" "$COMPONENT_TARGET_UNSORTED"
 	COMPONENT_SOURCE_MANIFEST=''
 	COMPONENT_TARGET_MANIFEST=''
 	COMPONENT_EXTRAS_MANIFEST=''
 	COMPONENT_SOURCE_RAW=''
 	COMPONENT_TARGET_RAW=''
+	COMPONENT_SOURCE_UNSORTED=''
+	COMPONENT_TARGET_UNSORTED=''
 }
 
 assert_theme_ownership_prerequisites() {
