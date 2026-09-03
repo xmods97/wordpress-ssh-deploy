@@ -221,6 +221,40 @@ function New-UploadsDeltaPackage {
 	}
 }
 
+function Resolve-UploadsTransferPlan {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory = $true)] [ValidateSet('auto', 'full')] [string] $TransferMode,
+		[Parameter(Mandatory = $true)] [string] $BaselinePath,
+		[Parameter(Mandatory = $true)] [object[]] $CurrentManifest,
+		[switch] $ConfirmDeletes,
+		[switch] $ConfirmFullSnapshot
+	)
+
+	if ($TransferMode -eq 'full') {
+		if (-not $ConfirmFullSnapshot) {
+			throw 'Uploads full snapshot stopped: explicit -ConfirmUploadsFullSnapshot is required because production-only files may be replaced.'
+		}
+		return [pscustomobject]@{ UseDelta = $false; TransferKind = 'full'; Baseline = @(); Comparison = $null }
+	}
+
+	if (-not (Test-Path -LiteralPath $BaselinePath -PathType Leaf)) {
+		throw 'Uploads delta preflight stopped: baseline manifest is missing. Review the remote state and choose an explicit full snapshot only after approval.'
+	}
+	try {
+		$baseline = @(Read-UploadsManifest $BaselinePath)
+		$comparison = Compare-UploadsManifests $baseline $CurrentManifest
+		if ($comparison.Deleted.Count -gt 0 -and -not $ConfirmDeletes) {
+			$deletedPaths = @($comparison.Deleted) -join ', '
+			throw ("Uploads deploy stopped: {0} local file(s) would be removed from production: {1}. Rerun with -ConfirmUploadsDeletes after reviewing the exact delete list." -f $comparison.Deleted.Count, $deletedPaths)
+		}
+		return [pscustomobject]@{ UseDelta = $true; TransferKind = 'delta'; Baseline = $baseline; Comparison = $comparison }
+	} catch {
+		if ($_.Exception.Message -like 'Uploads deploy stopped:*') { throw }
+		throw "Uploads delta preflight stopped: $($_.Exception.Message). Review the baseline and choose an explicit full snapshot only after approval."
+	}
+}
+
 function Assert-AvailableDiskSpace {
 	[CmdletBinding()]
 	param(
@@ -708,4 +742,4 @@ function Assert-DeployModeAllowed {
 	}
 }
 
-Export-ModuleMember -Function Get-DeployConfigurationErrors, Assert-DeployConfiguration, Assert-DeployModeAllowed, ConvertTo-ShSingleQuotedString, New-RemoteDeployCommand, Invoke-CheckedCommand, Invoke-CommandOutput, Get-DirectoryContentSizeBytes, Get-UploadsManifest, Get-DeploymentSourceManifest, Write-UploadsManifest, Read-UploadsManifest, Compare-UploadsManifests, New-UploadsDeltaPackage, Assert-AvailableDiskSpace, Assert-SqlDumpFile, Assert-ZipArchiveFile
+Export-ModuleMember -Function Get-DeployConfigurationErrors, Assert-DeployConfiguration, Assert-DeployModeAllowed, ConvertTo-ShSingleQuotedString, New-RemoteDeployCommand, Invoke-CheckedCommand, Invoke-CommandOutput, Get-DirectoryContentSizeBytes, Get-UploadsManifest, Get-DeploymentSourceManifest, Write-UploadsManifest, Read-UploadsManifest, Compare-UploadsManifests, New-UploadsDeltaPackage, Resolve-UploadsTransferPlan, Assert-AvailableDiskSpace, Assert-SqlDumpFile, Assert-ZipArchiveFile

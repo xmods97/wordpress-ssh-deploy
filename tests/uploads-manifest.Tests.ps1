@@ -65,21 +65,73 @@ Describe 'Uploads manifest and delta package' {
 		$thrown = $false; try { Read-UploadsManifest $manifestPath | Out-Null } catch { $thrown = $true }; $thrown | Should Be $true
 	}
 
+	It 'stops auto mode before creating an artifact when baseline is missing' {
+		$missingBaseline = Join-Path $root 'missing-baseline.tsv'
+		$destination = Join-Path $root 'must-not-exist.zip'
+		$current = @(Get-UploadsManifest $uploads)
+		$thrown = $false
+		try {
+			$plan = Resolve-UploadsTransferPlan -TransferMode auto -BaselinePath $missingBaseline -CurrentManifest $current
+			New-UploadsDeltaPackage -SourceDirectory $uploads -CurrentManifest $current -BaselineManifest $plan.Baseline -DestinationZip $destination | Out-Null
+		} catch {
+			$thrown = $_.Exception.Message -match 'baseline manifest is missing'
+		}
+		$thrown | Should Be $true
+		(Test-Path -LiteralPath $destination) | Should Be $false
+	}
+
+	It 'requires explicit confirmation for a full uploads snapshot' {
+		$current = @(Get-UploadsManifest $uploads)
+		$thrown = $false
+		try {
+			Resolve-UploadsTransferPlan -TransferMode full -BaselinePath $baselinePath -CurrentManifest $current | Out-Null
+		} catch {
+			$thrown = $_.Exception.Message -match 'ConfirmUploadsFullSnapshot'
+		}
+		$thrown | Should Be $true
+		$plan = Resolve-UploadsTransferPlan -TransferMode full -BaselinePath $baselinePath -CurrentManifest $current -ConfirmFullSnapshot
+		$plan.UseDelta | Should Be $false
+		$plan.TransferKind | Should Be 'full'
+	}
+
+	It 'requires explicit confirmation for local delete-list entries' {
+		$baseline = @(Get-UploadsManifest $uploads)
+		Write-UploadsManifest $baseline $baselinePath
+		Remove-Item -LiteralPath (Join-Path $uploads 'old.jpg') -Force
+		$current = @(Get-UploadsManifest $uploads)
+		$thrown = $false
+		try {
+			Resolve-UploadsTransferPlan -TransferMode auto -BaselinePath $baselinePath -CurrentManifest $current | Out-Null
+		} catch {
+			$thrown = $_.Exception.Message -match 'would be removed from production'
+		}
+		$thrown | Should Be $true
+		Write-UploadsManifest $baseline $baselinePath
+		$plan = Resolve-UploadsTransferPlan -TransferMode auto -BaselinePath $baselinePath -CurrentManifest $current -ConfirmDeletes
+		$plan.Comparison.Deleted.Count | Should Be 1
+	}
+
 	It 'keeps remote drift fail-closed without an automatic full snapshot fallback' {
 		$deploy = Get-Content (Join-Path $repoRoot 'deploy.ps1') -Raw
+		$module = Get-Content (Join-Path $repoRoot 'src\WordPressSshDeploy.psm1') -Raw
 		$server = Get-Content (Join-Path $repoRoot 'server-deploy.sh') -Raw
 		$deploy | Should Match 'UPLOADS_DELTA_FALLBACK_REQUIRED'
-		$deploy | Should Match 'remote baseline is missing or drifted'
-		$deploy | Should Match 'Uploads delta preflight stopped'
 		$deploy | Should Match 'ConfirmUploadsDeletes'
+		$deploy | Should Match 'ConfirmUploadsFullSnapshot'
+		$resolveIndex = $deploy.IndexOf('$uploadsPlan = Resolve-UploadsTransferPlan')
+		$zipIndex = $deploy.IndexOf('New-Zip $DeployConfig.LocalUploadsPath $uploadsZip')
+		$remoteIndex = $deploy.IndexOf("Invoke-CheckedCommand 'ssh'")
+		($resolveIndex -ge 0 -and $resolveIndex -lt $zipIndex -and $resolveIndex -lt $remoteIndex) | Should Be $true
+		$module | Should Match 'baseline manifest is missing'
+		$module | Should Match 'Uploads delta preflight stopped'
 		$server | Should Match 'UPLOADS_DELTA_FALLBACK_REQUIRED'
 		$server | Should Match 'commit_uploads_manifest'
 	}
 
 	It 'requires explicit confirmation before packaging local upload deletions' {
 		$deploy = Get-Content (Join-Path $repoRoot 'deploy.ps1') -Raw
-		$deploy | Should Match 'UPLOADS DELETE WARNING'
-		$deploy | Should Match 'rerun with -ConfirmUploadsDeletes'
+		$deploy | Should Match 'ConfirmUploadsDeletes'
+		$deploy | Should Match 'Resolve-UploadsTransferPlan'
 	}
 
 	It 'detects stale full-deploy source before any remote command' {

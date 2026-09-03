@@ -4,6 +4,7 @@ param(
 	[ValidateSet('full', 'code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins')] [string] $Mode = 'code',
 	[ValidateSet('auto', 'full')] [string] $UploadsTransferMode = 'auto',
 	[switch] $ConfirmUploadsDeletes,
+	[switch] $ConfirmUploadsFullSnapshot,
 	[switch] $SkipGit,
 	[switch] $SkipUploads,
 	[switch] $PreflightOnly
@@ -110,6 +111,7 @@ $localArtifactsCommitted = $false
 $uploadsTransferKind = 'full'
 $useUploadsDelta = $false
 $currentUploadsManifest = @()
+$uploadsPlan = $null
 $sshArgs = @('-p', [string]$DeployConfig.SshPort, '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=10', '-o', 'ConnectTimeout=20')
 $scpArgs = @('-O', '-P', [string]$DeployConfig.SshPort, '-o', 'ServerAliveInterval=30', '-o', 'ServerAliveCountMax=10', '-o', 'ConnectTimeout=20')
 if ($DeployConfig.SshKeyPath) {
@@ -183,23 +185,13 @@ try {
 		Write-Step 'Build uploads manifest'
 		$currentUploadsManifest = @(Get-UploadsManifest $DeployConfig.LocalUploadsPath)
 		Write-UploadsManifest $currentUploadsManifest $uploadsManifest
-		if ($UploadsTransferMode -eq 'auto' -and (Test-Path -LiteralPath $uploadsManifestState -PathType Leaf)) {
-			try {
-				$baselineUploadsManifest = @(Read-UploadsManifest $uploadsManifestState)
-				$comparison = Compare-UploadsManifests $baselineUploadsManifest $currentUploadsManifest
-				if ($comparison.Deleted.Count -gt 0 -and -not $ConfirmUploadsDeletes) {
-					$deletedPaths = @($comparison.Deleted) -join ', '
-					Write-Warning ("UPLOADS DELETE WARNING: {0} local file(s) would be removed from production: {1}" -f $comparison.Deleted.Count, $deletedPaths)
-					throw 'Uploads deploy stopped: rerun with -ConfirmUploadsDeletes after reviewing the exact delete list.'
-				}
-				New-UploadsDeltaPackage -SourceDirectory $DeployConfig.LocalUploadsPath -CurrentManifest $currentUploadsManifest -BaselineManifest $baselineUploadsManifest -DestinationZip $uploadsDeltaZip | Out-Null
-				$useUploadsDelta = $true
-				$uploadsTransferKind = 'delta'
-				Write-Ok ("Uploads delta prepared: added={0}, changed={1}, deleted={2}, bytes={3}" -f $comparison.Added.Count, $comparison.Changed.Count, $comparison.Deleted.Count, (Get-Item -LiteralPath $uploadsDeltaZip).Length)
-			} catch {
-				if ($_.Exception.Message -like 'Uploads deploy stopped:*') { throw }
-				throw "Uploads delta preflight stopped: $($_.Exception.Message). Run an explicit -UploadsTransferMode full only after reviewing the drift/baseline state."
-			}
+		$uploadsPlan = Resolve-UploadsTransferPlan -TransferMode $UploadsTransferMode -BaselinePath $uploadsManifestState -CurrentManifest $currentUploadsManifest -ConfirmDeletes:$ConfirmUploadsDeletes -ConfirmFullSnapshot:$ConfirmUploadsFullSnapshot
+		if ($uploadsPlan.UseDelta) {
+			New-UploadsDeltaPackage -SourceDirectory $DeployConfig.LocalUploadsPath -CurrentManifest $currentUploadsManifest -BaselineManifest $uploadsPlan.Baseline -DestinationZip $uploadsDeltaZip | Out-Null
+			$useUploadsDelta = $true
+			$uploadsTransferKind = 'delta'
+			$comparison = $uploadsPlan.Comparison
+			Write-Ok ("Uploads delta prepared: added={0}, changed={1}, deleted={2}, bytes={3}" -f $comparison.Added.Count, $comparison.Changed.Count, $comparison.Deleted.Count, (Get-Item -LiteralPath $uploadsDeltaZip).Length)
 		}
 	}
 
