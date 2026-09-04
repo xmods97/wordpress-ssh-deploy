@@ -282,6 +282,23 @@ component_selected() {
 	esac
 }
 
+components_require_production_full_opt_in() {
+	case ",$DEPLOY_COMPONENTS," in
+		*,db,*)
+			case ",$DEPLOY_COMPONENTS," in *,uploads,*|*,plugins,*|*,mu-plugins,*) return 0 ;; esac
+			;;
+	esac
+	return 1
+}
+
+assert_production_component_full_gate() {
+	[ "$DEPLOY_MODE" = components ] || return 0
+	components_require_production_full_opt_in || return 0
+	[ "$SERVER_ENVIRONMENT" = production ] || return 0
+	[ "$PRODUCTION_FULL_OPT_IN" = 1 ] || fail "Production component selection requires an explicit client profile opt-in"
+	[ "${SERVER_ALLOW_PRODUCTION_FULL:-0}" = 1 ] || fail "Production component selection is disabled by server policy"
+}
+
 assert_allowed_modes_subset() {
 	requested="$1"
 	allowed="$2"
@@ -1291,6 +1308,7 @@ cleanup_backups() {
 assert_mode
 if [ "$DEPLOY_MODE" = components ]; then
 	assert_component_selection
+	assert_production_component_full_gate
 elif [ -n "$DEPLOY_COMPONENTS" ]; then
 	fail "Deploy component selection requires components mode"
 fi

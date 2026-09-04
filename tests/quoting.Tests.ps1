@@ -60,6 +60,17 @@ Describe 'POSIX shell quoting' {
 		$duplicateThrown | Should Be $true
 	}
 
+	It 'carries the production full opt-in for a broad component selection' {
+		$config = $validConfiguration.Clone()
+		$config.Environment = 'production'
+		$config.AllowedDeployModes = @('preflight', 'components')
+		(New-RemoteDeployCommand $config 'components' '' '' '' '' @('db', 'uploads')) | Should Match "PRODUCTION_FULL_OPT_IN='0'"
+		$config.AllowProductionFull = $true
+		(New-RemoteDeployCommand $config 'components' '' '' '' '' @('db', 'uploads')) | Should Match "PRODUCTION_FULL_OPT_IN='1'"
+		(Test-DeployComponentsRequireProductionFullOptIn @('db', 'code')) | Should Be $false
+		(Test-DeployComponentsRequireProductionFullOptIn @('db', 'uploads')) | Should Be $true
+	}
+
 	It 'sends the production full-mode client opt-in only for an opted-in full command' {
 		$config = $validConfiguration.Clone()
 		$config.Environment = 'production'

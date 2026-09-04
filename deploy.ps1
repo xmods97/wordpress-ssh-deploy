@@ -97,6 +97,9 @@ $allowedModes = if ($DeployConfig.Contains('AllowedDeployModes')) {
 $selectedComponents = @(Resolve-SelectedComponents $Mode $Components)
 if ($Components.Count -gt 0) { $Mode = 'components' }
 Assert-DeployModeAllowed -Environment $DeployConfig.Environment -Mode $Mode -AllowProductionFull $allowProductionFull -AllowedDeployModes $allowedModes
+if ($DeployConfig.Environment -eq 'production' -and $Mode -eq 'components' -and (Test-DeployComponentsRequireProductionFullOptIn -Components $selectedComponents) -and -not $allowProductionFull) {
+	throw 'Production component selection requires an explicit AllowProductionFull profile opt-in.'
+}
 $hasCode = $selectedComponents -contains 'code'
 $hasDatabase = $selectedComponents -contains 'db'
 $hasUploads = $selectedComponents -contains 'uploads'

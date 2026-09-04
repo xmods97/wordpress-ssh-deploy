@@ -39,6 +39,7 @@ run_server() {
 	SQL_FILE="${FIXTURE_SQL_FILE:-}" \
 	UPLOADS_ZIP="${FIXTURE_UPLOADS_ZIP:-}" \
 	DEPLOY_COMPONENTS="${FIXTURE_DEPLOY_COMPONENTS:-}" \
+	PRODUCTION_FULL_OPT_IN="${FIXTURE_PRODUCTION_FULL_OPT_IN-${PRODUCTION_FULL_OPT_IN:-0}}" \
 	DEPLOY_MODE="$2" \
 	sh "$fixture_dir/server-deploy.sh" 2>&1
 }
@@ -86,6 +87,18 @@ output="$(FIXTURE_ALLOWED_DEPLOY_MODES='preflight,components' FIXTURE_DEPLOY_COM
 case "$output" in
 	*'Components mode requires configured plugin sync paths'*) ;;
 	*) echo "Components mode did not reject an empty plugin allowlist" >&2; exit 1 ;;
+esac
+
+output="$(FIXTURE_ALLOWED_DEPLOY_MODES='preflight,components' FIXTURE_DEPLOY_COMPONENTS='code,db,uploads' run_server production components || true)"
+case "$output" in
+	*'Production component selection requires an explicit client profile opt-in'*) ;;
+	*) echo "Full-equivalent components did not require the production opt-in" >&2; exit 1 ;;
+esac
+
+output="$(FIXTURE_ALLOWED_DEPLOY_MODES='preflight,components' FIXTURE_DEPLOY_COMPONENTS='code,db,uploads' FIXTURE_PRODUCTION_FULL_OPT_IN=1 run_server production components || true)"
+case "$output" in
+	*'Production component selection is disabled by server policy'*) ;;
+	*) echo "Full-equivalent components bypassed the server production policy" >&2; exit 1 ;;
 esac
 
 output="$(FIXTURE_ALLOWED_DEPLOY_MODES='preflight,code,unknown' run_server production code || true)"

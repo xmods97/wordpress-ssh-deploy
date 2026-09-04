@@ -340,6 +340,18 @@ function Normalize-DeployComponentSelection {
 	return @($knownComponents | Where-Object { $seen.ContainsKey($_) })
 }
 
+function Test-DeployComponentsRequireProductionFullOptIn {
+	[CmdletBinding()]
+	param([Parameter(Mandatory = $true)] [string[]] $Components)
+
+	$selection = @(Normalize-DeployComponentSelection -Components $Components)
+	return ($selection -contains 'db') -and (
+		$selection -contains 'uploads' -or
+		$selection -contains 'plugins' -or
+		$selection -contains 'mu-plugins'
+	)
+}
+
 function New-RemoteDeployCommand {
 	[CmdletBinding()]
 	param(
@@ -361,7 +373,8 @@ function New-RemoteDeployCommand {
 	}
 
 	$allowProductionFull = $Configuration.Contains('AllowProductionFull') -and $Configuration.AllowProductionFull -is [bool] -and $Configuration.AllowProductionFull
-	$productionFullOptIn = if ($Configuration.Environment -eq 'production' -and $DeployMode -eq 'full' -and $allowProductionFull) { '1' } else { '0' }
+	$requiresProductionFullOptIn = $DeployMode -eq 'full' -or ($DeployMode -eq 'components' -and (Test-DeployComponentsRequireProductionFullOptIn -Components $componentSelection))
+	$productionFullOptIn = if ($Configuration.Environment -eq 'production' -and $requiresProductionFullOptIn -and $allowProductionFull) { '1' } else { '0' }
 	$pluginPaths = if ($Configuration.Contains('PluginSyncPaths')) { @($Configuration.PluginSyncPaths) } else { @() }
 	$muPluginPaths = if ($Configuration.Contains('MuPluginSyncPaths')) { @($Configuration.MuPluginSyncPaths) } else { @() }
 	$effectiveModes = if ($Configuration.Contains('AllowedDeployModes')) {
@@ -773,4 +786,4 @@ function Assert-DeployModeAllowed {
 	}
 }
 
-Export-ModuleMember -Function Get-DeployConfigurationErrors, Assert-DeployConfiguration, Assert-DeployModeAllowed, ConvertTo-ShSingleQuotedString, New-RemoteDeployCommand, Invoke-CheckedCommand, Invoke-CommandOutput, Get-DirectoryContentSizeBytes, Get-UploadsManifest, Get-DeploymentSourceManifest, Write-UploadsManifest, Read-UploadsManifest, Compare-UploadsManifests, New-UploadsDeltaPackage, Resolve-UploadsTransferPlan, Assert-AvailableDiskSpace, Assert-SqlDumpFile, Assert-ZipArchiveFile
+Export-ModuleMember -Function Get-DeployConfigurationErrors, Assert-DeployConfiguration, Assert-DeployModeAllowed, ConvertTo-ShSingleQuotedString, New-RemoteDeployCommand, Test-DeployComponentsRequireProductionFullOptIn, Invoke-CheckedCommand, Invoke-CommandOutput, Get-DirectoryContentSizeBytes, Get-UploadsManifest, Get-DeploymentSourceManifest, Write-UploadsManifest, Read-UploadsManifest, Compare-UploadsManifests, New-UploadsDeltaPackage, Resolve-UploadsTransferPlan, Assert-AvailableDiskSpace, Assert-SqlDumpFile, Assert-ZipArchiveFile

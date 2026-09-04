@@ -124,7 +124,9 @@ cannot replace them.
 `code`, `db`, `uploads`, `plugins`, or `mu-plugins`; duplicate and unknown values
 are rejected. The selected set is sent as one validated `DEPLOY_COMPONENTS`
 contract through the wrapper to the runner. A plugin or MU-plugin selection still
-requires its configured allowlist paths.
+requires its configured allowlist paths. In production, a `components` selection
+that combines `db` with `uploads`, `plugins`, or `mu-plugins` also requires the
+same explicit client and server full-deploy opt-in as `full`.
 
 Code deployment never creates commits or pushes. Commit and push separately
 before running deploy. For `code` and `full`, the local checkout must be clean

@@ -73,6 +73,10 @@ SSH_ORIGINAL_COMMAND="ENVIRONMENT='production' PLUGIN_SYNC_PATHS='wp-content/plu
     "$wrapper" "$config"
 grep -F -- "components|0|wp-content/plugins/example-plugin|wp-content/mu-plugins/example-loader|$component_selection_policy|mu-plugins,code" "$RUNNER_RECORD" >/dev/null
 
+SSH_ORIGINAL_COMMAND="ENVIRONMENT='production' ALLOWED_DEPLOY_MODES='$component_selection_policy' DEPLOY_MODE='components' DEPLOY_COMPONENTS='code,db,uploads' PRODUCTION_FULL_OPT_IN='1' sh '$runner'" \
+    "$wrapper" "$config"
+grep -F -- "components|1|||$component_selection_policy|code,db,uploads" "$RUNNER_RECORD" >/dev/null
+
 SSH_ORIGINAL_COMMAND="mkdir -p '$tmp/tmp'" \
     "$wrapper" "$config"
 
@@ -127,6 +131,7 @@ expect_reject "ENVIRONMENT='production' ALLOWED_DEPLOY_MODES='$component_policy'
 expect_reject "ENVIRONMENT='production' DEPLOY_MODE='code' PRODUCTION_FULL_OPT_IN='1' sh '$runner'"
 expect_reject "ENVIRONMENT='staging' DEPLOY_MODE='full' PRODUCTION_FULL_OPT_IN='1' sh '$runner'"
 expect_reject "ENVIRONMENT='production' DEPLOY_MODE='full' PRODUCTION_FULL_OPT_IN='0' sh '$runner'"
+expect_reject "ENVIRONMENT='production' ALLOWED_DEPLOY_MODES='$component_selection_policy' DEPLOY_MODE='components' DEPLOY_COMPONENTS='code,db,uploads' PRODUCTION_FULL_OPT_IN='0' sh '$runner'"
 expect_reject "ENVIRONMENT='Production' DEPLOY_MODE='full' sh '$runner'"
 expect_reject "ENVIRONMENT='prod' DEPLOY_MODE='full' sh '$runner'"
 expect_reject "ENVIRONMENT='production.' DEPLOY_MODE='full' sh '$runner'"
@@ -162,6 +167,11 @@ sed "s/ALLOW_PRODUCTION_FULL_OPT_IN='1'/ALLOW_PRODUCTION_FULL_OPT_IN='0'/" "$con
 if SSH_ORIGINAL_COMMAND="ENVIRONMENT='production' DEPLOY_MODE='full' PRODUCTION_FULL_OPT_IN='1' sh '$runner'" \
     "$wrapper" "$disabled_config" >/dev/null 2>&1; then
     echo 'wrapper accepted the production token when disabled by config' >&2
+    exit 1
+fi
+if SSH_ORIGINAL_COMMAND="ENVIRONMENT='production' ALLOWED_DEPLOY_MODES='$component_selection_policy' DEPLOY_MODE='components' DEPLOY_COMPONENTS='code,db,uploads' PRODUCTION_FULL_OPT_IN='1' sh '$runner'" \
+    "$wrapper" "$disabled_config" >/dev/null 2>&1; then
+    echo 'wrapper accepted the component production token when disabled by config' >&2
     exit 1
 fi
 

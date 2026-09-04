@@ -179,6 +179,18 @@ safe_component_list() {
     IFS=$validation_old_ifs
 }
 
+component_selection_requires_full_opt_in() {
+    component_list=$1
+    case ",$component_list," in
+        *,db,*)
+            case ",$component_list," in
+                *,uploads,*|*,plugins,*|*,mu-plugins,*) return 0 ;;
+            esac
+            ;;
+    esac
+    return 1
+}
+
 reject_control_chars() {
     control_lf=$(printf '\nx')
     control_lf=${control_lf%x}
@@ -343,9 +355,20 @@ run_runner_command() {
         die 'deploy component selection requires components mode'
     fi
 
+    if [ "$command_environment" = production ] && [ "$command_mode" = components ] && component_selection_requires_full_opt_in "$deploy_components"; then
+        [ "$production_full_opt_in_seen" -eq 1 ] && [ "$production_full_opt_in" = 1 ] || die 'production component selection requires an explicit client token'
+        [ "$ALLOW_PRODUCTION_FULL_OPT_IN" = 1 ] || die 'production full-mode token is disabled by wrapper policy'
+    fi
+
     if [ "$production_full_opt_in_seen" -eq 1 ] && [ "$production_full_opt_in" = 1 ]; then
         [ "$command_environment" = production ] || die 'production full-mode token requires production environment'
-        [ "$command_mode" = full ] || die 'production full-mode token requires full mode'
+        case "$command_mode" in
+            full) ;;
+            components)
+                component_selection_requires_full_opt_in "$deploy_components" || die 'production full-mode token is not valid for this component selection'
+                ;;
+            *) die 'production full-mode token requires full mode or a broad component selection' ;;
+        esac
     fi
     if [ "$command_environment" = production ] && [ "$command_mode" = full ]; then
         [ "$production_full_opt_in_seen" -eq 1 ] && [ "$production_full_opt_in" = 1 ] || die 'production full mode requires an explicit client token'

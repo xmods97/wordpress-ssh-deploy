@@ -69,7 +69,7 @@ WRAPPER="$RUNTIME/root-ssh-wrapper.sh"
 CONFIG="$DATA/wrapper.config"
 NEW_WRAPPER="$DATA/tmp/root-ssh-wrapper.new"
 AUTHORIZED='/root/.ssh/authorized_keys'
-EXPECTED_SHA='5B0B7D5FE79845B3F93FD2B8CC957DEAA91FD4FD7B2ECCBA10E087C1FFAFAE14'
+EXPECTED_SHA='C3AD6050FCFC0EF472EDB4C80350E2228869C2CFDD35DDAF94E2D54CF72729F8'
 TARGET='command="/root/.local/libexec/wordpress-ssh-deploy/bella-maria/root-ssh-wrapper.sh /root/.wordpress-ssh-deploy/bella-maria/wrapper.config"'
 
 for path in "$RUNTIME" "$DATA" "$BACKUPS" "$WRAPPER" "$CONFIG" "$NEW_WRAPPER" "$AUTHORIZED"; do
