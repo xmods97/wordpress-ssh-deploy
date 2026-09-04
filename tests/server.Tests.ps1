@@ -65,7 +65,7 @@ Describe 'Remote POSIX safety' {
 		try {
 			$output = & $shPath -c 'PATH=/usr/bin:/bin; export PATH; sh ./tests/owner-normalization.smoke.sh' 2>&1
 			$LASTEXITCODE | Should Be 0
-			$output -join "`n" | Should Match 'Owner normalization code-only/full: OK'
+			$output -join "`n" | Should Match 'Owner normalization code/plugin/MU/full: OK'
 		} finally {
 			Pop-Location
 		}
