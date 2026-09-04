@@ -321,16 +321,44 @@ function Assert-ZipArchiveFile {
 	}
 }
 
+function Normalize-DeployComponentSelection {
+	[CmdletBinding()]
+	param([Parameter(Mandatory = $true)] [string[]] $Components)
+
+	$knownComponents = @('code', 'db', 'uploads', 'plugins', 'mu-plugins')
+	$seen = @{}
+	foreach ($component in $Components) {
+		$normalized = ([string] $component).Trim().ToLowerInvariant()
+		if ([string]::IsNullOrWhiteSpace($normalized) -or $normalized -notin $knownComponents) {
+			throw "Unknown deploy component: $component"
+		}
+		if ($seen.ContainsKey($normalized)) {
+			throw "Duplicate deploy component: $normalized"
+		}
+		$seen[$normalized] = $true
+	}
+	return @($knownComponents | Where-Object { $seen.ContainsKey($_) })
+}
+
 function New-RemoteDeployCommand {
 	[CmdletBinding()]
 	param(
 		[Parameter(Mandatory = $true)] [System.Collections.IDictionary] $Configuration,
-		[Parameter(Mandatory = $true)] [ValidateSet('preflight', 'full', 'code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins')] [string] $DeployMode,
+		[Parameter(Mandatory = $true)] [ValidateSet('preflight', 'full', 'code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins', 'components')] [string] $DeployMode,
 		[string] $SqlFile = '',
 		[string] $UploadsFile = '',
 		[string] $UploadsDeltaFile = '',
-		[string] $UploadsManifestFile = ''
+		[string] $UploadsManifestFile = '',
+		[string[]] $Components = @()
 	)
+
+	$componentSelection = @()
+	if ($DeployMode -eq 'components') {
+		if ($Components.Count -eq 0) { throw 'Components mode requires at least one selected component.' }
+		$componentSelection = @(Normalize-DeployComponentSelection -Components $Components)
+	} elseif ($Components.Count -gt 0) {
+		throw 'Explicit components can only be used with components mode.'
+	}
 
 	$allowProductionFull = $Configuration.Contains('AllowProductionFull') -and $Configuration.AllowProductionFull -is [bool] -and $Configuration.AllowProductionFull
 	$productionFullOptIn = if ($Configuration.Environment -eq 'production' -and $DeployMode -eq 'full' -and $allowProductionFull) { '1' } else { '0' }
@@ -369,6 +397,9 @@ function New-RemoteDeployCommand {
 		@('UPLOADS_DELTA_ZIP', $UploadsDeltaFile),
 		@('UPLOADS_MANIFEST_FILE', $UploadsManifestFile)
 	)
+	if ($DeployMode -eq 'components') {
+		$assignments += ,@('DEPLOY_COMPONENTS', ($componentSelection -join ','))
+	}
 
 	$parts = @()
 	foreach ($assignment in $assignments) {
@@ -680,7 +711,7 @@ function Get-DeployConfigurationErrors {
 		}
 	}
 	if ($Configuration.Contains('AllowedDeployModes')) {
-		$knownModes = @('code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins', 'full', 'preflight')
+		$knownModes = @('code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins', 'full', 'preflight', 'components')
 		$seen = @{}
 		foreach ($mode in @($Configuration.AllowedDeployModes)) {
 			if ($mode -isnot [string] -or $mode -notin $knownModes) { Add-ValidationError $errors "Unknown AllowedDeployModes value: $mode"; continue }
@@ -717,7 +748,7 @@ function Assert-DeployModeAllowed {
 		[string] $Environment,
 
 		[Parameter(Mandatory = $true)]
-		[ValidateSet('full', 'code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins')]
+		[ValidateSet('full', 'code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins', 'components')]
 		[string] $Mode,
 
 		[object] $AllowProductionFull = $false,

@@ -39,6 +39,27 @@ Describe 'POSIX shell quoting' {
 		$command | Should Match "DEPLOY_MODE='code-db'"
 	}
 
+	It 'encodes an explicit component selection in canonical order' {
+		$config = $validConfiguration.Clone()
+		$config.PluginSyncPaths = @('wp-content/plugins/example-plugin')
+		$config.MuPluginSyncPaths = @('wp-content/mu-plugins/example-loader')
+		$config.AllowedDeployModes = @('preflight', 'components')
+		$command = New-RemoteDeployCommand $config 'components' '' '' '' '' @('mu-plugins', 'code', 'db')
+		$command | Should Match "DEPLOY_MODE='components'"
+		$command | Should Match "DEPLOY_COMPONENTS='code,db,mu-plugins'"
+	}
+
+	It 'rejects unknown and duplicate explicit components' {
+		$config = $validConfiguration.Clone()
+		$config.AllowedDeployModes = @('preflight', 'components')
+		$unknownThrown = $false
+		try { New-RemoteDeployCommand $config 'components' '' '' '' '' @('code', 'bogus') | Out-Null } catch { $unknownThrown = $true }
+		$duplicateThrown = $false
+		try { New-RemoteDeployCommand $config 'components' '' '' '' '' @('code', 'code') | Out-Null } catch { $duplicateThrown = $true }
+		$unknownThrown | Should Be $true
+		$duplicateThrown | Should Be $true
+	}
+
 	It 'sends the production full-mode client opt-in only for an opted-in full command' {
 		$config = $validConfiguration.Clone()
 		$config.Environment = 'production'

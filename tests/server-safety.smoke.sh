@@ -38,6 +38,7 @@ run_server() {
 	MIN_REMOTE_FREE_SPACE_MB='1' \
 	SQL_FILE="${FIXTURE_SQL_FILE:-}" \
 	UPLOADS_ZIP="${FIXTURE_UPLOADS_ZIP:-}" \
+	DEPLOY_COMPONENTS="${FIXTURE_DEPLOY_COMPONENTS:-}" \
 	DEPLOY_MODE="$2" \
 	sh "$fixture_dir/server-deploy.sh" 2>&1
 }
@@ -73,6 +74,18 @@ output="$(FIXTURE_ALLOWED_DEPLOY_MODES='preflight,code,db,code-db,uploads,plugin
 case "$output" in
 	*'Mu-plugins mode requires configured mu-plugin sync paths'*) ;;
 	*) echo "MU-plugins mode did not reject an empty MU-plugin allowlist" >&2; exit 1 ;;
+esac
+
+output="$(FIXTURE_ALLOWED_DEPLOY_MODES='preflight,code' FIXTURE_DEPLOY_COMPONENTS='code' run_server production components || true)"
+case "$output" in
+	*'Deploy mode is not enabled by profile policy'*) ;;
+	*) echo "Components mode was not rejected by the profile policy" >&2; exit 1 ;;
+esac
+
+output="$(FIXTURE_ALLOWED_DEPLOY_MODES='preflight,components' FIXTURE_DEPLOY_COMPONENTS='plugins' run_server production components || true)"
+case "$output" in
+	*'Components mode requires configured plugin sync paths'*) ;;
+	*) echo "Components mode did not reject an empty plugin allowlist" >&2; exit 1 ;;
 esac
 
 output="$(FIXTURE_ALLOWED_DEPLOY_MODES='preflight,code,unknown' run_server production code || true)"

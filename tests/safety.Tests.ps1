@@ -20,12 +20,20 @@ Describe 'Production deployment policy' {
 	}
 
 	It 'uses explicit profile capabilities instead of a global production DB ban' {
-		$all = @('preflight', 'code', 'db', 'code-db', 'uploads', 'plugins', 'full')
+		$all = @('preflight', 'code', 'db', 'code-db', 'uploads', 'plugins', 'full', 'components')
 		foreach ($mode in @('db', 'code-db', 'uploads', 'plugins')) {
 			{ Assert-DeployModeAllowed production $mode $false $all } | Should Not Throw
 		}
 		{ Assert-DeployModeAllowed production db $false @('preflight', 'code') } | Should Throw 'not enabled by this profile'
 		{ Assert-DeployModeAllowed production full $false @('preflight', 'code', 'full') } | Should Throw 'forbidden for production'
+		{ Assert-DeployModeAllowed production components $false @('preflight', 'components') } | Should Not Throw
+	}
+
+	It 'keeps component selection explicit across the client and runner' {
+		$deploySource | Should Match "Mode = 'code'"
+		$deploySource | Should Match '\$Components'
+		$serverSource | Should Match 'DEPLOY_COMPONENTS="\$\{DEPLOY_COMPONENTS:-\}"'
+		$serverSource | Should Match 'component_selected'
 	}
 
 	It 'keeps code as the local and remote default' {

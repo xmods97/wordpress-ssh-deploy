@@ -6,13 +6,14 @@ uploads data; the remote POSIX shell script backs up the destination and applies
 the deployment.
 
 > [!WARNING]
-> `db` and `full` replace the remote database. `full` can also replace the
-> configured uploads directory. Both modes are forbidden when the local or
-> server environment is `production`.
+> `db` replaces the remote database. `full` can also replace the configured
+> uploads directory. Production use remains disabled unless the client profile
+> and server policy explicitly enable the requested mode.
 
 ## Features
 
-- `code`, `db`, and `full` deployment modes
+- `code`, `db`, `code-db`, `uploads`, `plugins`, `mu-plugins`, and `full` deployment modes
+- composable `components` mode: select one or more components in a single run
 - configurable theme/plugin directories
 - remote database backup before import
 - WordPress-aware URL replacement through WP-CLI
@@ -86,10 +87,11 @@ The private server policy independently verifies the environment, URL,
 WordPress path, repository path, temporary path, backup path, and database name.
 It also pins the Git SSH key, PHP/WP-CLI executables, synchronized paths, backup
 retention, and lock location. Client-provided expected values cannot replace
-this policy. Production accepts only `code`; both local and remote scripts
-reject `db` and `full`. The server validates its policy and the actual WordPress
-target before updating the deployment repository. The installed runner and
-policy live outside the writable Git checkout so a pull cannot replace them.
+this policy. Production capabilities remain fail-closed until explicitly enabled
+in both the client profile and server policy. The server validates its policy and
+the actual WordPress target before updating the deployment repository. The
+installed runner and policy live outside the writable Git checkout so a pull
+cannot replace them.
 
 ### Internal structure
 
@@ -110,14 +112,25 @@ policy live outside the writable Git checkout so a pull cannot replace them.
 .\deploy.ps1 -Mode db -SkipGit
 
 # Code and database on development/staging only, without uploads
-.\deploy.ps1 -Mode full -SkipUploads
+.\deploy.ps1 -Mode code-db
+
+# Checkbox-style selection: only the listed components are prepared, transferred,
+# and applied; all other components remain untouched.
+.\deploy.ps1 -Mode components -Components code,db
+.\deploy.ps1 -Mode components -Components mu-plugins
 ```
+
+`full` and `code-db` are presets. `components` requires at least one value from
+`code`, `db`, `uploads`, `plugins`, or `mu-plugins`; duplicate and unknown values
+are rejected. The selected set is sent as one validated `DEPLOY_COMPONENTS`
+contract through the wrapper to the runner. A plugin or MU-plugin selection still
+requires its configured allowlist paths.
 
 Code deployment never creates commits or pushes. Commit and push separately
 before running deploy. For `code` and `full`, the local checkout must be clean
 and `HEAD` must match its configured upstream. The remote checkout follows the
 `main` branch. The legacy positional commit message is rejected with a migration
-message; `-SkipGit` is retained only for `db`.
+message; `-SkipGit` is retained for database-only selections.
 
 ## What each mode changes
 
@@ -125,6 +138,11 @@ message; `-SkipGit` is retained only for `db`.
 | --- | --- | --- | --- | --- |
 | `code` | yes | no | no | no |
 | `db` | no | yes | optional | yes |
+| `code-db` | yes | yes | no | yes |
+| `plugins` | plugins only | no | no | no |
+| `mu-plugins` | MU-plugins only | no | no | no |
+| `uploads` | no | no | yes | no |
+| `components` | selected set | selected set | selected set | when `db` is selected |
 | `full` | yes | yes | optional | yes |
 
 Before creating or accepting artifacts, both sides check their configured free

@@ -13,7 +13,7 @@ DATA='/root/.wordpress-ssh-deploy/bella-maria'
 BACKUPS="$DATA/backups"
 RUNNER="$RUNTIME/server-deploy.sh"
 NEW_RUNNER="$DATA/tmp/server-deploy.sh.new"
-EXPECTED_SHA='7620F42A4C0F51FD0812B9E7D3A7FD6FCC3AC3F0643E4557350D13DE72856250'
+EXPECTED_SHA='0B1F326FAA57A918B93679E58D2BC284F2275C214D81E49B6572913828EAB95B'
 
 test "$(id -u)" = 0 || fail 'root is required'
 test -f "$RUNNER" || fail 'current runner is missing'

@@ -4,7 +4,7 @@
 $DeployConfig = @{
 	# Required: development, staging, or production.
 	# Explicit per-profile component capability. Existing profiles without this key retain their legacy policy until migrated.
-	AllowedDeployModes = @('preflight', 'code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins', 'full')
+	AllowedDeployModes = @('preflight', 'code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins', 'full', 'components')
 	Environment = 'staging'
 
 	LocalWpPath      = 'C:\Sites\example.test'

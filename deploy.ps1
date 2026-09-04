@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
 	[Parameter(Position = 0)] [string] $Message = '',
-	[ValidateSet('full', 'code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins')] [string] $Mode = 'code',
+	[ValidateSet('full', 'code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins', 'components')] [string] $Mode = 'code',
+	[ValidateSet('code', 'db', 'uploads', 'plugins', 'mu-plugins')] [string[]] $Components = @(),
 	[ValidateSet('auto', 'full')] [string] $UploadsTransferMode = 'auto',
 	[switch] $ConfirmUploadsDeletes,
 	[switch] $ConfirmUploadsFullSnapshot,
@@ -56,6 +57,21 @@ function Test-ModeComponent([string] $SelectedMode, [string] $Component) {
 	}
 	return $matrix[$SelectedMode] -contains $Component
 }
+function Resolve-SelectedComponents([string] $SelectedMode, [string[]] $ExplicitComponents) {
+	$known = @('code', 'db', 'uploads', 'plugins', 'mu-plugins')
+	if ($ExplicitComponents.Count -gt 0 -or $SelectedMode -eq 'components') {
+		if ($ExplicitComponents.Count -eq 0) { throw 'Components mode requires at least one selected component.' }
+		$seen = @{}
+		foreach ($component in $ExplicitComponents) {
+			$normalized = ([string] $component).Trim().ToLowerInvariant()
+			if ([string]::IsNullOrWhiteSpace($normalized) -or $normalized -notin $known) { throw "Unknown selected component: $component" }
+			if ($seen.ContainsKey($normalized)) { throw "Duplicate selected component: $normalized" }
+			$seen[$normalized] = $true
+		}
+		return @($known | Where-Object { $seen.ContainsKey($_) })
+	}
+	return @($known | Where-Object { Test-ModeComponent $SelectedMode $_ })
+}
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $modulePath = Join-Path $repoRoot 'src\WordPressSshDeploy.psm1'
@@ -78,12 +94,14 @@ $allowedModes = if ($DeployConfig.Contains('AllowedDeployModes')) {
 } else {
 	@('preflight', 'code', 'db', 'full')
 }
+$selectedComponents = @(Resolve-SelectedComponents $Mode $Components)
+if ($Components.Count -gt 0) { $Mode = 'components' }
 Assert-DeployModeAllowed -Environment $DeployConfig.Environment -Mode $Mode -AllowProductionFull $allowProductionFull -AllowedDeployModes $allowedModes
-$hasCode = Test-ModeComponent $Mode 'code'
-$hasDatabase = Test-ModeComponent $Mode 'db'
-$hasUploads = Test-ModeComponent $Mode 'uploads'
-$hasPlugins = Test-ModeComponent $Mode 'plugins'
-$hasMuPlugins = Test-ModeComponent $Mode 'mu-plugins'
+$hasCode = $selectedComponents -contains 'code'
+$hasDatabase = $selectedComponents -contains 'db'
+$hasUploads = $selectedComponents -contains 'uploads'
+$hasPlugins = $selectedComponents -contains 'plugins'
+$hasMuPlugins = $selectedComponents -contains 'mu-plugins'
 if ($Message) {
 	throw 'Automatic Git commit/push was removed. Commit and push separately, then run deploy without Message.'
 }
@@ -256,7 +274,7 @@ try {
 	$uploadsArg = if ($hasUploads -and -not $useUploadsDelta) { $remoteUploads } else { '' }
 	$uploadsDeltaArg = if ($hasUploads -and $useUploadsDelta) { $remoteUploadsDelta } else { '' }
 	$uploadsManifestArg = if ($hasUploads) { $remoteUploadsManifest } else { '' }
-	$remoteCommand = New-RemoteDeployCommand $DeployConfig $Mode $sqlArg $uploadsArg $uploadsDeltaArg $uploadsManifestArg
+	$remoteCommand = New-RemoteDeployCommand $DeployConfig $Mode $sqlArg $uploadsArg $uploadsDeltaArg $uploadsManifestArg $selectedComponents
 	if ($hasUploads -and $useUploadsDelta) {
 		$result = Invoke-RemoteCommandCapture 'ssh' ($sshArgs + @($target, $remoteCommand)) $repoRoot
 		if ($result.ExitCode -ne 0) {

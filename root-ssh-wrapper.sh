@@ -142,13 +142,38 @@ safe_mode_list() {
     for allowed_mode in $mode_list; do
         IFS=$validation_old_ifs
         case "$allowed_mode" in
-            preflight|code|db|code-db|uploads|plugins|mu-plugins|full) ;;
+            preflight|code|db|code-db|uploads|plugins|mu-plugins|full|components) ;;
             *) return 1 ;;
         esac
         case "$mode_list_seen" in
             *",$allowed_mode,"*) return 1 ;;
         esac
         mode_list_seen=$mode_list_seen$allowed_mode','
+        IFS=','
+    done
+    IFS=$validation_old_ifs
+}
+
+safe_component_list() {
+    component_list=$1
+    [ -n "$component_list" ] || return 1
+    case "$component_list" in
+        ,*|*,|*,,*) return 1 ;;
+    esac
+
+    component_list_seen=','
+    validation_old_ifs=$IFS
+    IFS=','
+    for selected_component in $component_list; do
+        IFS=$validation_old_ifs
+        case "$selected_component" in
+            code|db|uploads|plugins|mu-plugins) ;;
+            *) return 1 ;;
+        esac
+        case "$component_list_seen" in
+            *",$selected_component,"*) return 1 ;;
+        esac
+        component_list_seen=$component_list_seen$selected_component','
         IFS=','
     done
     IFS=$validation_old_ifs
@@ -219,11 +244,13 @@ run_runner_command() {
     mu_plugin_sync_paths_seen=0
     allowed_deploy_modes=''
     allowed_deploy_modes_seen=0
+    deploy_components=''
+    deploy_components_seen=0
     while [ "$#" -gt 2 ]; do
         token=$1
         shift
         case "$token" in
-            LOCAL_URL=\'*\'|REMOTE_URL=\'*\'|ENVIRONMENT=\'*\'|EXPECTED_REMOTE_DOMAIN=\'*\'|WP_DIR=\'*\'|REPO_DIR=\'*\'|BACKUP_DIR=\'*\'|KEEP_BACKUPS=\'*\'|MIN_REMOTE_FREE_SPACE_MB=\'*\'|GIT_SSH_KEY=\'*\'|PHP_BIN=\'*\'|WP_CLI_BIN=\'*\'|EXPECTED_WP_DIR=\'*\'|EXPECTED_DB_NAME=\'*\'|EXPECTED_DB_TABLE_PREFIX=\'*\'|EXPECTED_DB_TABLE_COUNT=\'*\'|SYNC_PATHS=\'*\'|PLUGIN_SYNC_PATHS=\'*\'|MU_PLUGIN_SYNC_PATHS=\'*\'|ALLOWED_DEPLOY_MODES=\'*\'|FULL_SYNC_PATHS=\'*\'|PROTECTED_PATHS=\'*\'|PROTECTED_ARCHIVE=\'*\'|REPLACE_PROTECTED=\'*\'|DEPLOY_MODE=\'*\'|PRODUCTION_FULL_OPT_IN=\'*\'|SQL_FILE=\'*\'|UPLOADS_ZIP=\'*\'|UPLOADS_DELTA_ZIP=\'*\'|UPLOADS_MANIFEST_FILE=\'*\'|ALLOW_PRODUCTION_PULL=\'*\'|ALLOW_PRODUCTION_CACHE_CLEAR=\'*\'|CACHE_PATHS=\'*\'|PULL_ARTIFACT=\'*\'|PULL_PATHS=\'*\')
+            LOCAL_URL=\'*\'|REMOTE_URL=\'*\'|ENVIRONMENT=\'*\'|EXPECTED_REMOTE_DOMAIN=\'*\'|WP_DIR=\'*\'|REPO_DIR=\'*\'|BACKUP_DIR=\'*\'|KEEP_BACKUPS=\'*\'|MIN_REMOTE_FREE_SPACE_MB=\'*\'|GIT_SSH_KEY=\'*\'|PHP_BIN=\'*\'|WP_CLI_BIN=\'*\'|EXPECTED_WP_DIR=\'*\'|EXPECTED_DB_NAME=\'*\'|EXPECTED_DB_TABLE_PREFIX=\'*\'|EXPECTED_DB_TABLE_COUNT=\'*\'|SYNC_PATHS=\'*\'|PLUGIN_SYNC_PATHS=\'*\'|MU_PLUGIN_SYNC_PATHS=\'*\'|ALLOWED_DEPLOY_MODES=\'*\'|FULL_SYNC_PATHS=\'*\'|PROTECTED_PATHS=\'*\'|PROTECTED_ARCHIVE=\'*\'|REPLACE_PROTECTED=\'*\'|DEPLOY_MODE=\'*\'|DEPLOY_COMPONENTS=\'*\'|PRODUCTION_FULL_OPT_IN=\'*\'|SQL_FILE=\'*\'|UPLOADS_ZIP=\'*\'|UPLOADS_DELTA_ZIP=\'*\'|UPLOADS_MANIFEST_FILE=\'*\'|ALLOW_PRODUCTION_PULL=\'*\'|ALLOW_PRODUCTION_CACHE_CLEAR=\'*\'|CACHE_PATHS=\'*\'|PULL_ARTIFACT=\'*\'|PULL_PATHS=\'*\')
                 name=${token%%=*}
                 value=${token#*=}
                 value=$(strip_single_quotes "$value") || die 'runner value must be single-quoted'
@@ -261,9 +288,14 @@ run_runner_command() {
                     DEPLOY_MODE)
                         command_mode=$value
                         case "$value" in
-                            preflight|code|db|code-db|uploads|plugins|mu-plugins|full) ;;
+                            preflight|code|db|code-db|uploads|plugins|mu-plugins|full|components) ;;
                             *) die 'runner mode is not allowed' ;;
                         esac
+                        ;;
+                    DEPLOY_COMPONENTS)
+                        safe_component_list "$value" || die 'deploy component selection is not allowed'
+                        deploy_components_seen=1
+                        deploy_components=$value
                         ;;
                 esac
                 case "$seen" in
@@ -289,7 +321,7 @@ run_runner_command() {
         esac
     fi
     case "$command_mode" in
-        code-db|uploads|plugins|mu-plugins)
+        code-db|uploads|plugins|mu-plugins|components)
             [ "$allowed_deploy_modes_seen" -eq 1 ] || die 'component mode requires an explicit client policy'
             ;;
     esac
@@ -298,6 +330,17 @@ run_runner_command() {
     fi
     if [ "$command_mode" = mu-plugins ]; then
         [ "$mu_plugin_sync_paths_seen" -eq 1 ] && [ -n "$mu_plugin_sync_paths" ] || die 'mu-plugins mode requires mu-plugin sync paths'
+    fi
+    if [ "$command_mode" = components ]; then
+        [ "$deploy_components_seen" -eq 1 ] || die 'components mode requires selected components'
+        case ",$deploy_components," in
+            *,plugins,*) [ "$plugin_sync_paths_seen" -eq 1 ] && [ -n "$plugin_sync_paths" ] || die 'components mode requires plugin sync paths' ;;
+        esac
+        case ",$deploy_components," in
+            *,mu-plugins,*) [ "$mu_plugin_sync_paths_seen" -eq 1 ] && [ -n "$mu_plugin_sync_paths" ] || die 'components mode requires mu-plugin sync paths' ;;
+        esac
+    elif [ "$deploy_components_seen" -eq 1 ]; then
+        die 'deploy component selection requires components mode'
     fi
 
     if [ "$production_full_opt_in_seen" -eq 1 ] && [ "$production_full_opt_in" = 1 ]; then

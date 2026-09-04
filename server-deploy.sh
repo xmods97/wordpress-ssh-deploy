@@ -63,6 +63,7 @@ SERVER_GIT_SSH_PORT="${SERVER_GIT_SSH_PORT:-22}"
 : "${MIN_REMOTE_FREE_SPACE_MB:?MIN_REMOTE_FREE_SPACE_MB is required}"
 
 DEPLOY_MODE="${DEPLOY_MODE:-code}"
+DEPLOY_COMPONENTS="${DEPLOY_COMPONENTS:-}"
 PLUGIN_SYNC_PATHS="${PLUGIN_SYNC_PATHS:-}"
 MU_PLUGIN_SYNC_PATHS="${MU_PLUGIN_SYNC_PATHS:-}"
 ALLOWED_DEPLOY_MODES="${ALLOWED_DEPLOY_MODES:-}"
@@ -220,7 +221,7 @@ wp_cli_manual_prefix() {
 wp_config_value() { wp_cli config get "$1" --type=constant; }
 
 assert_mode() {
-	case "$DEPLOY_MODE" in preflight|code|db|code-db|uploads|plugins|mu-plugins|full) ;; *) fail "Unknown DEPLOY_MODE" ;; esac
+	case "$DEPLOY_MODE" in preflight|code|db|code-db|uploads|plugins|mu-plugins|full|components) ;; *) fail "Unknown DEPLOY_MODE" ;; esac
 	case ",$ALLOWED_DEPLOY_MODES," in *,$DEPLOY_MODE,*) ;; *) fail "Deploy mode is not enabled by profile policy" ;; esac
 	case ",$SERVER_ALLOWED_DEPLOY_MODES," in *,$DEPLOY_MODE,*) ;; *) fail "Deploy mode is not enabled by server policy" ;; esac
 	case "$PRODUCTION_FULL_OPT_IN" in 0|1) ;; *) fail "Invalid production full-mode client opt-in" ;; esac
@@ -242,6 +243,45 @@ assert_mode() {
 	fi
 }
 
+assert_component_selection() {
+	[ -n "$DEPLOY_COMPONENTS" ] || fail "Components mode requires selected components"
+	components_seen=','
+	old_ifs="$IFS"
+	IFS=','
+	for selected_component in $DEPLOY_COMPONENTS; do
+		IFS="$old_ifs"
+		case "$selected_component" in
+			code|db|uploads|plugins|mu-plugins) ;;
+			*) fail "Unknown deploy component" ;;
+		esac
+		case "$components_seen" in
+			*",$selected_component,"*) fail "Duplicate deploy component" ;;
+		esac
+		components_seen=$components_seen$selected_component','
+		IFS=','
+	done
+	IFS="$old_ifs"
+	case ",$DEPLOY_COMPONENTS," in *,plugins,*) [ -n "$PLUGIN_SYNC_PATHS" ] || fail "Components mode requires configured plugin sync paths" ;; esac
+	case ",$DEPLOY_COMPONENTS," in *,mu-plugins,*) [ -n "$MU_PLUGIN_SYNC_PATHS" ] || fail "Components mode requires configured mu-plugin sync paths" ;; esac
+}
+
+component_selected() {
+	case "$DEPLOY_MODE" in
+		components)
+			case ",$DEPLOY_COMPONENTS," in *",$1,"*) return 0 ;; esac
+			return 1
+			;;
+		code) [ "$1" = code ] ;;
+		db) [ "$1" = db ] ;;
+		code-db) [ "$1" = code ] || [ "$1" = db ] ;;
+		uploads) [ "$1" = uploads ] ;;
+		plugins) [ "$1" = plugins ] ;;
+		mu-plugins) [ "$1" = mu-plugins ] ;;
+		full) case "$1" in code|db|uploads|plugins|mu-plugins) return 0 ;; esac; return 1 ;;
+		*) return 1 ;;
+	esac
+}
+
 assert_allowed_modes_subset() {
 	requested="$1"
 	allowed="$2"
@@ -249,7 +289,7 @@ assert_allowed_modes_subset() {
 	IFS=','
 	for mode in $requested; do
 		IFS="$old_ifs"
-		case "$mode" in preflight|code|db|code-db|uploads|plugins|mu-plugins|full) ;; *) fail "Invalid profile deploy mode policy" ;; esac
+		case "$mode" in preflight|code|db|code-db|uploads|plugins|mu-plugins|full|components) ;; *) fail "Invalid profile deploy mode policy" ;; esac
 		case ",$allowed," in *,$mode,*) ;; *) fail "Profile deploy mode is outside server policy" ;; esac
 		IFS=','
 	done
@@ -1249,6 +1289,11 @@ cleanup_backups() {
 }
 
 assert_mode
+if [ "$DEPLOY_MODE" = components ]; then
+	assert_component_selection
+elif [ -n "$DEPLOY_COMPONENTS" ]; then
+	fail "Deploy component selection requires components mode"
+fi
 assert_server_policy
 assert_wordpress_target
 assert_theme_ownership_prerequisites
@@ -1260,7 +1305,7 @@ case "$DEPLOY_MODE" in
 		[ -f "$SERVER_GIT_SSH_KEY" ] || fail "Server Git SSH key was not found"
 		wp_cli --info
 		;;
-	code|db|code-db|uploads|plugins|mu-plugins|full)
+	code|db|code-db|uploads|plugins|mu-plugins|full|components)
 		cleanup_artifacts=1
 		acquire_lock
 		cleanup_stale_temp_files
@@ -1271,28 +1316,15 @@ case "$DEPLOY_MODE" in
 			assert_uploads_delta_baseline || fail 'UPLOADS_DELTA_FALLBACK_REQUIRED: uploads baseline is missing or drifted'
 		fi
 
-		case "$DEPLOY_MODE" in
-			code|plugins|mu-plugins|code-db|full) update_repository ;;
-		esac
-		case "$DEPLOY_MODE" in
-			code|code-db|full) copy_code ;;
-		esac
-		case "$DEPLOY_MODE" in
-			plugins|full) copy_plugins ;;
-		esac
-		case "$DEPLOY_MODE" in
-			mu-plugins|full) copy_mu_plugins ;;
-		esac
-		case "$DEPLOY_MODE" in
-			code) refresh_wordpress_runtime_cache ;;
-		esac
-		case "$DEPLOY_MODE" in
-			uploads)
-				if [ -n "$UPLOADS_DELTA_ZIP" ]; then sync_uploads_delta; else sync_uploads; fi
-				;;
-		esac
-		case "$DEPLOY_MODE" in
-			db|code-db|full)
+		if component_selected code || component_selected plugins || component_selected mu-plugins; then update_repository; fi
+		if component_selected code; then copy_code; fi
+		if component_selected plugins; then copy_plugins; fi
+		if component_selected mu-plugins; then copy_mu_plugins; fi
+		if component_selected code; then refresh_wordpress_runtime_cache; fi
+		if component_selected uploads && ! component_selected db; then
+			if [ -n "$UPLOADS_DELTA_ZIP" ]; then sync_uploads_delta; else sync_uploads; fi
+		fi
+		if component_selected db; then
 				require_cmd wc
 				assert_sql_dump "$SQL_FILE"
 				incoming_kb="$(wc -c < "$SQL_FILE" | awk '{ print int(($1 + 1023) / 1024) }')"
@@ -1302,13 +1334,14 @@ case "$DEPLOY_MODE" in
 				database_mutation_active=1
 				import_database
 				rewrite_wordpress_urls
-				if [ -n "$UPLOADS_DELTA_ZIP" ]; then sync_uploads_delta; elif [ -n "$UPLOADS_ZIP" ]; then sync_uploads; fi
+				if component_selected uploads; then
+					if [ -n "$UPLOADS_DELTA_ZIP" ]; then sync_uploads_delta; elif [ -n "$UPLOADS_ZIP" ]; then sync_uploads; fi
+				fi
 				cleanup_wordpress
 				database_mutation_active=0
 				finalize_database_backup
 				cleanup_backups || true
-				;;
-		esac
+		fi
 		;;
 esac
 

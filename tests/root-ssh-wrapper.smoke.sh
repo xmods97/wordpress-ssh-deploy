@@ -10,7 +10,7 @@ trap 'rm -rf "$tmp"' EXIT
 runner=$tmp/runner.sh
 cat > "$runner" <<'EOF'
 #!/bin/sh
-printf '%s|%s|%s|%s|%s\n' "${DEPLOY_MODE-}" "${PRODUCTION_FULL_OPT_IN-}" "${PLUGIN_SYNC_PATHS-}" "${MU_PLUGIN_SYNC_PATHS-}" "${ALLOWED_DEPLOY_MODES-}" >> "$RUNNER_RECORD"
+printf '%s|%s|%s|%s|%s|%s\n' "${DEPLOY_MODE-}" "${PRODUCTION_FULL_OPT_IN-}" "${PLUGIN_SYNC_PATHS-}" "${MU_PLUGIN_SYNC_PATHS-}" "${ALLOWED_DEPLOY_MODES-}" "${DEPLOY_COMPONENTS-}" >> "$RUNNER_RECORD"
 exit 0
 EOF
 
@@ -68,6 +68,11 @@ grep -F -- "uploads|0|||$component_policy" "$RUNNER_RECORD" >/dev/null
 grep -F -- "plugins|0|wp-content/plugins/example-plugin,wp-content/plugins/second-plugin||$component_policy" "$RUNNER_RECORD" >/dev/null
 grep -F -- "mu-plugins|0||wp-content/mu-plugins/example-loader|$component_policy" "$RUNNER_RECORD" >/dev/null
 
+component_selection_policy="$component_policy,components"
+SSH_ORIGINAL_COMMAND="ENVIRONMENT='production' PLUGIN_SYNC_PATHS='wp-content/plugins/example-plugin' MU_PLUGIN_SYNC_PATHS='wp-content/mu-plugins/example-loader' ALLOWED_DEPLOY_MODES='$component_selection_policy' DEPLOY_MODE='components' DEPLOY_COMPONENTS='mu-plugins,code' PRODUCTION_FULL_OPT_IN='0' sh '$runner'" \
+    "$wrapper" "$config"
+grep -F -- "components|0|wp-content/plugins/example-plugin|wp-content/mu-plugins/example-loader|$component_selection_policy|mu-plugins,code" "$RUNNER_RECORD" >/dev/null
+
 SSH_ORIGINAL_COMMAND="mkdir -p '$tmp/tmp'" \
     "$wrapper" "$config"
 
@@ -115,6 +120,10 @@ expect_reject "ENVIRONMENT='production' MU_PLUGIN_SYNC_PATHS='wp-content/mu-plug
 expect_reject "ENVIRONMENT='production' MU_PLUGIN_SYNC_PATHS='wp-content/plugins/example-plugin' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='mu-plugins' sh '$runner'"
 expect_reject "ENVIRONMENT='production' MU_PLUGIN_SYNC_PATHS='../mu-plugins/example-loader' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='mu-plugins' sh '$runner'"
 expect_reject "ENVIRONMENT='production' MU_PLUGIN_SYNC_PATHS='wp-content/mu-plugins/example-loader,wp-content/plugins/example-plugin' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='mu-plugins' sh '$runner'"
+expect_reject "ENVIRONMENT='production' ALLOWED_DEPLOY_MODES='$component_selection_policy' DEPLOY_MODE='components' DEPLOY_COMPONENTS='code,bogus' sh '$runner'"
+expect_reject "ENVIRONMENT='production' ALLOWED_DEPLOY_MODES='$component_selection_policy' DEPLOY_MODE='components' DEPLOY_COMPONENTS='code,code' sh '$runner'"
+expect_reject "ENVIRONMENT='production' ALLOWED_DEPLOY_MODES='$component_selection_policy' DEPLOY_MODE='components' DEPLOY_COMPONENTS='code' DEPLOY_COMPONENTS='db' sh '$runner'"
+expect_reject "ENVIRONMENT='production' ALLOWED_DEPLOY_MODES='$component_policy' DEPLOY_MODE='components' DEPLOY_COMPONENTS='code' sh '$runner'"
 expect_reject "ENVIRONMENT='production' DEPLOY_MODE='code' PRODUCTION_FULL_OPT_IN='1' sh '$runner'"
 expect_reject "ENVIRONMENT='staging' DEPLOY_MODE='full' PRODUCTION_FULL_OPT_IN='1' sh '$runner'"
 expect_reject "ENVIRONMENT='production' DEPLOY_MODE='full' PRODUCTION_FULL_OPT_IN='0' sh '$runner'"
