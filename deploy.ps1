@@ -8,6 +8,7 @@ param(
 	[switch] $ConfirmUploadsFullSnapshot,
 	[switch] $SkipGit,
 	[switch] $SkipUploads,
+	[switch] $PrepareGitSource,
 	[switch] $PreflightOnly
 )
 
@@ -105,8 +106,14 @@ $hasDatabase = $selectedComponents -contains 'db'
 $hasUploads = $selectedComponents -contains 'uploads'
 $hasPlugins = $selectedComponents -contains 'plugins'
 $hasMuPlugins = $selectedComponents -contains 'mu-plugins'
-if ($Message) {
-	throw 'Automatic Git commit/push was removed. Commit and push separately, then run deploy without Message.'
+if ($PrepareGitSource) {
+	if ($Mode -ne 'code' -or $Components.Count -gt 0 -or $PreflightOnly -or $SkipGit -or $SkipUploads -or $ConfirmUploadsDeletes -or $ConfirmUploadsFullSnapshot -or $UploadsTransferMode -ne 'auto') {
+		throw '-PrepareGitSource is a source-only action; do not combine it with deploy or uploads options.'
+	}
+	if ([string]::IsNullOrWhiteSpace($Message)) { throw '-PrepareGitSource requires a non-empty -Message for the source commit.' }
+	if (-not $DeployConfig.SourceGitPath -or -not $DeployConfig.SourceGitBranch) { throw 'SourceGitPath and SourceGitBranch must be configured for -PrepareGitSource.' }
+} elseif ($Message) {
+	throw 'Message is accepted only with -PrepareGitSource. Use that mode to sync local WordPress source, commit, and push before deployment.'
 }
 if ($SkipUploads) {
 	throw '-SkipUploads is retired. Use code-db for code plus database without uploads.'
@@ -152,6 +159,102 @@ function Publish-UploadsManifestState([string] $SourcePath, [string] $Destinatio
 	}
 }
 
+function Sync-LocalSourceToGit {
+	[CmdletBinding()]
+	param([Parameter(Mandatory = $true)] [string] $CommitMessage)
+
+	$toolStatus = @(Invoke-CommandOutput $DeployConfig.GitPath @('status', '--porcelain', '--untracked-files=all') $repoRoot)
+	if ($toolStatus.Count -gt 0) { throw 'Deployment-tool checkout is dirty. No site source was changed.' }
+	$toolHead = [string](Invoke-CommandOutput $DeployConfig.GitPath @('rev-parse', 'HEAD') $repoRoot)
+	$toolUpstream = [string](Invoke-CommandOutput $DeployConfig.GitPath @('rev-parse', '@{u}') $repoRoot)
+	if ($toolHead.Trim() -cne $toolUpstream.Trim()) { throw 'Deployment-tool checkout is not synchronized with its upstream.' }
+
+	$sourceRoot = [string] $DeployConfig.SourceGitPath
+	Assert-Path $sourceRoot 'Site Git source repository'
+	$resolvedSourceRoot = (Resolve-Path -LiteralPath $sourceRoot).Path.TrimEnd('\')
+	$resolvedToolRoot = (Resolve-Path -LiteralPath $repoRoot).Path.TrimEnd('\')
+	if ($resolvedSourceRoot -ieq $resolvedToolRoot) { throw 'SourceGitPath must point to the site Git repository, not the deployment-tool checkout.' }
+	$branch = [string](Invoke-CommandOutput $DeployConfig.GitPath @('branch', '--show-current') $sourceRoot)
+	if ($branch.Trim() -cne [string] $DeployConfig.SourceGitBranch) {
+		throw "Site Git source branch mismatch: expected '$($DeployConfig.SourceGitBranch)', found '$($branch.Trim())'."
+	}
+	$upstream = [string](Invoke-CommandOutput $DeployConfig.GitPath @('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}') $sourceRoot)
+	if ($upstream.Trim() -cne "origin/$($DeployConfig.SourceGitBranch)") {
+		throw "Site Git source upstream mismatch: expected 'origin/$($DeployConfig.SourceGitBranch)', found '$($upstream.Trim())'."
+	}
+
+	Invoke-CheckedCommand $DeployConfig.GitPath @('fetch', '--quiet') $sourceRoot
+	$head = [string](Invoke-CommandOutput $DeployConfig.GitPath @('rev-parse', 'HEAD') $sourceRoot)
+	$upstreamHead = [string](Invoke-CommandOutput $DeployConfig.GitPath @('rev-parse', '@{u}') $sourceRoot)
+	if ($head.Trim() -cne $upstreamHead.Trim()) {
+		throw 'Site Git source is not exactly synchronized with origin before local-source preparation.'
+	}
+	$preStaged = @(Invoke-CommandOutput $DeployConfig.GitPath @('diff', '--cached', '--name-only') $sourceRoot)
+	if ($preStaged.Count -gt 0) {
+		throw 'Site Git source has pre-staged changes. Nothing was added or committed.'
+	}
+
+	$sourcePaths = @($DeployConfig.SyncPaths) + @($DeployConfig.PluginSyncPaths) + @($DeployConfig.MuPluginSyncPaths)
+	$localManifest = @(Get-DeploymentSourceManifest -RootPath $DeployConfig.LocalWpPath -RelativePaths $sourcePaths)
+	$gitManifest = @(Get-DeploymentSourceManifest -RootPath $sourceRoot -RelativePaths $sourcePaths)
+	$comparison = Compare-UploadsManifests $gitManifest $localManifest
+	if (@($comparison.Deleted).Count -gt 0) {
+		$sampleDeleted = @($comparison.Deleted | Select-Object -First 5) -join ', '
+		throw "Local source is missing tracked deployment files ($sampleDeleted). Automatic source preparation never deletes Git files."
+	}
+	$changedEntries = @($comparison.Added) + @($comparison.Changed)
+	if ($changedEntries.Count -eq 0) {
+		Write-Ok 'Local deployment source already matches the site Git repository; no commit needed.'
+		return
+	}
+
+	$changedPaths = @($changedEntries | ForEach-Object { [string]$_.Path } | Sort-Object -Unique)
+	foreach ($relativePath in $changedPaths) {
+		if (-not (Test-UploadsManifestPath $relativePath)) { throw "Unsafe local source path: $relativePath" }
+		$relativeWindowsPath = $relativePath.Replace('/', '\')
+		$localFile = Join-Path $DeployConfig.LocalWpPath $relativeWindowsPath
+		$gitFile = Join-Path $sourceRoot $relativeWindowsPath
+		if (-not (Test-Path -LiteralPath $localFile -PathType Leaf)) { throw "Local source file not found: $relativePath" }
+		New-Item -ItemType Directory -Force -Path (Split-Path -Parent $gitFile) | Out-Null
+		Copy-Item -LiteralPath $localFile -Destination $gitFile -Force
+	}
+
+	Invoke-CheckedCommand $DeployConfig.GitPath (@('add', '--') + $changedPaths) $sourceRoot
+	$stagedPaths = @(
+		Invoke-CommandOutput $DeployConfig.GitPath @('diff', '--cached', '--name-only') $sourceRoot |
+		ForEach-Object { ([string]$_).Replace('\', '/') }
+	)
+	$expectedStaged = @($changedPaths | Sort-Object -Unique)
+	$unexpectedStaged = @($stagedPaths | Where-Object { $_ -notin $expectedStaged })
+	if ($unexpectedStaged.Count -gt 0) {
+		throw "Unexpected staged source paths: $($unexpectedStaged -join ', '). Nothing was committed."
+	}
+	Invoke-CheckedCommand $DeployConfig.GitPath @('diff', '--cached', '--check') $sourceRoot
+	$stagedDiff = @(Invoke-CommandOutput $DeployConfig.GitPath @('diff', '--cached', '--name-only') $sourceRoot)
+	$sourceAfterCopy = @(Get-DeploymentSourceManifest -RootPath $sourceRoot -RelativePaths $sourcePaths)
+	$copyComparison = Compare-UploadsManifests $sourceAfterCopy $localManifest
+	if ((@($copyComparison.Added).Count + @($copyComparison.Changed).Count + @($copyComparison.Deleted).Count) -ne 0) {
+		throw 'Local WordPress source and site Git working tree still differ after the allowlisted copy.'
+	}
+	if ($stagedDiff.Count -eq 0) {
+		Write-Ok 'Git already contains the normalized local source; no commit needed.'
+		return
+	}
+
+	Write-Step ("Commit local source changes: {0}" -f ($changedPaths -join ', '))
+	Invoke-CheckedCommand $DeployConfig.GitPath @('commit', '-m', $CommitMessage) $sourceRoot
+	Invoke-CheckedCommand $DeployConfig.GitPath @('push') $sourceRoot
+	$head = [string](Invoke-CommandOutput $DeployConfig.GitPath @('rev-parse', 'HEAD') $sourceRoot)
+	$upstreamHead = [string](Invoke-CommandOutput $DeployConfig.GitPath @('rev-parse', '@{u}') $sourceRoot)
+	if ($head.Trim() -cne $upstreamHead.Trim()) { throw 'Site source commit was created, but origin confirmation did not match HEAD.' }
+	$afterManifest = @(Get-DeploymentSourceManifest -RootPath $sourceRoot -RelativePaths $sourcePaths)
+	$afterComparison = Compare-UploadsManifests $afterManifest $localManifest
+	if ((@($afterComparison.Added).Count + @($afterComparison.Changed).Count + @($afterComparison.Deleted).Count) -ne 0) {
+		throw 'Local WordPress source still differs from the pushed site Git source.'
+	}
+	Write-Ok ("Local source committed and pushed: {0}" -f $head.Trim())
+}
+
 function Invoke-RemoteCommandCapture {
 	[CmdletBinding()]
 	param(
@@ -173,6 +276,11 @@ try {
 	Assert-Path $DeployConfig.LocalWpPath 'Local WordPress'
 	Assert-Path (Join-Path $DeployConfig.LocalWpPath 'wp-config.php') 'wp-config.php'
 	if ($hasCode -or $hasPlugins -or $hasMuPlugins) { Assert-Path $DeployConfig.GitPath 'Git' }
+	if ($PrepareGitSource) {
+		Write-Step 'Prepare the approved local WordPress source for Git'
+		Sync-LocalSourceToGit -CommitMessage $Message
+		return
+	}
 	if ($hasDatabase) {
 		Assert-Path $DeployConfig.MysqldumpPath 'mysqldump'
 	}
@@ -182,7 +290,8 @@ try {
 		$sourcePaths = @($DeployConfig.SyncPaths) + @($DeployConfig.PluginSyncPaths) + @($DeployConfig.MuPluginSyncPaths)
 		try {
 			$localSourceManifest = @(Get-DeploymentSourceManifest -RootPath $DeployConfig.LocalWpPath -RelativePaths $sourcePaths)
-			$deploymentSourceManifest = @(Get-DeploymentSourceManifest -RootPath $repoRoot -RelativePaths $sourcePaths)
+			$sourceGitRoot = if ($DeployConfig.SourceGitPath) { [string]$DeployConfig.SourceGitPath } else { $repoRoot }
+			$deploymentSourceManifest = @(Get-DeploymentSourceManifest -RootPath $sourceGitRoot -RelativePaths $sourcePaths)
 			$sourceComparison = Compare-UploadsManifests $deploymentSourceManifest $localSourceManifest
 			$sourceChanges = @($sourceComparison.Added) + @($sourceComparison.Changed) + @($sourceComparison.Deleted)
 			if ($sourceChanges.Count -gt 0) {
@@ -226,6 +335,14 @@ try {
 		$upstreamHead = [string](Invoke-CommandOutput $DeployConfig.GitPath @('rev-parse','@{u}') $repoRoot)
 		if ($localHead.Trim() -ne $upstreamHead.Trim()) {
 			throw 'Local HEAD does not match its upstream. Push or synchronize Git separately before deploy.'
+		}
+		if ($DeployConfig.SourceGitPath) {
+			Assert-Path $DeployConfig.SourceGitPath 'Site Git source repository'
+			$sourceBranch = [string](Invoke-CommandOutput $DeployConfig.GitPath @('branch', '--show-current') $DeployConfig.SourceGitPath)
+			if ($sourceBranch.Trim() -cne [string]$DeployConfig.SourceGitBranch) { throw 'Site source branch does not match the approved deployment branch.' }
+			$sourceHead = [string](Invoke-CommandOutput $DeployConfig.GitPath @('rev-parse', 'HEAD') $DeployConfig.SourceGitPath)
+			$sourceUpstream = [string](Invoke-CommandOutput $DeployConfig.GitPath @('rev-parse', '@{u}') $DeployConfig.SourceGitPath)
+			if ($sourceHead.Trim() -cne $sourceUpstream.Trim()) { throw 'Site source HEAD does not match its upstream.' }
 		}
 	}
 

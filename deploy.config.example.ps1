@@ -18,6 +18,9 @@ $DeployConfig = @{
 
 	MysqldumpPath = 'C:\path\to\mysqldump.exe'
 	GitPath       = 'C:\path\to\git.exe'
+	# Optional local-first source repository. Required only for -PrepareGitSource.
+	# SourceGitPath = 'C:\Sites\example-repository'
+	# SourceGitBranch = 'main'
 
 	SshUser    = 'deploy'
 	SshHost    = 'server.example.com'

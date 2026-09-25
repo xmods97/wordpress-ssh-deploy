@@ -63,6 +63,27 @@ Remote Linux host:
 .\deploy.ps1 -PreflightOnly
 ```
 
+### Preparing a local-first Git source
+
+When the canonical WordPress tree is separate from the deployment-tool
+checkout, set `SourceGitPath` and `SourceGitBranch` in the private profile.
+`-PrepareGitSource` compares only the configured sync paths, copies added or
+changed files from `LocalWpPath`, stages only those exact paths, creates the
+requested commit, and pushes to the configured upstream. It refuses deletions,
+pre-staged changes, a dirty/out-of-date deployment-tool checkout, branch
+mismatches, and non-fast-forward pushes. This source-preparation action does
+not export the database or uploads and does not contact the production host.
+
+```powershell
+.\deploy.ps1 -PrepareGitSource -Message 'Sync approved local WordPress source'
+.\deploy.ps1 -Mode full -UploadsTransferMode full -ConfirmUploadsFullSnapshot -PreflightOnly
+.\deploy.ps1 -Mode full -UploadsTransferMode full -ConfirmUploadsFullSnapshot
+```
+
+The source-preparation step does not synchronize protected files such as
+`.htaccess`; verify their separately managed production state rather than
+adding them to `SyncPaths`.
+
 ### Configuration validation
 
 `deploy.ps1` validates the complete configuration before creating temporary

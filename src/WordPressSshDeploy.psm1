@@ -532,7 +532,7 @@ function Get-DeployConfigurationErrors {
 		'ExpectedRemoteWpPath',
 		'ExpectedRemoteDbName'
 	)
-	$optionalKeys = @('LocalDbPassword', 'SshKeyPath')
+	$optionalKeys = @('LocalDbPassword', 'SshKeyPath', 'SourceGitPath', 'SourceGitBranch')
 	$optionalBooleanKeys = @('AllowProductionFull')
 	$optionalArrayKeys = @('PluginSyncPaths', 'MuPluginSyncPaths', 'AllowedDeployModes')
 	$otherRequiredKeys = @('SshPort', 'KeepBackups', 'MinimumLocalFreeSpaceMB', 'MinimumRemoteFreeSpaceMB', 'SyncPaths')
@@ -563,6 +563,17 @@ function Get-DeployConfigurationErrors {
 		if ($Configuration.Contains($key) -and $null -ne $Configuration[$key] -and $Configuration[$key] -isnot [string]) {
 			Add-ValidationError $errors "Optional configuration value must be a string: $key"
 		}
+	}
+	$hasSourceGitPath = $Configuration.Contains('SourceGitPath') -and -not [string]::IsNullOrWhiteSpace([string]$Configuration.SourceGitPath)
+	$hasSourceGitBranch = $Configuration.Contains('SourceGitBranch') -and -not [string]::IsNullOrWhiteSpace([string]$Configuration.SourceGitBranch)
+	if ($hasSourceGitPath -ne $hasSourceGitBranch) {
+		Add-ValidationError $errors 'SourceGitPath and SourceGitBranch must be configured together.'
+	}
+	if ($hasSourceGitPath -and -not [IO.Path]::IsPathRooted([string]$Configuration.SourceGitPath)) {
+		Add-ValidationError $errors 'SourceGitPath must be an absolute local path when configured.'
+	}
+	if ($hasSourceGitBranch -and ([string]$Configuration.SourceGitBranch -notmatch '^[A-Za-z0-9._/-]+$' -or [string]$Configuration.SourceGitBranch -match '(^/|/$|\.\.)')) {
+		Add-ValidationError $errors 'SourceGitBranch contains unsupported characters or path segments.'
 	}
 	if ($Configuration.Contains('AllowProductionFull') -and $Configuration.AllowProductionFull -isnot [bool]) {
 		Add-ValidationError $errors 'AllowProductionFull must be a Boolean when configured.'

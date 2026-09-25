@@ -45,6 +45,24 @@ Describe 'Deploy configuration validation' {
 		@(Get-DeployConfigurationErrors $config).Count | Should Be 0
 	}
 
+	It 'accepts an explicit local source Git repository and branch pair' {
+		$config = $validConfiguration.Clone()
+		$config.SourceGitPath = 'D:\sites\example'
+		$config.SourceGitBranch = 'codex/example-site'
+		@(Get-DeployConfigurationErrors $config).Count | Should Be 0
+	}
+
+	It 'rejects incomplete or unsafe source Git configuration' {
+		$config = $validConfiguration.Clone()
+		$config.SourceGitPath = 'D:\sites\example'
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'must be configured together'
+		$config.SourceGitBranch = '../main'
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'SourceGitBranch contains unsupported'
+		$config.SourceGitBranch = 'main'
+		$config.SourceGitPath = 'relative\repo'
+		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'SourceGitPath must be an absolute'
+	}
+
 	It 'rejects unknown component capabilities and unsafe plugin paths' {
 		$config = $validConfiguration.Clone()
 		$config.AllowedDeployModes = @('preflight', 'database')

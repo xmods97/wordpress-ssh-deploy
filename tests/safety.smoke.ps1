@@ -7,7 +7,11 @@ $serverScript = Get-Content -LiteralPath (Join-Path $repoRoot 'server-deploy.sh'
 $requiredLocalPatterns = @(
 	"Assert-DeployModeAllowed",
 	"Mode = 'code'",
-	'Automatic Git commit/push was removed',
+	'PrepareGitSource',
+	'Sync-LocalSourceToGit',
+	'SourceGitPath',
+	"'fetch', '--quiet'",
+	"'push'",
 	'finally \{',
 	'MYSQL_PWD'
 )
