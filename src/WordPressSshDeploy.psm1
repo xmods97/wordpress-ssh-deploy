@@ -74,6 +74,19 @@ function Test-UploadsManifestPath {
 	return $true
 }
 
+function Sort-UploadsManifestOrdinal {
+	[CmdletBinding()]
+	param([Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $Manifest)
+
+	$sorted = New-Object 'System.Collections.Generic.List[object]'
+	foreach ($entry in $Manifest) { $sorted.Add($entry) }
+	$sorted.Sort([System.Comparison[object]]{
+		param($left, $right)
+		[string]::CompareOrdinal([string]$left.Path, [string]$right.Path)
+	})
+	return $sorted.ToArray()
+}
+
 function Get-UploadsManifest {
 	[CmdletBinding()]
 	param([Parameter(Mandatory = $true)] [string] $Path)
@@ -94,7 +107,7 @@ function Get-UploadsManifest {
 		$hash = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
 		[pscustomobject]@{ Path = $relative; Size = [long]$item.Length; Sha256 = $hash }
 	}
-	return @($result | Sort-Object -Property Path)
+	return @(Sort-UploadsManifestOrdinal -Manifest @($result))
 }
 
 function Get-DeploymentSourceManifest {
@@ -136,7 +149,7 @@ function Write-UploadsManifest {
 
 	$lines = New-Object System.Collections.Generic.List[string]
 	$previous = $null
-	foreach ($entry in @($Manifest | Sort-Object -Property Path)) {
+	foreach ($entry in @(Sort-UploadsManifestOrdinal -Manifest @($Manifest))) {
 		if ($entry.Path -isnot [string] -or -not (Test-UploadsManifestPath $entry.Path)) { throw "Unsafe uploads manifest path: $($entry.Path)" }
 		if ($null -ne $previous -and [string]::CompareOrdinal($previous, $entry.Path) -ge 0) { throw "Duplicate or unsorted uploads manifest path: $($entry.Path)" }
 		if ([long]$entry.Size -lt 0 -or $entry.Sha256 -notmatch '^[0-9a-fA-F]{64}$') { throw "Invalid uploads manifest entry: $($entry.Path)" }

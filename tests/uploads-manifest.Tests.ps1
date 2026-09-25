@@ -25,6 +25,18 @@ Describe 'Uploads manifest and delta package' {
 		@(Read-UploadsManifest $manifestPath).Count | Should Be 2
 	}
 
+	It 'sorts mixed Latin and Cyrillic paths in the same ordinal order used by manifest validation' {
+		New-Item -ItemType Directory -Force -Path (Join-Path $uploads '2025/12') | Out-Null
+		[IO.File]::WriteAllText((Join-Path $uploads '2025/12/Abbey.jpg'), 'latin')
+		[IO.File]::WriteAllText((Join-Path $uploads '2025/12/Изображение.jpg'), 'cyrillic')
+		$manifest = @(Get-UploadsManifest $uploads)
+		$manifest[0].Path | Should Be '2025/12/Abbey.jpg'
+		$manifest[1].Path | Should Be '2025/12/Изображение.jpg'
+		Write-UploadsManifest $manifest $manifestPath
+		$read = @(Read-UploadsManifest $manifestPath)
+		[Math]::Sign([string]::CompareOrdinal($read[0].Path, $read[1].Path)) | Should Be -1
+	}
+
 	It 'detects zero-change, add, change, delete and rename' {
 		$baseline = @(Get-UploadsManifest $uploads)
 		$comparison = Compare-UploadsManifests $baseline $baseline
