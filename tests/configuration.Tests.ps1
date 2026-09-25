@@ -63,6 +63,12 @@ Describe 'Deploy configuration validation' {
 		(Get-DeployConfigurationErrors $config) -join "`n" | Should Match 'SourceGitPath must be an absolute'
 	}
 
+	It 'exports the safe manifest path validator used by the deployment client' {
+		(Get-Command Test-UploadsManifestPath -ErrorAction SilentlyContinue).CommandType | Should Be Function
+		(Test-UploadsManifestPath 'wp-content/themes/bella-maria-child/style.css') | Should Be $true
+		(Test-UploadsManifestPath '../outside.php') | Should Be $false
+	}
+
 	It 'rejects unknown component capabilities and unsafe plugin paths' {
 		$config = $validConfiguration.Clone()
 		$config.AllowedDeployModes = @('preflight', 'database')
