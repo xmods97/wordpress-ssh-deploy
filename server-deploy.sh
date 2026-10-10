@@ -69,6 +69,7 @@ MU_PLUGIN_SYNC_PATHS="${MU_PLUGIN_SYNC_PATHS:-}"
 ALLOWED_DEPLOY_MODES="${ALLOWED_DEPLOY_MODES:-}"
 PRODUCTION_FULL_OPT_IN="${PRODUCTION_FULL_OPT_IN:-0}"
 KEEP_BACKUPS="${KEEP_BACKUPS:-10}"
+COMPONENT_BACKUP_RETENTION=2
 SQL_FILE="${SQL_FILE:-}"
 UPLOADS_ZIP="${UPLOADS_ZIP:-}"
 UPLOADS_DELTA_ZIP="${UPLOADS_DELTA_ZIP:-}"
@@ -83,6 +84,8 @@ cleanup_artifacts=0
 database_mutation_active=0
 ARCHIVE_LISTING=''
 BACKUP_FILE=''
+COMPONENT_BACKUP_STAGE=''
+RETAINED_COMPONENT_BACKUP=''
 TRANSIENT_NEW=''
 TRANSIENT_OLD=''
 TRANSIENT_TARGET=''
@@ -460,6 +463,9 @@ cleanup_exit() {
 		fi
 		if [ -n "$MYSQL_DEFAULTS_FILE" ]; then
 			case "$MYSQL_DEFAULTS_FILE" in "$SERVER_EXPECTED_TMP_DIR"/*) rm -f "$MYSQL_DEFAULTS_FILE" 2>/dev/null || true ;; esac
+		fi
+		if [ -n "$COMPONENT_BACKUP_STAGE" ]; then
+			case "$COMPONENT_BACKUP_STAGE" in "$BACKUP_DIR"/.component-backup-*.tmp) rm -rf "$COMPONENT_BACKUP_STAGE" 2>/dev/null || true ;; esac
 		fi
 		if [ -n "$TRANSIENT_NEW" ]; then
 			case "$TRANSIENT_NEW" in "$WP_DIR"/*|"$CANONICAL_WP_DIR"/*) rm -rf "$TRANSIENT_NEW" 2>/dev/null || true ;; esac
@@ -912,6 +918,148 @@ copy_mu_plugins() {
 	[ -z "$file_paths" ] || copy_mu_plugin_files "$file_paths"
 }
 
+add_component_backup_target() {
+	COMPONENT_BACKUP_RELATIVE="$1"
+	COMPONENT_BACKUP_COMPONENT="$2"
+	if [ "$COMPONENT_BACKUP_COMPONENT" = uploads ]; then
+		[ "$COMPONENT_BACKUP_RELATIVE" = 'wp-content/uploads' ] || fail "Unsafe uploads backup path"
+	else
+		assert_sync_path "$COMPONENT_BACKUP_RELATIVE" "$COMPONENT_BACKUP_COMPONENT"
+	fi
+	tab="$(printf '\t')"
+	newline="$(printf '\nx')"
+	newline="${newline%x}"
+	case "$COMPONENT_BACKUP_RELATIVE" in *"$tab"*|*"$newline"*) fail "Backup path contains a control character" ;; esac
+	COMPONENT_BACKUP_TARGET="$CANONICAL_WP_DIR/$COMPONENT_BACKUP_RELATIVE"
+	assert_no_symlink_components "$CANONICAL_WP_DIR" "$COMPONENT_BACKUP_RELATIVE"
+	while IFS= read -r existing_backup_path; do
+		[ "$existing_backup_path" = "$COMPONENT_BACKUP_RELATIVE" ] && return 0
+		case "$COMPONENT_BACKUP_RELATIVE" in "$existing_backup_path"/*) fail "Overlapping retained backup paths are not allowed" ;; esac
+		case "$existing_backup_path" in "$COMPONENT_BACKUP_RELATIVE"/*) fail "Overlapping retained backup paths are not allowed" ;; esac
+	done < "$COMPONENT_BACKUP_ROOTS"
+	printf '%s\n' "$COMPONENT_BACKUP_RELATIVE" >> "$COMPONENT_BACKUP_ROOTS"
+	if [ -e "$COMPONENT_BACKUP_TARGET" ] || [ -L "$COMPONENT_BACKUP_TARGET" ]; then
+		[ ! -L "$COMPONENT_BACKUP_TARGET" ] || fail "Backup target must not be a symbolic link"
+		if [ -d "$COMPONENT_BACKUP_TARGET" ]; then
+			COMPONENT_BACKUP_TYPE=directory
+		elif [ -f "$COMPONENT_BACKUP_TARGET" ]; then
+			COMPONENT_BACKUP_TYPE=file
+		else
+			fail "Backup target is not a regular file or directory"
+		fi
+		printf 'target\tpresent\t%s\t%s\n' "$COMPONENT_BACKUP_TYPE" "$COMPONENT_BACKUP_RELATIVE" >> "$COMPONENT_BACKUP_MANIFEST"
+		printf '%s\n' "$COMPONENT_BACKUP_RELATIVE" >> "$COMPONENT_BACKUP_PAYLOAD_PATHS"
+		COMPONENT_BACKUP_SIZE_KB="$(du -sk --apparent-size "$COMPONENT_BACKUP_TARGET" | awk 'NR==1 { print $1 }')"
+		case "$COMPONENT_BACKUP_SIZE_KB" in ''|*[!0-9]*) fail "Retained backup size check failed" ;; esac
+		COMPONENT_BACKUP_ENTRY_LIST="$COMPONENT_BACKUP_STAGE/entry-count"
+		find "$COMPONENT_BACKUP_TARGET" -print > "$COMPONENT_BACKUP_ENTRY_LIST" || fail "Retained backup file count failed"
+		COMPONENT_BACKUP_ENTRIES="$(wc -l < "$COMPONENT_BACKUP_ENTRY_LIST" | awk '{ print $1 }')"
+		rm -f "$COMPONENT_BACKUP_ENTRY_LIST"
+		case "$COMPONENT_BACKUP_ENTRIES" in ''|*[!0-9]*) fail "Retained backup file count is invalid" ;; esac
+		COMPONENT_BACKUP_REQUIRED_KB=$((COMPONENT_BACKUP_REQUIRED_KB + COMPONENT_BACKUP_SIZE_KB + COMPONENT_BACKUP_ENTRIES))
+	else
+		[ "$COMPONENT_BACKUP_COMPONENT" != uploads ] || fail "Uploads backup target was not found"
+		printf 'target\tabsent\t-\t%s\n' "$COMPONENT_BACKUP_RELATIVE" >> "$COMPONENT_BACKUP_MANIFEST"
+	fi
+}
+
+append_component_backup_paths() {
+	paths="$1"
+	component="$2"
+	old_ifs="$IFS"
+	set -f
+	IFS=','
+	for relative in $paths; do
+		IFS="$old_ifs"
+		add_component_backup_target "$relative" "$component"
+		IFS=','
+	done
+	IFS="$old_ifs"
+	set +f
+}
+
+create_retained_component_backup() {
+	if component_selected code && component_selected uploads && component_selected mu-plugins && { [ -n "$UPLOADS_ZIP" ] || [ -n "$UPLOADS_DELTA_ZIP" ]; }; then :; else return 0; fi
+	require_cmd du
+	require_cmd find
+	require_cmd wc
+	require_cmd tar
+	require_cmd sha256sum
+	require_cmd chmod
+	require_cmd chown
+	[ ! -L "$BACKUP_DIR" ] || fail "Backup directory must not be a symbolic link"
+	CANONICAL_WP_DIR="$(CDPATH= cd -P "$WP_DIR" && pwd)" || fail "Could not determine canonical WordPress path"
+	COMPONENT_BACKUP_STAGE="$BACKUP_DIR/.component-backup-$timestamp-$$.tmp"
+	COMPONENT_BACKUP_FINAL="$BACKUP_DIR/component-backup-$timestamp-$$"
+	[ ! -e "$COMPONENT_BACKUP_STAGE" ] && [ ! -L "$COMPONENT_BACKUP_STAGE" ] || fail "Retained backup staging path already exists"
+	[ ! -e "$COMPONENT_BACKUP_FINAL" ] && [ ! -L "$COMPONENT_BACKUP_FINAL" ] || fail "Retained backup path already exists"
+	(umask 077 && mkdir "$COMPONENT_BACKUP_STAGE") || fail "Could not create retained backup staging directory"
+	chmod 700 "$COMPONENT_BACKUP_STAGE"
+	chown root:root "$COMPONENT_BACKUP_STAGE"
+	COMPONENT_BACKUP_ROOTS="$COMPONENT_BACKUP_STAGE/target-roots.txt"
+	COMPONENT_BACKUP_PAYLOAD_PATHS="$COMPONENT_BACKUP_STAGE/payload-paths.txt"
+	COMPONENT_BACKUP_MANIFEST="$COMPONENT_BACKUP_STAGE/manifest.tsv"
+	COMPONENT_BACKUP_REQUIRED_KB=0
+	: > "$COMPONENT_BACKUP_ROOTS"
+	: > "$COMPONENT_BACKUP_PAYLOAD_PATHS"
+	{
+		printf 'format_version\t1\n'
+		printf 'created_at\t%s\n' "$timestamp"
+		printf 'environment\t%s\n' "$SERVER_ENVIRONMENT"
+		printf 'wordpress_url\t%s\n' "$SERVER_EXPECTED_URL"
+		printf 'wordpress_path\t%s\n' "$CANONICAL_WP_DIR"
+	} > "$COMPONENT_BACKUP_MANIFEST"
+	if component_selected code; then append_component_backup_paths "$SYNC_PATHS" code; fi
+	if component_selected plugins && [ -n "$PLUGIN_SYNC_PATHS" ]; then append_component_backup_paths "$PLUGIN_SYNC_PATHS" plugins; fi
+	if component_selected mu-plugins && [ -n "$MU_PLUGIN_SYNC_PATHS" ]; then append_component_backup_paths "$MU_PLUGIN_SYNC_PATHS" mu-plugins; fi
+	if component_selected uploads && { [ -n "$UPLOADS_ZIP" ] || [ -n "$UPLOADS_DELTA_ZIP" ]; }; then
+		add_component_backup_target 'wp-content/uploads' uploads
+	fi
+	COMPONENT_BACKUP_REQUIRED_KB=$((COMPONENT_BACKUP_REQUIRED_KB + 10240))
+	assert_free_space_kb "$BACKUP_DIR" "$COMPONENT_BACKUP_REQUIRED_KB" "Retained component backup filesystem"
+	COMPONENT_BACKUP_ARCHIVE="$COMPONENT_BACKUP_STAGE/asset-backup.tar.tmp"
+	set --
+	while IFS= read -r backup_relative_path; do
+		set -- "$@" "$backup_relative_path"
+	done < "$COMPONENT_BACKUP_PAYLOAD_PATHS"
+	if [ "$#" -gt 0 ]; then
+		tar -C "$CANONICAL_WP_DIR" -cpf "$COMPONENT_BACKUP_ARCHIVE" -- "$@" || fail "Retained component archive creation failed"
+	else
+		tar -C "$CANONICAL_WP_DIR" -cpf "$COMPONENT_BACKUP_ARCHIVE" --files-from /dev/null || fail "Empty retained component archive creation failed"
+	fi
+	[ -s "$COMPONENT_BACKUP_ARCHIVE" ] || fail "Retained component archive is empty"
+	COMPONENT_BACKUP_ARCHIVE_LIST="$COMPONENT_BACKUP_STAGE/archive-list.txt"
+	tar -tf "$COMPONENT_BACKUP_ARCHIVE" > "$COMPONENT_BACKUP_ARCHIVE_LIST" || fail "Retained component archive integrity check failed"
+	while IFS= read -r backup_member || [ -n "$backup_member" ]; do
+		[ -n "$backup_member" ] || fail "Retained component archive contains an empty path"
+		case "$backup_member" in /*|..|../*|*/../*|*/..) fail "Retained component archive contains an unsafe path" ;; esac
+		backup_member="${backup_member%/}"
+		backup_member_matches=0
+		while IFS= read -r backup_root; do
+			case "$backup_member" in "$backup_root"|"$backup_root"/*) backup_member_matches=1; break ;; esac
+		done < "$COMPONENT_BACKUP_ROOTS"
+		[ "$backup_member_matches" -eq 1 ] || fail "Retained component archive contains an unexpected path"
+	done < "$COMPONENT_BACKUP_ARCHIVE_LIST"
+	rm -f "$COMPONENT_BACKUP_ROOTS" "$COMPONENT_BACKUP_PAYLOAD_PATHS" "$COMPONENT_BACKUP_ARCHIVE_LIST"
+	mv "$COMPONENT_BACKUP_ARCHIVE" "$COMPONENT_BACKUP_STAGE/asset-backup.tar"
+	chmod 600 "$COMPONENT_BACKUP_STAGE/manifest.tsv" "$COMPONENT_BACKUP_STAGE/asset-backup.tar"
+	chown root:root "$COMPONENT_BACKUP_STAGE/manifest.tsv" "$COMPONENT_BACKUP_STAGE/asset-backup.tar"
+	(
+		cd "$COMPONENT_BACKUP_STAGE"
+		sha256sum asset-backup.tar > asset-backup.tar.sha256
+		sha256sum -c asset-backup.tar.sha256 >/dev/null
+	) || fail "Retained component archive checksum validation failed"
+	chmod 600 "$COMPONENT_BACKUP_STAGE/asset-backup.tar.sha256"
+	chown root:root "$COMPONENT_BACKUP_STAGE/asset-backup.tar.sha256"
+	chmod 700 "$COMPONENT_BACKUP_STAGE"
+	chown root:root "$COMPONENT_BACKUP_STAGE"
+	mv "$COMPONENT_BACKUP_STAGE" "$COMPONENT_BACKUP_FINAL" || fail "Retained component backup publication failed"
+	COMPONENT_BACKUP_STAGE=''
+	RETAINED_COMPONENT_BACKUP="$COMPONENT_BACKUP_FINAL"
+	printf 'RETAINED_COMPONENT_BACKUP=%s\n' "$RETAINED_COMPONENT_BACKUP"
+	printf 'RETAINED_COMPONENT_BACKUP_SHA256=%s\n' "$(awk 'NR==1 { print $1 }' "$RETAINED_COMPONENT_BACKUP/asset-backup.tar.sha256")"
+}
+
 backup_database() {
 	require_cmd mysqldump
 	name="$(wp_config_value DB_NAME)"
@@ -1068,31 +1216,73 @@ rewrite_wordpress_urls() {
 	esac
 }
 
+# DOS-origin UTF-8 names are recoded by some CentOS unzip builds in UTF-8 locales.
+# C locale preserves ZIP filename bytes, matching the UTF-8 manifest byte paths.
+run_uploads_unzip() (
+	LC_ALL=C
+	LANG=C
+	export LC_ALL LANG
+	unset UNZIP UNZIPOPT ZIPINFO ZIPINFOOPT
+	unzip "$@"
+)
+
+manifest_verify_failure() {
+	printf 'UPLOADS_MANIFEST_VERIFY_FAIL\trow=%s\tpredicate=%s\tpath=%s\texpected=%s\tactual=%s\n' "$manifest_row" "$1" "$relative" "$2" "$3" >&2
+	return 1
+}
+
+emit_selected_upload_artifacts() {
+	if ! component_selected uploads; then return; fi
+	for artifact_kind in zip manifest; do
+		case "$artifact_kind" in
+			zip) artifact_path="$UPLOADS_ZIP"; [ -n "$UPLOADS_DELTA_ZIP" ] && artifact_path="$UPLOADS_DELTA_ZIP" ;;
+			manifest) artifact_path="$UPLOADS_MANIFEST_FILE" ;;
+		esac
+		[ -n "$artifact_path" ] || continue
+		[ -f "$artifact_path" ] && [ ! -L "$artifact_path" ] || fail "Selected uploads $artifact_kind is not a regular file"
+		artifact_bytes="$(stat -c '%s' "$artifact_path")" || fail 'Could not stat uploads artifact'
+		artifact_digest="$(sha256sum "$artifact_path")" || fail 'Could not hash uploads artifact'
+		artifact_digest="${artifact_digest%% *}"
+		printf 'UPLOADS_INPUT\tkind=%s\tpath=%s\tbytes=%s\tsha256=%s\n' "$artifact_kind" "$artifact_path" "$artifact_bytes" "$artifact_digest"
+	done
+}
+
 validate_uploads_manifest_tree() {
 	manifest="$1"
 	root="$2"
-	[ -f "$manifest" ] || return 1
-	[ -d "$root" ] && [ ! -L "$root" ] || return 1
-	if [ -n "$(find "$root" -type l -print -quit)" ]; then return 1; fi
+	manifest_row=0
+	relative=''
+	[ -f "$manifest" ] || { manifest_verify_failure manifest_file regular missing; return 1; }
+	[ -d "$root" ] && [ ! -L "$root" ] || { manifest_verify_failure root directory invalid; return 1; }
+	manifest_link="$(find "$root" -type l -print -quit)"
+	if [ -n "$manifest_link" ]; then relative="${manifest_link#"$root/"}"; manifest_verify_failure symlink absent present; return 1; fi
 	count=0
 	previous=''
+	manifest_carriage_return="$(printf '\r')"
 	while IFS="$(printf '\t')" read -r sha size relative extra; do
-		[ -n "$relative" ] || return 1
-		[ -z "${extra:-}" ] || return 1
-		[ "${#sha}" -eq 64 ] || return 1
-		case "$sha" in *[!0-9A-Fa-f]*) return 1 ;; esac
-		case "$size" in ''|*[!0-9]*) return 1 ;; esac
-		case "$relative" in ''|/*|../*|*/../*|*/..|*//*|*'\t'*) return 1 ;; esac
-		[ -z "$previous" ] || [ "$relative" \> "$previous" ] || return 1
+		manifest_row=$((manifest_row + 1))
+		case "$relative" in
+			*"$manifest_carriage_return") relative="${relative%"$manifest_carriage_return"}" ;;
+		esac
+		[ -n "$relative" ] || { manifest_verify_failure path nonempty empty; return 1; }
+		[ -z "${extra:-}" ] || { manifest_verify_failure columns 3 extra; return 1; }
+		[ "${#sha}" -eq 64 ] || { manifest_verify_failure sha_length 64 "${#sha}"; return 1; }
+		case "$sha" in *[!0-9A-Fa-f]*) manifest_verify_failure sha_format hexadecimal "$sha"; return 1 ;; esac
+		case "$size" in ''|*[!0-9]*) manifest_verify_failure size_format integer "$size"; return 1 ;; esac
+		case "$relative" in ''|/*|../*|*/../*|*/..|*//*|*'\t'*) manifest_verify_failure path safe invalid; return 1 ;; esac
+		[ -z "$previous" ] || [ "$relative" \> "$previous" ] || { manifest_verify_failure order "after:$previous" "$relative"; return 1; }
 		file="$root/$relative"
-		[ -f "$file" ] && [ ! -L "$file" ] || return 1
-		[ "$(stat -c '%s' "$file")" = "$size" ] || return 1
-		[ "$(sha256sum "$file" | awk '{print tolower($1)}')" = "$(printf '%s' "$sha" | tr '[:upper:]' '[:lower:]')" ] || return 1
+		[ -f "$file" ] && [ ! -L "$file" ] || { manifest_verify_failure file regular missing_or_symlink; return 1; }
+		actual_size="$(stat -c '%s' "$file")"
+		[ "$actual_size" = "$size" ] || { manifest_verify_failure size "$size" "$actual_size"; return 1; }
+		actual_sha="$(sha256sum "$file" | awk '{print tolower($1)}')"
+		expected_sha="$(printf '%s' "$sha" | tr '[:upper:]' '[:lower:]')"
+		[ "$actual_sha" = "$expected_sha" ] || { manifest_verify_failure sha256 "$expected_sha" "$actual_sha"; return 1; }
 		previous="$relative"
 		count=$((count + 1))
 	done < "$manifest"
 	actual_count="$(find "$root" -type f | wc -l | tr -d ' ')"
-	[ "$actual_count" = "$count" ] || return 1
+	[ "$actual_count" = "$count" ] || { relative=''; manifest_verify_failure count "$count" "$actual_count"; return 1; }
 }
 
 install_uploads_manifest() {
@@ -1165,19 +1355,19 @@ sync_uploads_delta() {
 	old="$transient_root/uploads.__old__"
 	current="$canonical_wp_for_uploads/wp-content/uploads"
 	[ ! -L "$new" ] && [ ! -L "$old" ] && [ ! -L "$current" ] || fail "Uploads paths must not be symbolic links"
-	unzip -tq "$UPLOADS_DELTA_ZIP" >/dev/null || fail "Uploads delta archive integrity check failed"
+	run_uploads_unzip -tq "$UPLOADS_DELTA_ZIP" >/dev/null || fail "Uploads delta archive integrity check failed"
 	UPLOADS_DELTA_STAGE="$SERVER_EXPECTED_TMP_DIR/uploads-delta-$timestamp.$$"
 	rm -rf "$UPLOADS_DELTA_STAGE"
 	mkdir -p "$UPLOADS_DELTA_STAGE"
 	ARCHIVE_LISTING="$SERVER_EXPECTED_TMP_DIR/uploads-delta-$timestamp.list"
-	unzip -Z1 "$UPLOADS_DELTA_ZIP" > "$ARCHIVE_LISTING"
+	run_uploads_unzip -Z1 "$UPLOADS_DELTA_ZIP" > "$ARCHIVE_LISTING"
 	while IFS= read -r entry; do
 		case "$entry" in manifest.tsv|delete.list|payload/|payload/*) ;; *) fail "Uploads delta archive contains an unsafe entry" ;; esac
 		case "$entry" in *'..'*|/*|*'//'*) fail "Uploads delta archive contains an unsafe path" ;; esac
 	done < "$ARCHIVE_LISTING"
 	rm -f "$ARCHIVE_LISTING"
 	ARCHIVE_LISTING=''
-	unzip -q "$UPLOADS_DELTA_ZIP" -d "$UPLOADS_DELTA_STAGE"
+	run_uploads_unzip -q "$UPLOADS_DELTA_ZIP" -d "$UPLOADS_DELTA_STAGE"
 	[ -f "$UPLOADS_DELTA_STAGE/manifest.tsv" ] && [ -f "$UPLOADS_DELTA_STAGE/delete.list" ] || fail "Uploads delta metadata is incomplete"
 	cmp -s "$UPLOADS_DELTA_STAGE/manifest.tsv" "$UPLOADS_MANIFEST_FILE" || fail "Uploads delta manifest does not match sidecar"
 	if [ -n "$(find "$UPLOADS_DELTA_STAGE" -type l -print -quit)" ]; then fail "Uploads delta archive contains a symbolic link"; fi
@@ -1235,20 +1425,20 @@ sync_uploads() {
 	current="$canonical_wp_for_uploads/wp-content/uploads"
 	ARCHIVE_LISTING="$SERVER_EXPECTED_TMP_DIR/uploads-$timestamp.list"
 	[ ! -L "$new" ] && [ ! -L "$old" ] && [ ! -L "$current" ] || fail "Uploads paths must not be symbolic links"
-	unzip -tq "$UPLOADS_ZIP" >/dev/null || fail "Uploads archive integrity check failed"
-	unzip -Z1 "$UPLOADS_ZIP" > "$ARCHIVE_LISTING"
+	run_uploads_unzip -tq "$UPLOADS_ZIP" >/dev/null || fail "Uploads archive integrity check failed"
+	run_uploads_unzip -Z1 "$UPLOADS_ZIP" > "$ARCHIVE_LISTING"
 	while IFS= read -r entry; do
 		case "$entry" in ''|/*|../*|*/../*|*/..) fail "Uploads archive contains an unsafe path" ;; esac
 	done < "$ARCHIVE_LISTING"
 	rm -f "$ARCHIVE_LISTING"
 	ARCHIVE_LISTING=''
-	uncompressed_kb="$(unzip -l "$UPLOADS_ZIP" | awk 'END { print int(($1 + 1023) / 1024) }')"
+	uncompressed_kb="$(run_uploads_unzip -l "$UPLOADS_ZIP" | awk 'END { print int(($1 + 1023) / 1024) }')"
 	case "$uncompressed_kb" in ''|*[!0-9]*) fail "Uploads size check failed" ;; esac
 	assert_free_space_kb "$WP_DIR" "$uncompressed_kb" "WordPress filesystem"
 	rm -rf "$new" "$old"
 	TRANSIENT_TARGET="$current"; TRANSIENT_NEW="$new"; TRANSIENT_OLD="$old"
 	mkdir -p "$new"
-	unzip -q "$UPLOADS_ZIP" -d "$new"
+	run_uploads_unzip -q "$UPLOADS_ZIP" -d "$new"
 	find "$new" -type f -print | grep -q . || fail "Uploads archive contains no files"
 	if [ -n "$UPLOADS_MANIFEST_FILE" ]; then
 		validate_uploads_manifest_tree "$UPLOADS_MANIFEST_FILE" "$new" || fail "Uploads manifest verification failed"
@@ -1305,6 +1495,26 @@ cleanup_backups() {
 	done
 }
 
+cleanup_component_backups() {
+	retained_count=0
+	find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -name 'component-backup-*' -print |
+	LC_ALL=C sort -r |
+	while IFS= read -r backup_dir; do
+		case "$backup_dir" in
+			"$BACKUP_DIR"/component-backup-*)
+				[ -d "$backup_dir" ] && [ ! -L "$backup_dir" ] || continue
+				[ -s "$backup_dir/asset-backup.tar" ] && [ -s "$backup_dir/manifest.tsv" ] && [ -s "$backup_dir/asset-backup.tar.sha256" ] || continue
+				(cd "$backup_dir" && sha256sum -c asset-backup.tar.sha256 >/dev/null) || continue
+				if [ "$retained_count" -lt "$COMPONENT_BACKUP_RETENTION" ]; then
+					retained_count=$((retained_count + 1))
+				else
+					rm -rf -- "$backup_dir"
+				fi
+				;;
+		esac
+	done
+}
+
 assert_mode
 if [ "$DEPLOY_MODE" = components ]; then
 	assert_component_selection
@@ -1317,15 +1527,207 @@ assert_wordpress_target
 assert_theme_ownership_prerequisites
 assert_runtime_cache_ownership_prerequisites
 
+inventory_file_record() {
+	inventory_file_path="$1"
+	inventory_relative_path="$2"
+	inventory_tab="$(printf '\t')"
+	case "$inventory_relative_path" in
+		*"$inventory_tab"*|*'
+'*) fail "Inventory path contains an unsupported tab or newline" ;;
+	esac
+	inventory_file_bytes="$(stat -c '%s' -- "$inventory_file_path")" || fail "Could not read inventory file size"
+	if [ -L "$inventory_file_path" ]; then
+		require_cmd readlink
+		inventory_file_type='symlink'
+		inventory_link_text="$(readlink "$inventory_file_path")" || fail "Could not read inventory symlink target"
+		inventory_hash_output="$(printf '%s\n' "$inventory_link_text" | sha256sum)" || fail "Could not hash inventory symlink target"
+	else
+		inventory_file_type='file'
+		inventory_hash_output="$(sha256sum -- "$inventory_file_path")" || fail "Could not hash inventory file"
+	fi
+	inventory_file_sha256="${inventory_hash_output%% *}"
+	case "$inventory_file_sha256" in
+		''|*[!0123456789abcdefABCDEF]*) fail "Inventory SHA-256 output was malformed" ;;
+	esac
+	[ "${#inventory_file_sha256}" -eq 64 ] || fail "Inventory SHA-256 output was malformed"
+	printf '%s\t%s\t%s\t%s\n' "$inventory_relative_path" "$inventory_file_type" "$inventory_file_bytes" "$inventory_file_sha256"
+}
+
+emit_inventory_tree() {
+	inventory_category="$1"
+	inventory_relative="$2"
+	inventory_path="$WP_DIR/$inventory_relative"
+	if [ -L "$inventory_path" ]; then
+		printf 'INVENTORY_TREE\t%s\t%s\tsymlink\n' "$inventory_category" "$inventory_relative"
+		return 0
+	fi
+	if [ ! -e "$inventory_path" ]; then
+		printf 'INVENTORY_TREE\t%s\t%s\tmissing\n' "$inventory_category" "$inventory_relative"
+		return 0
+	fi
+	if [ -d "$inventory_path" ]; then
+		inventory_tab="$(printf '\t')"
+		inventory_sources="$(find "$inventory_path" \( -type f -o -type l \) -printf '%P\t%y\n')" || fail "Could not inventory $inventory_category files"
+		inventory_sources="$(printf '%s\n' "$inventory_sources" | LC_ALL=C sort)" || fail "Could not sort $inventory_category inventory"
+		inventory_listing=''
+		if [ -n "$inventory_sources" ]; then
+			inventory_listing="$(printf '%s\n' "$inventory_sources" | while IFS="$inventory_tab" read -r inventory_name inventory_source_type inventory_extra; do
+				[ -n "$inventory_name" ] || fail "Could not parse $inventory_category inventory path"
+				[ -z "$inventory_extra" ] || fail "Inventory path contains an unsupported tab or newline"
+				case "$inventory_source_type" in
+					f|l) ;;
+					*) fail "Unsupported file type in $inventory_category inventory" ;;
+				esac
+				inventory_record="$(inventory_file_record "$inventory_path/$inventory_name" "$inventory_relative/$inventory_name")" || fail "Could not hash $inventory_category file"
+				printf '%s\n' "$inventory_record"
+			done)" || fail "Could not hash $inventory_category inventory"
+		fi
+	else
+		inventory_listing="$(inventory_file_record "$inventory_path" "$inventory_relative")" || fail "Could not hash $inventory_category file"
+	fi
+	inventory_count="$(printf '%s\n' "$inventory_listing" | awk 'NF { count++ } END { print count + 0 }')"
+	inventory_manifest_output="$(printf '%s\n' "$inventory_listing" | LC_ALL=C sort | sha256sum)" || fail "Could not hash $inventory_category manifest"
+	inventory_manifest_sha256="${inventory_manifest_output%% *}"
+	printf 'INVENTORY_TREE\t%s\t%s\tfiles=%s\tmanifest_sha256=%s\n' "$inventory_category" "$inventory_relative" "$inventory_count" "$inventory_manifest_sha256"
+	if [ -n "$inventory_listing" ]; then
+		printf '%s\n' "$inventory_listing" | while IFS="$(printf '\t')" read -r inventory_name inventory_file_type inventory_bytes inventory_file_sha256; do
+			printf 'INVENTORY_FILE\t%s\t%s\t%s\t%s\t%s\n' "$inventory_category" "$inventory_name" "$inventory_file_type" "$inventory_bytes" "$inventory_file_sha256"
+		done
+	fi
+}
+
+emit_backup_retention_preview() {
+	if [ -L "$BACKUP_DIR" ] || [ ! -d "$BACKUP_DIR" ]; then
+		printf 'INVENTORY_RETENTION_PREVIEW\tstatus=unavailable\treason=backup_directory_not_regular\n'
+		return 0
+	fi
+	printf 'INVENTORY_RETENTION_PREVIEW\tafter=successful_full_release\tnew_db_backup=1\tnew_asset_backup=1\tkeep_db=%s\tkeep_assets=%s\n' "$KEEP_BACKUPS" "$COMPONENT_BACKUP_RETENTION"
+	inventory_db_candidates="$(find "$BACKUP_DIR" -type f -name 'db-*.sql*' -print)" || fail "Could not preview database backup retention"
+	inventory_db_backups="$(printf '%s\n' "$inventory_db_candidates" | while IFS= read -r inventory_db_file; do
+		case "$inventory_db_file" in
+			"$BACKUP_DIR"/db-*.sql|"$BACKUP_DIR"/db-*.sql.gz) printf '%s\n' "$inventory_db_file" ;;
+		esac
+	done)"
+	inventory_db_backups="$(printf '%s\n' "$inventory_db_backups" | LC_ALL=C sort -r)" || fail "Could not sort database backup retention preview"
+	inventory_db_number=0
+	if [ -n "$inventory_db_backups" ]; then
+		printf '%s\n' "$inventory_db_backups" | while IFS= read -r inventory_db_file; do
+			inventory_db_number=$((inventory_db_number + 1))
+			inventory_db_relative="${inventory_db_file#"$BACKUP_DIR"/}"
+			if [ "$inventory_db_number" -lt "$KEEP_BACKUPS" ]; then inventory_db_action='keep_after_success'; else inventory_db_action='prune_after_success'; fi
+			printf 'INVENTORY_DB_BACKUP_RETENTION\t%s\t%s\n' "$inventory_db_relative" "$inventory_db_action"
+		done
+	fi
+	inventory_component_dirs="$(find "$BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d -name 'component-backup-*' -print)" || fail "Could not preview asset backup retention"
+	inventory_component_dirs="$(printf '%s\n' "$inventory_component_dirs" | LC_ALL=C sort -r)" || fail "Could not sort asset backup retention preview"
+	inventory_component_number=0
+	if [ -n "$inventory_component_dirs" ]; then
+		printf '%s\n' "$inventory_component_dirs" | while IFS= read -r inventory_component_dir; do
+			inventory_component_relative="${inventory_component_dir#"$BACKUP_DIR"/}"
+			if [ -s "$inventory_component_dir/asset-backup.tar" ] && [ -s "$inventory_component_dir/manifest.tsv" ] && [ -s "$inventory_component_dir/asset-backup.tar.sha256" ] && (cd "$inventory_component_dir" && sha256sum -c asset-backup.tar.sha256 >/dev/null 2>&1); then
+				inventory_component_number=$((inventory_component_number + 1))
+				if [ "$inventory_component_number" -lt "$COMPONENT_BACKUP_RETENTION" ]; then inventory_component_action='keep_after_success'; else inventory_component_action='prune_after_success'; fi
+			else
+				inventory_component_action='ineligible_not_pruned'
+			fi
+			printf 'INVENTORY_COMPONENT_BACKUP_RETENTION\t%s\t%s\n' "$inventory_component_relative" "$inventory_component_action"
+		done
+	fi
+}
+
+emit_temp_directory_inventory() {
+	printf 'INVENTORY_TMP_BEGIN\tpath=%s\tmax_depth=2\tmax_entries=200\tfields=type,size,mtime,name\n' "$SERVER_EXPECTED_TMP_DIR"
+	if [ -L "$SERVER_EXPECTED_TMP_DIR" ]; then
+		printf 'INVENTORY_TMP_STATUS\tsymlink\n'
+	elif [ ! -d "$SERVER_EXPECTED_TMP_DIR" ]; then
+		printf 'INVENTORY_TMP_STATUS\tmissing\n'
+	else
+		LC_ALL=C find "$SERVER_EXPECTED_TMP_DIR" -mindepth 1 -maxdepth 2 -exec stat --printf='INVENTORY_TMP\t%F\t%s\t%y\t%N\n' -- {} \; 2>&1 |
+			awk -v limit=200 '
+				BEGIN { entries = 0; errors = 0; truncated = 0 }
+				/^(find|stat): / {
+					errors++
+					if (errors <= 10) print "INVENTORY_TMP_WARNING\t" $0
+					next
+				}
+				{
+					entries++
+					if (entries <= limit) { print; next }
+					truncated = 1
+					exit
+				}
+				END {
+					if (truncated) print "INVENTORY_TMP_TRUNCATED\t1"
+					else print "INVENTORY_TMP_TRUNCATED\t0"
+					if (errors > 0) print "INVENTORY_TMP_ERRORS\t" errors
+				}
+			'
+	fi
+	printf 'INVENTORY_TMP_END\n'
+}
+
+emit_readonly_inventory() {
+	require_cmd df
+	require_cmd find
+	require_cmd sort
+	require_cmd stat
+	require_cmd sha256sum
+	printf 'INVENTORY_BEGIN\n'
+	printf 'INVENTORY_TARGET\turl=%s\twp_dir=%s\tdb_name=%s\n' "$SERVER_EXPECTED_URL" "$SERVER_EXPECTED_WP_DIR" "$SERVER_EXPECTED_DB_NAME"
+	printf 'INVENTORY_POLICY\tenvironment=%s\tallowed_modes=%s\tfull_optin=%s\tkeep_db_backups=%s\tkeep_asset_backups=%s\tmin_free_mb=%s\n' "$SERVER_ENVIRONMENT" "$SERVER_ALLOWED_DEPLOY_MODES" "${SERVER_ALLOW_PRODUCTION_FULL:-0}" "$SERVER_KEEP_BACKUPS" "$COMPONENT_BACKUP_RETENTION" "$SERVER_MIN_FREE_SPACE_MB"
+	printf 'INVENTORY_SYNC_PATHS\ttheme=%s\tmu_plugins=%s\tplugins=%s\n' "$SERVER_SYNC_PATHS" "$SERVER_MU_PLUGIN_SYNC_PATHS" "$SERVER_PLUGIN_SYNC_PATHS"
+	runner_sha256="$(sha256sum "$0" | awk '{ print $1 }')" || fail "Could not hash the active deployment runner"
+	printf 'INVENTORY_RUNNER\tpath=%s\tsha256=%s\n' "$SCRIPT_DIR/server-deploy.sh" "$runner_sha256"
+	emit_temp_directory_inventory
+	inventory_backup_fs="$BACKUP_DIR"
+	if [ ! -d "$inventory_backup_fs" ] || [ -L "$inventory_backup_fs" ]; then inventory_backup_fs="${BACKUP_DIR%/*}"; fi
+	inventory_df="$(df -Pk "$WP_DIR" "$inventory_backup_fs")" || fail "Could not read filesystem free space"
+	printf '%s\n' "$inventory_df" | sed 's/^/INVENTORY_DF\t/'
+	inventory_tables="$(wp_cli db tables --all-tables)" || fail "Could not read database table names"
+	if [ -n "$inventory_tables" ]; then
+		printf '%s\n' "$inventory_tables" | LC_ALL=C sort | while IFS= read -r inventory_table; do printf 'INVENTORY_DB_TABLE\t%s\n' "$inventory_table"; done
+	fi
+	if [ -L "$BACKUP_DIR" ]; then
+		printf 'INVENTORY_BACKUP_DIR\tsymlink\n'
+	elif [ -d "$BACKUP_DIR" ]; then
+		inventory_backup_names="$(find "$BACKUP_DIR" -mindepth 1 -maxdepth 3 -type f -print)" || fail "Could not inventory backup files"
+		inventory_backup_names="$(printf '%s\n' "$inventory_backup_names" | LC_ALL=C sort)"
+		if [ -n "$inventory_backup_names" ]; then
+			printf '%s\n' "$inventory_backup_names" | while IFS= read -r inventory_backup_file; do
+				inventory_backup_relative="${inventory_backup_file#"$BACKUP_DIR"/}"
+				inventory_backup_record="$(inventory_file_record "$inventory_backup_file" "$inventory_backup_relative")" || fail "Could not hash backup file"
+				printf 'INVENTORY_BACKUP\t%s\n' "$inventory_backup_record"
+			done
+		else
+			printf 'INVENTORY_BACKUP_DIR\tempty\n'
+		fi
+	else
+		printf 'INVENTORY_BACKUP_DIR\tmissing\n'
+	fi
+	emit_backup_retention_preview
+	old_ifs="$IFS"
+	IFS=' '
+	for inventory_relative in $SERVER_SYNC_PATHS; do emit_inventory_tree theme "$inventory_relative"; done
+	for inventory_relative in $SERVER_MU_PLUGIN_SYNC_PATHS; do emit_inventory_tree mu-plugin "$inventory_relative"; done
+	for inventory_relative in $SERVER_PLUGIN_SYNC_PATHS; do emit_inventory_tree plugin "$inventory_relative"; done
+	IFS="$old_ifs"
+	emit_inventory_tree uploads wp-content/uploads
+	printf 'INVENTORY_END\n'
+}
+
 case "$DEPLOY_MODE" in
 	preflight)
 		require_cmd git
 		[ -f "$SERVER_GIT_SSH_KEY" ] || fail "Server Git SSH key was not found"
 		wp_cli --info
+		if [ "$SERVER_ENVIRONMENT" = production ] && [ "${SERVER_ALLOW_PRODUCTION_FULL:-0}" = 1 ]; then
+			emit_readonly_inventory
+		fi
 		;;
 	code|db|code-db|uploads|plugins|mu-plugins|full|components)
 		cleanup_artifacts=1
 		acquire_lock
+		emit_selected_upload_artifacts
 		cleanup_stale_temp_files
 		mkdir -p "$BACKUP_DIR"
 		assert_free_space_kb "$WP_DIR" 0 "WordPress filesystem"
@@ -1334,6 +1736,7 @@ case "$DEPLOY_MODE" in
 			assert_uploads_delta_baseline || fail 'UPLOADS_DELTA_FALLBACK_REQUIRED: uploads baseline is missing or drifted'
 		fi
 
+		create_retained_component_backup
 		if component_selected code || component_selected plugins || component_selected mu-plugins; then update_repository; fi
 		if component_selected code; then copy_code; fi
 		if component_selected plugins; then copy_plugins; fi
@@ -1362,5 +1765,7 @@ case "$DEPLOY_MODE" in
 		fi
 		;;
 esac
+
+if [ "$cleanup_artifacts" -eq 1 ] && [ -n "$RETAINED_COMPONENT_BACKUP" ]; then cleanup_component_backups || true; fi
 
 echo "WordPress deployment completed ($DEPLOY_MODE)"

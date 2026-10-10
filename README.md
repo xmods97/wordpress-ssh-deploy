@@ -110,8 +110,15 @@ It also pins the Git SSH key, PHP/WP-CLI executables, synchronized paths, backup
 retention, and lock location. Client-provided expected values cannot replace
 this policy. Production capabilities remain fail-closed until explicitly enabled
 in both the client profile and server policy. The server validates its policy and
-the actual WordPress target before updating the deployment repository. The
-installed runner and policy live outside the writable Git checkout so a pull
+the actual WordPress target before updating the deployment repository.
+
+When production full mode is enabled, a read-only preflight reports the target,
+server policy, free space, database table names, configured code/MU-plugin/plugin
+and uploads file paths with per-file SHA-256 values, backup file hashes, and the
+backup retention result expected after a successful full release. Hashing reads
+the listed files but does not create a lock, backup, or temporary artifact.
+
+The installed runner and policy live outside the writable Git checkout so a pull
 cannot replace them.
 
 ### Internal structure
@@ -139,6 +146,9 @@ cannot replace them.
 # and applied; all other components remain untouched.
 .\deploy.ps1 -Mode components -Components code,db
 .\deploy.ps1 -Mode components -Components mu-plugins
+
+# One coordinated release with a full local uploads snapshot and its manifest
+.\deploy.ps1 -Mode components -Components code,db,uploads,plugins,mu-plugins -UploadsTransferMode full -ConfirmUploadsFullSnapshot
 ```
 
 `full` and `code-db` are presets. `components` requires at least one value from
@@ -148,6 +158,8 @@ contract through the wrapper to the runner. A plugin or MU-plugin selection stil
 requires its configured allowlist paths. In production, a `components` selection
 that combines `db` with `uploads`, `plugins`, or `mu-plugins` also requires the
 same explicit client and server full-deploy opt-in as `full`.
+The all-component example above replaces the remote uploads tree from the local
+snapshot; the accompanying manifest is checked against the extracted files.
 
 Code deployment never creates commits or pushes. Commit and push separately
 before running deploy. For `code` and `full`, the local checkout must be clean
@@ -171,6 +183,26 @@ message; `-SkipGit` is retained for database-only selections.
 Before creating or accepting artifacts, both sides check their configured free
 space reserve. SQL dumps and ZIP archives are validated before use. Code and
 uploads are staged in temporary directories and swapped only after preparation.
+Before a full-equivalent code, MU-plugin, and uploads replacement, the runner
+also creates a separate retained asset snapshot under `BACKUP_DIR`. It contains
+the complete configured target paths and the current uploads tree when an
+uploads archive is included, plus a TSV manifest and SHA-256 sidecar. The archive is checked
+with `tar -t` and `sha256sum` before publication; its directory is mode `700`
+and its files are mode `600`, owned by root. The runner checks the backup
+filesystem for the estimated archive size plus its configured free-space
+reserve and stops before changing the site if space is insufficient.
+
+After a successful full-equivalent asset deployment, the runner keeps the two
+newest verified full asset snapshots. Failed deployments do not run retention,
+so their recovery snapshot remains available. Database SQL backups keep their
+existing separate retention policy. The asset manifest records whether each target
+existed before deployment. For a separately approved restore, verify
+`asset-backup.tar.sha256`, remove each current target listed in the manifest,
+extract listed `present` targets from `asset-backup.tar` into the configured
+WordPress root, and leave targets marked `absent` removed. Extracting over a
+live directory without first replacing it can leave files from the failed
+release behind.
+
 If a database import fails, the server immediately attempts to restore the
 backup created in the same operation. After a successful rollback, ordinary
 backup retention is applied before the runner exits with the rollback result.

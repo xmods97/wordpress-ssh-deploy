@@ -9,10 +9,25 @@ param(
 	[switch] $SkipGit,
 	[switch] $SkipUploads,
 	[switch] $PrepareGitSource,
-	[switch] $PreflightOnly
+	[switch] $PreflightOnly,
+	[string] $LocalLinuxUnzipPath = '/usr/bin/unzip',
+	[switch] $StageBellaRunnerCandidate,
+	[string] $RunnerCandidatePath,
+	[string] $InstallerCandidatePath
 )
 
 $ErrorActionPreference = 'Stop'
+
+$stageOnlyParameters = @('StageBellaRunnerCandidate', 'RunnerCandidatePath', 'InstallerCandidatePath')
+if ($StageBellaRunnerCandidate) {
+	$unexpectedStageParameters = @($PSBoundParameters.Keys | Where-Object { $_ -notin $stageOnlyParameters })
+	if ($unexpectedStageParameters.Count -gt 0) { throw "-StageBellaRunnerCandidate cannot be combined with: $($unexpectedStageParameters -join ', ')." }
+	if ([string]::IsNullOrWhiteSpace($RunnerCandidatePath) -or [string]::IsNullOrWhiteSpace($InstallerCandidatePath)) {
+		throw '-StageBellaRunnerCandidate requires both -RunnerCandidatePath and -InstallerCandidatePath.'
+	}
+} elseif ($PSBoundParameters.ContainsKey('RunnerCandidatePath') -or $PSBoundParameters.ContainsKey('InstallerCandidatePath')) {
+	throw 'Runner candidate paths require -StageBellaRunnerCandidate.'
+}
 
 function Write-Step([string] $Text) { Write-Host "`n==> $Text" -ForegroundColor Cyan }
 function Write-Ok([string] $Text) { Write-Host "OK  $Text" -ForegroundColor Green }
@@ -84,6 +99,7 @@ if (-not (Test-Path -LiteralPath $configPath)) {
 	throw 'Missing deploy.config.ps1. Copy deploy.config.example.ps1 and fill in your values.'
 }
 Import-Module $modulePath -Force
+. (Join-Path $repoRoot 'tools\UploadsPackageValidation.ps1')
 . $configPath
 if (-not $DeployConfig) { throw 'deploy.config.ps1 must define $DeployConfig.' }
 Assert-DeployConfiguration -Configuration $DeployConfig
@@ -264,11 +280,110 @@ function Invoke-RemoteCommandCapture {
 	)
 	Push-Location $WorkingDirectory
 	try {
-		$output = @(& $FilePath @Arguments 2>&1)
-		$exitCode = $LASTEXITCODE
+		$previousNativeErrorPreference = $ErrorActionPreference
+		try { $ErrorActionPreference = 'Continue'; $output = @(& $FilePath @Arguments 2>&1); $exitCode = $LASTEXITCODE }
+		finally { $ErrorActionPreference = $previousNativeErrorPreference }
 		$output | ForEach-Object { Write-Host ([string]$_) }
 		return [pscustomobject]@{ ExitCode = $exitCode; Output = ($output -join "`n") }
 	} finally { Pop-Location }
+}
+
+function Assert-BellaRunnerStageProfile {
+	[CmdletBinding()]
+	param([Parameter(Mandatory = $true)] [System.Collections.IDictionary] $Configuration)
+
+	$remoteUrl = ([string]$Configuration.RemoteUrl).Trim().TrimEnd('/')
+	if (([string]$Configuration.Environment) -ine 'production' -or
+		([string]$Configuration.SshUser) -ine 'root' -or
+		$remoteUrl -ine 'https://bella-maria.com' -or
+		([string]$Configuration.ExpectedRemoteDomain) -ine 'bella-maria.com' -or
+		([string]$Configuration.RemoteTmpPath) -cne '/root/.wordpress-ssh-deploy/bella-maria/tmp') {
+		throw 'Runner staging is restricted to the Bella Maria Production root profile and its configured temporary directory.'
+	}
+}
+
+function Get-BellaRunnerCandidateFileHash {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory = $true)] [string] $Path,
+		[Parameter(Mandatory = $true)] [string] $ExpectedName,
+		[switch] $RequireExpectedName
+	)
+
+	if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Runner candidate file not found: $Path" }
+	$item = Get-Item -LiteralPath $Path -Force
+	if ($RequireExpectedName -and $item.Name -cne $ExpectedName) { throw "Unexpected candidate filename: $($item.Name); expected $ExpectedName." }
+	if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Runner candidate must not be a reparse point: $Path" }
+	return (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToUpperInvariant()
+}
+
+function Invoke-BellaRunnerCandidateStage {
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory = $true)] [string] $RunnerCandidatePath,
+		[Parameter(Mandatory = $true)] [string] $InstallerCandidatePath,
+		[Parameter(Mandatory = $true)] [string] $RemoteTmpPath,
+		[Parameter(Mandatory = $true)] [string] $Target,
+		[Parameter(Mandatory = $true)] [string[]] $ScpArguments,
+		[Parameter(Mandatory = $true)] [string] $WorkingDirectory
+	)
+
+	$candidates = @(
+		[pscustomobject]@{ SourcePath = $RunnerCandidatePath; ExpectedName = 'server-deploy.sh'; RemoteSuffix = 'server-deploy.sh.new'; ExpectedHash = '22FE072BFEF6C9637FA7B23467B8AFF5E454A572A58EF387C2053108D5B3D467'; LocalReadbackName = 'server-deploy.sh.new'; ActualHash = '' },
+		[pscustomobject]@{ SourcePath = $InstallerCandidatePath; ExpectedName = 'bella-runner-install.sh'; RemoteSuffix = 'bella-runner-install.sh'; ExpectedHash = '898AD0410257435B3174E4A9FDAA9D74698B673B77C06EF0B388F2103DE5B98B'; LocalReadbackName = 'bella-runner-install.sh'; ActualHash = '' }
+	)
+
+	foreach ($candidate in $candidates) {
+		$candidate.ActualHash = Get-BellaRunnerCandidateFileHash -Path $candidate.SourcePath -ExpectedName $candidate.ExpectedName -RequireExpectedName
+		if ($candidate.ActualHash -cne $candidate.ExpectedHash) {
+			throw "Local candidate SHA-256 mismatch for $($candidate.ExpectedName): expected $($candidate.ExpectedHash), found $($candidate.ActualHash). No transfer was attempted."
+		}
+	}
+
+	$stageId = [Guid]::NewGuid().ToString('N')
+	$runnerRemotePath = "$RemoteTmpPath/bella-runner-stage-$stageId-$($candidates[0].RemoteSuffix)"
+	$installerRemotePath = "$RemoteTmpPath/bella-runner-stage-$stageId-$($candidates[1].RemoteSuffix)"
+	$candidates[0] | Add-Member -NotePropertyName RemotePath -NotePropertyValue $runnerRemotePath
+	$candidates[1] | Add-Member -NotePropertyName RemotePath -NotePropertyValue $installerRemotePath
+
+	$readbackDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "bella-runner-stage-$stageId"
+	if (Test-Path -LiteralPath $readbackDirectory) { throw 'Could not allocate a unique local runner staging verification directory.' }
+	New-Item -ItemType Directory -Path $readbackDirectory -ErrorAction Stop | Out-Null
+	try {
+		foreach ($candidate in $candidates) {
+			Invoke-CheckedCommandRetry 'scp' ($ScpArguments + @($candidate.SourcePath, "$Target`:$($candidate.RemotePath)")) $WorkingDirectory
+		}
+		foreach ($candidate in $candidates) {
+			$readbackPath = Join-Path $readbackDirectory $candidate.LocalReadbackName
+			Invoke-CheckedCommandRetry 'scp' ($ScpArguments + @("$Target`:$($candidate.RemotePath)", $readbackPath)) $WorkingDirectory
+			$readbackHash = Get-BellaRunnerCandidateFileHash -Path $readbackPath -ExpectedName $candidate.LocalReadbackName
+			if ($readbackHash -cne $candidate.ExpectedHash) {
+				throw "Read-back SHA-256 mismatch for $($candidate.ExpectedName): expected $($candidate.ExpectedHash), found $readbackHash."
+			}
+		}
+	} catch {
+		throw "Bella runner staging failed. Remote candidates may remain and were not removed: $runnerRemotePath ; $installerRemotePath. Cause: $($_.Exception.Message)"
+	} finally {
+		if (Test-Path -LiteralPath $readbackDirectory) { Remove-Item -LiteralPath $readbackDirectory -Recurse -Force -ErrorAction SilentlyContinue }
+	}
+
+	Write-Host "RUNNER_REMOTE_PATH=$runnerRemotePath"
+	Write-Host "RUNNER_SHA256=$($candidates[0].ExpectedHash)"
+	Write-Host "INSTALLER_REMOTE_PATH=$installerRemotePath"
+	Write-Host "INSTALLER_SHA256=$($candidates[1].ExpectedHash)"
+	return [pscustomobject]@{
+		StageId = $stageId
+		RunnerRemotePath = $runnerRemotePath
+		RunnerSha256 = $candidates[0].ExpectedHash
+		InstallerRemotePath = $installerRemotePath
+		InstallerSha256 = $candidates[1].ExpectedHash
+	}
+}
+
+if ($StageBellaRunnerCandidate) {
+	Assert-BellaRunnerStageProfile -Configuration $DeployConfig
+	Invoke-BellaRunnerCandidateStage -RunnerCandidatePath $RunnerCandidatePath -InstallerCandidatePath $InstallerCandidatePath -RemoteTmpPath ([string]$DeployConfig.RemoteTmpPath) -Target $target -ScpArguments $scpArgs -WorkingDirectory $repoRoot | Out-Null
+	return
 }
 
 try {
@@ -318,6 +433,7 @@ try {
 		$uploadsPlan = Resolve-UploadsTransferPlan -TransferMode $UploadsTransferMode -BaselinePath $uploadsManifestState -CurrentManifest $currentUploadsManifest -ConfirmDeletes:$ConfirmUploadsDeletes -ConfirmFullSnapshot:$ConfirmUploadsFullSnapshot
 		if ($uploadsPlan.UseDelta) {
 			New-UploadsDeltaPackage -SourceDirectory $DeployConfig.LocalUploadsPath -CurrentManifest $currentUploadsManifest -BaselineManifest $uploadsPlan.Baseline -DestinationZip $uploadsDeltaZip | Out-Null
+			Convert-UploadsDeltaDeleteListToLf $uploadsDeltaZip
 			$useUploadsDelta = $true
 			$uploadsTransferKind = 'delta'
 			$comparison = $uploadsPlan.Comparison
@@ -377,6 +493,17 @@ try {
 			Assert-ZipArchiveFile $uploadsZip
 		}
 	}
+	if ($hasUploads) {
+		Write-Step 'Validate uploads package locally before transferring any payload'
+		$packageCheck = if ($useUploadsDelta) {
+			Assert-UploadsPackage -ZipPath $uploadsDeltaZip -ManifestPath $uploadsManifest -Delta -ExpectedPayload @($uploadsPlan.Comparison.Added + $uploadsPlan.Comparison.Changed) -ExpectedDeletes @($uploadsPlan.Comparison.Deleted)
+		} else { Assert-UploadsPackage -ZipPath $uploadsZip -ManifestPath $uploadsManifest }
+		$linuxArguments = @{ ZipPath=$(if ($useUploadsDelta) { $uploadsDeltaZip } else { $uploadsZip }); ManifestPath=$uploadsManifest; LogPath=(Join-Path $buildDir 'uploads-linux-validation.log'); UnzipPath=$LocalLinuxUnzipPath }
+		if ($useUploadsDelta) { $linuxArguments.Delta=$true; $linuxArguments.ExpectedPayload=@($uploadsPlan.Comparison.Added + $uploadsPlan.Comparison.Changed) }
+		Invoke-LocalLinuxUploadsCheck @linuxArguments
+		$packageCheck.LinuxUnzipVerified = $true
+		$packageCheck | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $buildDir 'uploads-local-validation.json') -Encoding UTF8
+	}
 	if ($hasDatabase -or $hasUploads) {
 		Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, "mkdir -p $(ConvertTo-ShSingleQuotedString $DeployConfig.RemoteTmpPath)")) $repoRoot
 		$remoteCleanupNeeded = $true
@@ -395,16 +522,13 @@ try {
 	$uploadsDeltaArg = if ($hasUploads -and $useUploadsDelta) { $remoteUploadsDelta } else { '' }
 	$uploadsManifestArg = if ($hasUploads) { $remoteUploadsManifest } else { '' }
 	$remoteCommand = New-RemoteDeployCommand $DeployConfig $Mode $sqlArg $uploadsArg $uploadsDeltaArg $uploadsManifestArg $selectedComponents
-	if ($hasUploads -and $useUploadsDelta) {
-		$result = Invoke-RemoteCommandCapture 'ssh' ($sshArgs + @($target, $remoteCommand)) $repoRoot
-		if ($result.ExitCode -ne 0) {
-			if ($result.Output -match 'UPLOADS_DELTA_FALLBACK_REQUIRED') {
-				throw 'Uploads deploy stopped: remote baseline is missing or drifted. Review the remote manifest and rerun an explicit full snapshot only after approval.'
-			}
-			throw "Command failed ($($result.ExitCode)): ssh"
-		}
-	} else {
-		Invoke-CheckedCommand 'ssh' ($sshArgs + @($target, $remoteCommand)) $repoRoot
+	$diagnosticDirectory = Join-Path $repoRoot '.deploy/logs'
+	New-Item -ItemType Directory -Force -Path $diagnosticDirectory | Out-Null
+	$result = Invoke-RemoteCommandCapture 'ssh' ($sshArgs + @($target, $remoteCommand)) $repoRoot
+	Save-RemoteDeploymentDiagnostic -Result $result -LogPath (Join-Path $diagnosticDirectory "remote-$stamp.log")
+	if ($result.ExitCode -ne 0) {
+		if ($result.Output -match 'UPLOADS_DELTA_FALLBACK_REQUIRED') { throw 'Uploads deploy stopped: remote baseline is missing or drifted. Review the remote manifest and rerun an explicit full snapshot only after approval.' }
+		throw "Command failed ($($result.ExitCode)): ssh; full output retained in $diagnosticDirectory"
 	}
 	$remoteCleanupNeeded = $false
 	$localArtifactsCommitted = $true

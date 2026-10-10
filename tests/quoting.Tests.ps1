@@ -49,6 +49,22 @@ Describe 'POSIX shell quoting' {
 		$command | Should Match "DEPLOY_COMPONENTS='code,db,mu-plugins'"
 	}
 
+	It 'sends all five components and their artifacts in one validated command' {
+		$config = $validConfiguration.Clone()
+		$config.PluginSyncPaths = @('wp-content/plugins/example-plugin')
+		$config.MuPluginSyncPaths = @('wp-content/mu-plugins/example-loader.php')
+		$config.AllowedDeployModes = @('preflight', 'components')
+		$command = New-RemoteDeployCommand $config 'components' '/srv/tmp/site/database.sql' '/srv/tmp/site/uploads.zip' '' '/srv/tmp/site/uploads-manifest.tsv' @('mu-plugins', 'plugins', 'uploads', 'db', 'code')
+		$command | Should Match "DEPLOY_MODE='components'"
+		$command | Should Match "DEPLOY_COMPONENTS='code,db,uploads,plugins,mu-plugins'"
+		$command | Should Match "SYNC_PATHS='wp-content/themes/example-theme'"
+		$command | Should Match "PLUGIN_SYNC_PATHS='wp-content/plugins/example-plugin'"
+		$command | Should Match "MU_PLUGIN_SYNC_PATHS='wp-content/mu-plugins/example-loader\.php'"
+		$command | Should Match "SQL_FILE='/srv/tmp/site/database\.sql'"
+		$command | Should Match "UPLOADS_ZIP='/srv/tmp/site/uploads\.zip'"
+		$command | Should Match "UPLOADS_MANIFEST_FILE='/srv/tmp/site/uploads-manifest\.tsv'"
+	}
+
 	It 'rejects unknown and duplicate explicit components' {
 		$config = $validConfiguration.Clone()
 		$config.AllowedDeployModes = @('preflight', 'components')

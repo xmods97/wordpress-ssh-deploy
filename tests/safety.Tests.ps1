@@ -20,10 +20,11 @@ Describe 'Production deployment policy' {
 	}
 
 	It 'uses explicit profile capabilities instead of a global production DB ban' {
-		$all = @('preflight', 'code', 'db', 'code-db', 'uploads', 'plugins', 'full', 'components')
-		foreach ($mode in @('db', 'code-db', 'uploads', 'plugins')) {
+		$all = @('preflight', 'code', 'db', 'code-db', 'uploads', 'plugins', 'mu-plugins', 'full', 'components')
+		foreach ($mode in @('db', 'code-db', 'uploads', 'plugins', 'mu-plugins')) {
 			{ Assert-DeployModeAllowed production $mode $false $all } | Should Not Throw
 		}
+		{ Assert-DeployModeAllowed production 'mu-plugins' $false @('preflight', 'code') } | Should Throw 'not enabled by this profile'
 		{ Assert-DeployModeAllowed production db $false @('preflight', 'code') } | Should Throw 'not enabled by this profile'
 		{ Assert-DeployModeAllowed production full $false @('preflight', 'code', 'full') } | Should Throw 'forbidden for production'
 		{ Assert-DeployModeAllowed production components $false @('preflight', 'components') } | Should Not Throw
